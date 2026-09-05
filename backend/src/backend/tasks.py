@@ -1,0 +1,707 @@
+from copy import deepcopy
+import re
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
+
+from .database import SessionLocal
+from .final_cut import invalidate_final_cut
+
+from .media import FaceReferenceImage, delete_media_file, generate_storyboard_image
+from .models import Character, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
+from .providers import get_script_provider, normalize_analysis_result
+from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
+from .screenplay_parser import parse_structured_screenplay
+from .settings import settings
+from .timeline import ensure_timeline, promote_available_clips
+from .timeline_render import assemble_timeline
+from .schemas import TimelineDocument
+from .video import generate_shot_clip as render_shot_clip
+
+
+def _planning_duration_seconds(source_text: str, parsed: dict | None, configured_target: int) -> int:
+    if configured_target > 0:
+        return configured_target
+    if parsed:
+        shots = [shot for scene in parsed.get("scenes", []) for shot in scene.get("shots", [])]
+        latest_end = max((int(shot.get("end_ms") or 0) for shot in shots), default=0)
+        if latest_end > 0:
+            return max(10, round(latest_end / 1000))
+        summed = sum(int(shot.get("duration_ms") or 0) for shot in shots)
+        if summed > 0:
+            return max(10, round(summed / 1000))
+    declared = re.search(r"(?im)^Duration:\s*(\d+)\s*(seconds?|secs?|minutes?|mins?)\b", source_text)
+    if declared:
+        seconds = int(declared.group(1)) * (60 if declared.group(2).lower().startswith("m") else 1)
+        return max(10, min(1800, seconds))
+    word_count = len(re.findall(r"\b\w+\b", source_text))
+    return max(30, min(1800, round(word_count / 2.5)))
+
+
+def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        project = db.get(Project, project_id)
+        version = db.get(ScriptVersion, version_id)
+        if not job or not project or not version:
+            return
+        try:
+            job.status = "running"
+            job.progress = 0.1
+            job.message = (
+                "Generating with local Ollama"
+                if project.text_provider == "ollama"
+                else "Reading screenplay"
+            )
+            db.commit()
+
+            provider = get_script_provider(project.text_provider)
+            parsed = parse_structured_screenplay(version.source_text)
+            planning_duration = _planning_duration_seconds(
+                version.source_text, parsed, project.target_duration_seconds
+            )
+            if parsed:
+                job.message = "Reviewing parsed shot plan"
+                db.commit()
+                review = provider.review(parsed, planning_duration)
+                parsed["suggestions"].extend(
+                    review.get("suggestions", []) if isinstance(review, dict) else []
+                )
+                result = normalize_analysis_result(
+                    parsed, planning_duration
+                )
+                result["parser"] = parsed["parser"]
+            else:
+                result = normalize_analysis_result(
+                    provider.analyze(
+                        version.source_text, planning_duration
+                    ),
+                    planning_duration,
+                )
+            job.progress = 0.55
+            job.message = "Building scenes and suggestions"
+            db.commit()
+
+            db.execute(delete(Scene).where(Scene.script_version_id == version.id))
+            db.execute(delete(Suggestion).where(Suggestion.script_version_id == version.id))
+            db.flush()
+
+            for scene_index, original_scene_data in enumerate(result.get("scenes", [])):
+                scene_data = dict(original_scene_data)
+                shot_data = scene_data.pop("shots", [])
+                scene = Scene(
+                    script_version_id=version.id,
+                    order_index=scene_index,
+                    **scene_data,
+                )
+                db.add(scene)
+                db.flush()
+                for shot_index, shot in enumerate(shot_data):
+                    db.add(
+                        Shot(
+                            scene_id=scene.id,
+                            order_index=shot.get("order_index", shot_index),
+                            title=shot.get("title", ""),
+                            start_ms=shot.get("start_ms"),
+                            end_ms=shot.get("end_ms"),
+                            action=shot.get("action", ""),
+                            dialogue=shot.get("dialogue", []),
+                            sound=shot.get("sound", ""),
+                            duration_ms=shot.get("duration_ms", 5000),
+                            framing=shot.get("framing", "Medium"),
+                            image_prompt=shot.get("image_prompt", ""),
+                            video_prompt=shot.get("video_prompt", ""),
+                            title_card_text=shot.get("title_card_text", ""),
+                        )
+                    )
+
+            for suggestion in result.get("suggestions", []):
+                db.add(Suggestion(script_version_id=version.id, **suggestion))
+
+            version.structured_data = result
+            version.status = "review"
+            project.status = "review"
+            job.status = "completed"
+            job.progress = 1
+            job.message = "Review ready"
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.message = "Script analysis failed"
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+@general_huey.task(retries=2, retry_delay=5)
+def analyze_script_general(project_id: str, version_id: str, job_id: str) -> None:
+    _analyze_script(project_id, version_id, job_id)
+
+
+@chatgpt_huey.task(retries=2, retry_delay=5)
+def analyze_script_chatgpt(project_id: str, version_id: str, job_id: str) -> None:
+    _analyze_script(project_id, version_id, job_id)
+
+
+@gemini_huey.task(retries=2, retry_delay=5)
+def analyze_script_gemini(project_id: str, version_id: str, job_id: str) -> None:
+    _analyze_script(project_id, version_id, job_id)
+
+
+def enqueue_script_analysis(
+    provider: str, project_id: str, version_id: str, job_id: str
+):
+    if provider == "chatgpt_web":
+        return analyze_script_chatgpt(project_id, version_id, job_id)
+    if provider == "gemini_web":
+        return analyze_script_gemini(project_id, version_id, job_id)
+    return analyze_script_general(project_id, version_id, job_id)
+
+
+def _continuation_context(version: ScriptVersion) -> str:
+    lines: list[str] = []
+    for scene in version.scenes:
+        characters = sorted(
+            {
+                str(line.get("character", "")).strip()
+                for line in scene.dialogue
+                if isinstance(line, dict) and line.get("character")
+            }
+        )
+        lines.append(
+            f"Scene {scene.order_index + 1}: {scene.title}; "
+            f"location {scene.location}; characters {', '.join(characters) or 'none'}; "
+            f"action {scene.action[:500]}"
+        )
+    return "\n".join(lines)[-6000:]
+
+
+def _offset_continuation(result: dict, cursor_ms: int, scene_offset: int) -> dict:
+    scenes = result.get("scenes", [])
+    supplied_starts = [
+        value
+        for scene in scenes
+        for value in [scene.get("start_ms")]
+        if isinstance(value, int)
+    ]
+    first_start = min(supplied_starts, default=0)
+    shift = 0 if first_start >= cursor_ms else cursor_ms - first_start
+    for scene in scenes:
+        if isinstance(scene.get("start_ms"), int):
+            scene["start_ms"] += shift
+        if isinstance(scene.get("end_ms"), int):
+            scene["end_ms"] += shift
+        for shot in scene.get("shots", []):
+            if isinstance(shot.get("start_ms"), int):
+                shot["start_ms"] += shift
+            if isinstance(shot.get("end_ms"), int):
+                shot["end_ms"] += shift
+    for suggestion in result.get("suggestions", []):
+        target = suggestion.get("target")
+        if isinstance(target, dict) and isinstance(target.get("scene_index"), int):
+            target["scene_index"] += scene_offset
+    return result
+
+
+def _analyze_continuation(
+    project_id: str,
+    job_id: str,
+    source_text: str,
+    target_duration_seconds: int,
+) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        project = db.get(Project, project_id)
+        version = db.scalar(
+            select(ScriptVersion)
+            .where(ScriptVersion.project_id == project_id)
+            .order_by(ScriptVersion.version_number.desc())
+        )
+        if not job or not project or not version:
+            return
+        try:
+            job.status = "running"
+            job.progress = 0.1
+            job.message = "Reading screenplay continuation"
+            db.commit()
+
+            provider = get_script_provider(project.text_provider)
+            parsed = parse_structured_screenplay(source_text)
+            if parsed:
+                job.message = "Reviewing continuation shot plan"
+                db.commit()
+                review = provider.review(parsed, target_duration_seconds)
+                parsed["suggestions"].extend(
+                    review.get("suggestions", []) if isinstance(review, dict) else []
+                )
+                result = normalize_analysis_result(parsed, target_duration_seconds)
+                result["parser"] = parsed["parser"]
+            else:
+                context = _continuation_context(version)
+                provider_source = source_text
+                if project.text_provider != "mock" and context:
+                    provider_source = f"""Continue an existing screenplay. Return only NEW scenes and shots; do not repeat the existing story.
+
+EXISTING STORY CONTEXT:
+{context}
+
+NEW SCREENPLAY CONTINUATION:
+{source_text}"""
+                result = normalize_analysis_result(
+                    provider.analyze(provider_source, target_duration_seconds),
+                    target_duration_seconds,
+                )
+            if not result.get("scenes"):
+                raise RuntimeError("The continuation did not produce any scenes")
+
+            existing_scenes = list(version.scenes)
+            cursor_ms = max(
+                [
+                    value
+                    for scene in existing_scenes
+                    for value in [scene.end_ms, *(shot.end_ms for shot in scene.shots)]
+                    if isinstance(value, int)
+                ],
+                default=sum(shot.duration_ms for scene in existing_scenes for shot in scene.shots),
+            )
+            result = _offset_continuation(result, cursor_ms, len(existing_scenes))
+            job.progress = 0.6
+            job.message = "Appending new scenes"
+            db.commit()
+
+            combined = deepcopy(version.structured_data or {})
+            combined.setdefault("scenes", [])
+            combined["scenes"].extend(result.get("scenes", []))
+            combined["parser"] = result.get("parser", "continuation")
+            version.structured_data = combined
+            flag_modified(version, "structured_data")
+            version.source_text = f"{version.source_text.rstrip()}\n\n{source_text.strip()}"
+            version.status = "continuation_review"
+
+            for relative_index, original_scene_data in enumerate(result.get("scenes", [])):
+                scene_data = dict(original_scene_data)
+                shot_data = scene_data.pop("shots", [])
+                scene = Scene(
+                    script_version_id=version.id,
+                    order_index=len(existing_scenes) + relative_index,
+                    **scene_data,
+                )
+                db.add(scene)
+                db.flush()
+                for shot_index, shot in enumerate(shot_data):
+                    db.add(
+                        Shot(
+                            scene_id=scene.id,
+                            order_index=shot.get("order_index", shot_index),
+                            title=shot.get("title", ""),
+                            start_ms=shot.get("start_ms"),
+                            end_ms=shot.get("end_ms"),
+                            action=shot.get("action", ""),
+                            dialogue=shot.get("dialogue", []),
+                            sound=shot.get("sound", ""),
+                            duration_ms=shot.get("duration_ms", 5000),
+                            framing=shot.get("framing", "Medium"),
+                            image_prompt=shot.get("image_prompt", ""),
+                            video_prompt=shot.get("video_prompt", ""),
+                            title_card_text=shot.get("title_card_text", ""),
+                        )
+                    )
+            for suggestion in result.get("suggestions", []):
+                db.add(Suggestion(script_version_id=version.id, **suggestion))
+
+            if project.target_duration_seconds > 0:
+                project.target_duration_seconds += target_duration_seconds
+            project.status = "review"
+            job.status = "completed"
+            job.progress = 1
+            job.message = "Continuation ready for review"
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.message = "Continuation analysis failed"
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+@general_huey.task(retries=2, retry_delay=5)
+def analyze_continuation_general(project_id: str, job_id: str, source_text: str, target_duration_seconds: int) -> None:
+    _analyze_continuation(project_id, job_id, source_text, target_duration_seconds)
+
+
+@chatgpt_huey.task(retries=2, retry_delay=5)
+def analyze_continuation_chatgpt(project_id: str, job_id: str, source_text: str, target_duration_seconds: int) -> None:
+    _analyze_continuation(project_id, job_id, source_text, target_duration_seconds)
+
+
+@gemini_huey.task(retries=2, retry_delay=5)
+def analyze_continuation_gemini(project_id: str, job_id: str, source_text: str, target_duration_seconds: int) -> None:
+    _analyze_continuation(project_id, job_id, source_text, target_duration_seconds)
+
+
+def enqueue_script_continuation(provider: str, project_id: str, job_id: str, source_text: str, target_duration_seconds: int):
+    if provider == "chatgpt_web":
+        return analyze_continuation_chatgpt(project_id, job_id, source_text, target_duration_seconds)
+    if provider == "gemini_web":
+        return analyze_continuation_gemini(project_id, job_id, source_text, target_duration_seconds)
+    return analyze_continuation_general(project_id, job_id, source_text, target_duration_seconds)
+
+
+def _generate_shot_image(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    character_ids: list[str] | None = None,
+) -> None:
+    with SessionLocal() as db:
+        generated_filename = None
+        job = db.get(Job, job_id)
+        shot = db.get(Shot, shot_id)
+        if not job or not shot:
+            return
+        try:
+            job.status = "running"
+            job.progress = 0.15
+            job.message = "Rendering storyboard frame"
+            db.commit()
+
+            project = shot.scene.script_version.project
+            target_aspect = aspect_ratio or project.aspect_ratio
+            prompt = (prompt_override or shot.image_prompt).strip()
+            references: list[FaceReferenceImage] = []
+            selected_ids = list(dict.fromkeys(character_ids or []))
+            if selected_ids:
+                characters = db.scalars(
+                    select(Character)
+                    .where(
+                        Character.project_id == project.id,
+                        Character.id.in_(selected_ids),
+                    )
+                    .options(selectinload(Character.references))
+                ).all()
+                by_id = {character.id: character for character in characters}
+                for character_id in selected_ids:
+                    character = by_id.get(character_id)
+                    if not character:
+                        continue
+                    for ref in character.references:
+                        path = settings.media_dir / ref.filename
+                        if not path.is_file():
+                            continue
+                        references.append(
+                            FaceReferenceImage(
+                                character_name=character.name,
+                                mime_type=ref.mime_type,
+                                data=path.read_bytes(),
+                            )
+                        )
+                if not references:
+                    raise RuntimeError("Selected cast characters have no usable reference images on disk")
+
+            def report_progress(update: dict) -> None:
+                provider = str(update.get("provider") or "")
+                phase = str(update.get("phase") or "generating")
+                labels = {"chatgpt_web": "ChatGPT Web", "gemini_web": "Gemini Web"}
+                messages = {
+                    "submitting": f"Submitting to {labels.get(provider, provider)}",
+                    "generating": f"Generating with {labels.get(provider, provider)}",
+                    "downloading": "Downloading generated image",
+                    "saving": "Saving storyboard image",
+                    "failed": f"{labels.get(provider, provider)} attempt failed",
+                }
+                job.provider = provider or job.provider
+                job.provider_phase = phase
+                job.message = str(update.get("message") or messages.get(phase, "Rendering storyboard frame"))
+                if update.get("conversation_url"):
+                    job.conversation_url = str(update["conversation_url"])
+                attempts = deepcopy(job.attempts or [])
+                attempt = next((item for item in attempts if item.get("provider") == provider), None)
+                values = {key: update[key] for key in ("provider", "phase", "error", "failure_category", "conversation_url") if update.get(key)}
+                if attempt:
+                    attempt.update(values)
+                elif provider:
+                    attempts.append(values)
+                job.attempts = attempts
+                db.commit()
+
+            filename, mime_type, provider = generate_storyboard_image(
+                prompt,
+                shot.scene.title,
+                shot.framing,
+                target_aspect,
+                progress=report_progress,
+                references=references,
+            )
+            generated_filename = filename
+            variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
+            use_legacy = target_aspect == project.aspect_ratio
+            previous_filename = (shot.image.filename if shot.image else None) if use_legacy else (variant.filename if variant else None)
+            final_cut_filename = invalidate_final_cut(project, db)
+            if use_legacy and shot.image:
+                shot.image.filename = filename
+                shot.image.mime_type = mime_type
+                shot.image.source = "generated"
+                shot.image.provider = provider
+                shot.image.prompt = prompt
+                shot.image.created_at = now()
+            elif use_legacy:
+                db.add(
+                    ShotImage(
+                        shot_id=shot.id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="generated",
+                        provider=provider,
+                        prompt=prompt,
+                    )
+                )
+            elif variant:
+                variant.filename = filename
+                variant.mime_type = mime_type
+                variant.source = "generated"
+                variant.provider = provider
+                variant.prompt = prompt
+                variant.created_at = now()
+            else:
+                db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=prompt))
+            if project.timeline and not promote_available_clips(project, db):
+                project.timeline.revision += 1
+            shot.status = "image_ready"
+            job.status = "completed"
+            job.provider_phase = "completed"
+            job.progress = 1
+            job.message = "Storyboard ready"
+            db.commit()
+            generated_filename = None
+            if previous_filename != filename:
+                delete_media_file(previous_filename)
+            delete_media_file(final_cut_filename)
+        except Exception as exc:
+            db.rollback()
+            delete_media_file(generated_filename)
+            job = db.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.provider_phase = "failed"
+                job.message = (
+                    "Clarify character ages and retry"
+                    if "safety system could not verify" in str(exc)
+                    else "Storyboard generation failed"
+                )
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+@image_huey.task()
+def generate_shot_image_worker(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    character_ids: list[str] | None = None,
+) -> None:
+    _generate_shot_image(shot_id, job_id, aspect_ratio, prompt_override, character_ids)
+
+
+def enqueue_shot_image(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    character_ids: list[str] | None = None,
+):
+    return generate_shot_image_worker(shot_id, job_id, aspect_ratio, prompt_override, character_ids)
+
+
+def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        shot = db.get(Shot, shot_id)
+        if not job or not shot:
+            return
+        try:
+            job.status = "running"
+            job.progress = 0.1
+            job.message = "Sending shot to ComfyUI"
+            db.commit()
+
+            project = shot.scene.script_version.project
+            target_aspect = aspect_ratio or project.aspect_ratio
+            image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
+            source_image = shot.image if target_aspect == project.aspect_ratio and shot.image else image_variant or shot.image
+            if not source_image:
+                raise RuntimeError("Generate or upload a shot image first")
+            base_prompt = (prompt_override or shot.video_prompt).strip()
+            if target_aspect == "9:16" and not prompt_override:
+                base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
+            effective_prompt = compose_video_prompt(base_prompt, shot.sound)
+            filename, mime_type, provider = render_shot_clip(
+                settings.media_dir / source_image.filename,
+                effective_prompt,
+                shot.duration_ms,
+                target_aspect,
+            )
+            variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
+            use_legacy = target_aspect == project.aspect_ratio
+            previous_filename = (shot.clip.filename if shot.clip else None) if use_legacy else (variant.filename if variant else None)
+            final_cut_filename = invalidate_final_cut(project, db)
+            if use_legacy and shot.clip:
+                shot.clip.filename = filename
+                shot.clip.mime_type = mime_type
+                shot.clip.source = "generated"
+                shot.clip.provider = provider
+                shot.clip.prompt = effective_prompt
+            elif use_legacy:
+                db.add(
+                    ShotClip(
+                        shot_id=shot.id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="generated",
+                        provider=provider,
+                        prompt=effective_prompt,
+                    )
+                )
+            elif variant:
+                variant.filename = filename
+                variant.mime_type = mime_type
+                variant.source = "generated"
+                variant.provider = provider
+                variant.prompt = effective_prompt
+                variant.created_at = now()
+            else:
+                db.add(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
+            if project.timeline and not promote_available_clips(project, db):
+                project.timeline.revision += 1
+            shot.status = "clip_ready"
+            job.status = "completed"
+            job.progress = 1
+            job.message = "Shot clip ready"
+            db.commit()
+            if previous_filename != filename:
+                delete_media_file(previous_filename)
+            delete_media_file(final_cut_filename)
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.message = "Video generation failed"
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+def compose_video_prompt(prompt: str, sound: str) -> str:
+    prompt = prompt.strip()
+    sound = sound.strip()
+    if not sound or sound in prompt:
+        return prompt
+    return f"{prompt}\n\nAudio direction: {sound}"
+
+
+@video_huey.task()
+def generate_shot_clip_comfy(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+
+
+def enqueue_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None):
+    return generate_shot_clip_comfy(shot_id, job_id, aspect_ratio, prompt_override)
+
+
+def _render_project_final_cut(project_id: str, job_id: str, variant: str = "landscape") -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        project = db.get(Project, project_id)
+        if not job or not project:
+            return
+        try:
+            job.status = "running"
+            job.progress = 0.05
+            job.message = "Preparing the edit timeline"
+            db.commit()
+
+            timeline = ensure_timeline(project, db)
+            promote_available_clips(project, db)
+            document = TimelineDocument.model_validate(timeline.document)
+
+            def update_progress(completed: int, total: int) -> None:
+                job.progress = 0.1 + (completed / total) * 0.8
+                job.message = f"Rendering shot {completed} of {total}"
+                db.commit()
+
+            result = assemble_timeline(project, document, variant, db, update_progress)
+            export = db.scalar(select(ProjectVariantExport).where(ProjectVariantExport.project_id == project.id, ProjectVariantExport.variant == variant))
+            previous_filename = export.filename if export else None
+            if export:
+                export.filename = result.filename
+                export.duration_ms = result.duration_ms
+                export.width = result.width
+                export.height = result.height
+                export.clip_count = result.clip_count
+                export.fallback_count = result.fallback_count
+                export.timeline_revision = timeline.revision
+                export.created_at = now()
+            else:
+                db.add(
+                    ProjectVariantExport(
+                        project_id=project.id,
+                        variant=variant,
+                        filename=result.filename,
+                        duration_ms=result.duration_ms,
+                        width=result.width,
+                        height=result.height,
+                        clip_count=result.clip_count,
+                        fallback_count=result.fallback_count,
+                        timeline_revision=timeline.revision,
+                    )
+                )
+            job.status = "completed"
+            job.progress = 1
+            job.message = "Final cut ready"
+            db.commit()
+            if previous_filename != result.filename:
+                delete_media_file(previous_filename)
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.message = "Final cut render failed"
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+@video_huey.task()
+def render_project_final_cut(project_id: str, job_id: str, variant: str = "landscape") -> None:
+    _render_project_final_cut(project_id, job_id, variant)
+
+
+def enqueue_final_cut(project_id: str, job_id: str, variant: str = "landscape"):
+    return render_project_final_cut(project_id, job_id, variant)
+
+
+# Preserve task names stored by the original single queue and forward them once.
+@general_huey.task()
+def analyze_script(project_id: str, version_id: str, job_id: str) -> None:
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project:
+            enqueue_script_analysis(
+                project.text_provider, project_id, version_id, job_id
+            )
+
+
+@general_huey.task()
+def generate_shot_image(shot_id: str, job_id: str) -> None:
+    enqueue_shot_image(shot_id, job_id)

@@ -1,0 +1,34 @@
+services:
+  gemini-web:
+    build:
+      context: ./gemini-web-to-api
+    image: cutline/gemini-web-to-api:local
+    container_name: cutline-gemini-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4981:4981"
+    env_file:
+      - .env
+    environment:
+      PORT: 4981
+      APP_ENV: production
+      GEMINI_REFRESH_INTERVAL: ${GEMINI_REFRESH_INTERVAL:-30}
+      GEMINI_MAX_RETRIES: ${GEMINI_MAX_RETRIES:-3}
+      GEMINI_TEMPORARY: ${GEMINI_TEMPORARY:-true}
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX_REQUESTS: 30
+    volumes:
+      - gemini-cookies:/home/appuser/.cookies
+    tmpfs:
+      - /tmp
+      - /home/appuser/.cache
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:4981/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  gemini-cookies:
