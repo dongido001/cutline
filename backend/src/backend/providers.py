@@ -19,6 +19,28 @@ class ScriptProvider(ABC):
         return {"suggestions": []}
 
 
+def loads_model_json(content: str) -> dict[str, Any]:
+    """Parse model JSON, tolerating fences and leading/trailing prose."""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("Model returned an empty response")
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        raise ValueError("Model response did not contain a JSON object")
+    parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("Model JSON root must be an object")
+    return parsed
+
+
 def _as_int(value: Any, default: int) -> int:
     if isinstance(value, bool):
         return default
@@ -346,7 +368,7 @@ SCREENPLAY:\n{script}"""
             timeout=180,
         )
         response.raise_for_status()
-        return json.loads(response.json()["message"]["content"])
+        return loads_model_json(response.json()["message"]["content"])
 
     def review(
         self, structured_script: dict[str, Any], target_duration_seconds: int
@@ -380,7 +402,7 @@ PARSED SHOT PLAN:
             timeout=180,
         )
         response.raise_for_status()
-        return json.loads(response.json()["message"]["content"])
+        return loads_model_json(response.json()["message"]["content"])
 
 
 class CompatibleScriptProvider(ScriptProvider):
@@ -426,9 +448,7 @@ Timing reference: approximately {target_duration_seconds} seconds. This is guida
             timeout=180,
         )
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(content)
+        return loads_model_json(response.json()["choices"][0]["message"]["content"])
 
     def review(
         self, structured_script: dict[str, Any], target_duration_seconds: int
@@ -463,9 +483,7 @@ Timing reference: approximately {target_duration_seconds} seconds. This is guida
             timeout=180,
         )
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(content)
+        return loads_model_json(response.json()["choices"][0]["message"]["content"])
 
 
 def get_script_provider(provider_id: str | None = None) -> ScriptProvider:

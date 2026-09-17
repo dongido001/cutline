@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type AspectRatio, type OutputVariant, type ProjectDetail, type ProjectTimeline, type Shot, type TimelineGeometry, type TimelinePrimaryItem, type TimelineSource } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
-import { AlignCenter, Download, ImagePlus, LoaderCircle, MoveLeft, MoveRight, Pause, Play, Redo2, RefreshCw, Save, Scissors, Split, Trash2, Type, Undo2, Upload } from '@lucide/vue'
+import { AlignCenter, Download, ImagePlus, LoaderCircle, MoveLeft, MoveRight, Pause, Play, Redo2, RefreshCw, Save, Scissors, Split, Trash2, Type, Undo2, Upload, X } from '@lucide/vue'
 
 const props = defineProps<{ project: ProjectDetail; shots: Shot[] }>()
 const emit = defineEmits<{ variantChange: [variant: OutputVariant] }>()
@@ -126,7 +126,7 @@ async function loadTimeline() {
   loading.value = true
   localError.value = ''
   try {
-    timeline.value = await api.timeline(props.project.id)
+    timeline.value = await api.timeline(props.project.id, variant.value)
     const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
     const requestedIndex = trimShot ? timeline.value.document.primary.findIndex((item) => item.source?.ref_id === trimShot && item.kind === 'video') : -1
     const initialIndex = requestedIndex >= 0 ? requestedIndex : 0
@@ -183,7 +183,7 @@ async function saveTimeline() {
   saving.value = true
   saveState.value = 'Saving...'
   try {
-    timeline.value = await api.saveTimeline(props.project.id, timeline.value)
+    timeline.value = await api.saveTimeline(props.project.id, timeline.value, variant.value)
     saveState.value = 'Saved'
     await store.loadProject(props.project.id)
   } catch (cause) {
@@ -552,8 +552,8 @@ watch(() => props.project.id, loadTimeline)
 watch(variant, () => {
   stopPlayback()
   emit('variantChange', variant.value)
-  void startActiveVideo()
-}, { immediate: true })
+  void loadTimeline().then(() => startActiveVideo())
+})
 watch(activeIndex, () => void startActiveVideo())
 onMounted(loadTimeline)
 onBeforeUnmount(() => {
@@ -573,6 +573,14 @@ onBeforeUnmount(() => {
         </div>
         <button class="secondary-button" :disabled="saving" @click="saveTimeline"><Save :size="15" />Save</button>
         <button class="primary-button" :disabled="store.renderingFinalCut || !timeline" @click="renderVariant"><LoaderCircle v-if="store.renderingFinalCut" class="spin" :size="15" /><RefreshCw v-else :size="15" />{{ variantExport ? 'Render again' : 'Render' }}</button>
+        <button
+          v-if="store.renderingFinalCut && store.finalCutJob && (store.finalCutJob.status === 'queued' || store.finalCutJob.status === 'running')"
+          class="secondary-button"
+          :disabled="store.isCancellingJob(store.finalCutJob.id)"
+          @click="store.cancelJob(store.finalCutJob.id)"
+        >
+          <X :size="14" />{{ store.isCancellingJob(store.finalCutJob.id) ? 'Cancelling…' : 'Cancel' }}
+        </button>
         <a v-if="variantExport" class="secondary-button" :href="variantExport.url" :download="`${project.title}-${variant}.mp4`"><Download :size="15" />MP4</a>
       </div>
     </header>

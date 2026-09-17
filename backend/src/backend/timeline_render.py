@@ -21,10 +21,14 @@ from .schemas import (
 from .settings import settings
 
 
-VARIANTS = {
-    "landscape": ("16:9", 1280, 720),
-    "shorts": ("9:16", 720, 1280),
-}
+def export_variants() -> dict[str, tuple[str, int, int]]:
+    return {
+        "landscape": ("16:9", settings.export_width_landscape, settings.export_height_landscape),
+        "shorts": ("9:16", settings.export_width_shorts, settings.export_height_shorts),
+    }
+
+
+VARIANTS = export_variants()
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ class ResolvedMedia:
     is_clip: bool
     aspect_ratio: str
     native: bool
+    dialogue_audio: Path | None = None
 
 
 def _legacy_media(shot: Shot, kind: str):
@@ -100,7 +105,18 @@ def resolve_source(
     media = resolve_shot_media(shot, source.kind, desired_aspect, geometry.source_aspect)
     if not media or not media.path.is_file():
         raise RuntimeError(f"{shot.title or 'A shot'} has no usable media")
-    return media
+    dialogue = None
+    if shot.dialogue_audio_filename:
+        candidate = settings.media_dir / shot.dialogue_audio_filename
+        if candidate.is_file():
+            dialogue = candidate
+    return ResolvedMedia(
+        path=media.path,
+        is_clip=media.is_clip,
+        aspect_ratio=media.aspect_ratio,
+        native=media.native,
+        dialogue_audio=dialogue,
+    )
 
 
 def _geometry(item, variant: str) -> TimelineVariantGeometry:
@@ -155,9 +171,17 @@ def _normalize_primary(
         f"trim=duration={duration}[v]"
     )
     has_audio = media.is_clip and _has_audio(media.path)
+    dialogue = media.dialogue_audio if media.dialogue_audio and media.dialogue_audio.is_file() else None
     if has_audio:
         audio = (
             f";[0:a]atrim=start={trim_start}:duration={duration},asetpts=PTS-STARTPTS,"
+            f"aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration={duration}[a]"
+        )
+        audio_map = ["-map", "[a]"]
+    elif dialogue:
+        command.extend(["-i", str(dialogue)])
+        audio = (
+            f";[2:a]atrim=duration={duration},asetpts=PTS-STARTPTS,"
             f"aformat=sample_rates=48000:channel_layouts=stereo,apad,atrim=duration={duration}[a]"
         )
         audio_map = ["-map", "[a]"]
@@ -323,7 +347,7 @@ def assemble_timeline(
     db: Session,
     progress: Callable[[int, int], None] | None = None,
 ) -> FinalCutResult:
-    desired_aspect, width, height = VARIANTS[variant]
+    desired_aspect, width, height = export_variants()[variant]
     filename = f"final-cut-{variant}-{uuid.uuid4()}.mp4"
     output = settings.media_dir / filename
     clip_count = 0

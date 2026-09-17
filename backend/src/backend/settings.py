@@ -29,11 +29,25 @@ class Settings(BaseSettings):
     chatgpt_web_base_url: str = "http://127.0.0.1:8791/v1"
     chatgpt_web_model: str = "chatgpt-5.6-sol-high-web"
     chatgpt_web_api_key: str = ""
-    video_provider: str = "comfyui"
+    video_provider: str = "runway"
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_workflow_path: Path = BACKEND_ROOT / "data" / "comfyui_i2v_workflow.json"
     comfyui_timeout_seconds: int = 1800
     video_fps: int = 16
+    runway_api_key: str = ""
+    runway_model: str = "gen4.5"
+    runway_ratio_landscape: str = "1280:720"
+    runway_ratio_portrait: str = "720:1280"
+    runway_timeout_seconds: int = 900
+    vibevoice_root: Path = Path("/Users/gideon/Projects/VibeVoice")
+    vibevoice_model: str = "microsoft/VibeVoice-1.5B"
+    vibevoice_python: str = "python"
+    vibevoice_mode: str = "subprocess"
+    vibevoice_timeout_seconds: int = 600
+    export_width_landscape: int = 1920
+    export_height_landscape: int = 1080
+    export_width_shorts: int = 1080
+    export_height_shorts: int = 1920
 
     @property
     def database_url(self) -> str:

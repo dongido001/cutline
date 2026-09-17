@@ -67,6 +67,22 @@ class ShotClipRead(ShotImageRead):
     pass
 
 
+class ShotTakeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    media_type: Literal["image", "clip", "audio"]
+    aspect_ratio: str
+    url: str
+    mime_type: str
+    source: str
+    provider: str
+    prompt: str
+    settings: dict[str, Any] = {}
+    selected: bool
+    created_at: datetime
+
+
 class ShotRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -83,10 +99,17 @@ class ShotRead(BaseModel):
     image_prompt: str
     video_prompt: str
     title_card_text: str
+    character_ids: list[str] = []
     status: str
+    selected_image_take_id: str | None = None
+    selected_clip_take_id: str | None = None
+    selected_audio_take_id: str | None = None
+    dialogue_audio_filename: str | None = None
+    dialogue_audio_mime: str | None = None
     image: ShotImageRead | None = None
     clip: ShotClipRead | None = None
     media_variants: list[ShotMediaVariantRead] = []
+    takes: list[ShotTakeRead] = []
 
 
 class ShotUpdate(BaseModel):
@@ -95,6 +118,14 @@ class ShotUpdate(BaseModel):
     image_prompt: str = Field(min_length=1, max_length=8000)
     video_prompt: str = Field(default="", max_length=8000)
     title_card_text: str = Field(default="", max_length=500)
+    character_ids: list[str] | None = None
+
+
+class SceneUpdate(BaseModel):
+    set_notes: str = Field(default="", max_length=4000)
+    lighting_notes: str = Field(default="", max_length=4000)
+    wardrobe_notes: str = Field(default="", max_length=4000)
+    props_notes: str = Field(default="", max_length=4000)
 
 
 class SceneRead(BaseModel):
@@ -109,7 +140,20 @@ class SceneRead(BaseModel):
     end_ms: int | None
     action: str
     dialogue: list[dict[str, Any]]
+    set_notes: str = ""
+    lighting_notes: str = ""
+    wardrobe_notes: str = ""
+    props_notes: str = ""
     shots: list[ShotRead] = []
+
+
+class CreateDraftRequest(BaseModel):
+    variant: Literal["landscape", "shorts"] = "landscape"
+    retry_failed_only: bool = False
+
+
+class TakeSelectRequest(BaseModel):
+    take_id: str
 
 
 class SuggestionRead(BaseModel):
@@ -241,6 +285,7 @@ class TimelineDocument(BaseModel):
 class TimelineUpdate(BaseModel):
     revision: int = Field(ge=1)
     document: TimelineDocument
+    edit: Literal["landscape", "shorts"] = "landscape"
 
 
 class TimelineAssetRead(BaseModel):
@@ -256,6 +301,7 @@ class TimelineAssetRead(BaseModel):
 class ProjectTimelineRead(BaseModel):
     revision: int
     document: TimelineDocument
+    edit: Literal["landscape", "shorts"] = "landscape"
     assets: list[TimelineAssetRead] = []
 
 

@@ -5,11 +5,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
+from .cast import cast_portrait_prompt, sync_project_cast
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
+from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
 from .media import FaceReferenceImage, delete_media_file, generate_storyboard_image
-from .models import Character, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
+from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
 from .providers import get_script_provider, normalize_analysis_result
 from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
 from .screenplay_parser import parse_structured_screenplay
@@ -18,6 +20,27 @@ from .timeline import ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .schemas import TimelineDocument
 from .video import generate_shot_clip as render_shot_clip
+from uuid import uuid4
+from pathlib import Path
+import shutil
+
+SCENE_PERSIST_FIELDS = {
+    "title",
+    "location",
+    "time_of_day",
+    "start_ms",
+    "end_ms",
+    "action",
+    "dialogue",
+    "set_notes",
+    "lighting_notes",
+    "wardrobe_notes",
+    "props_notes",
+}
+
+
+def _scene_kwargs(scene_data: dict) -> dict:
+    return {key: scene_data[key] for key in SCENE_PERSIST_FIELDS if key in scene_data}
 
 
 def _planning_duration_seconds(source_text: str, parsed: dict | None, configured_target: int) -> int:
@@ -46,7 +69,10 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
         version = db.get(ScriptVersion, version_id)
         if not job or not project or not version:
             return
+        if job.status == "cancelled":
+            return
         try:
+            raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.1
             job.message = (
@@ -61,6 +87,7 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
             planning_duration = _planning_duration_seconds(
                 version.source_text, parsed, project.target_duration_seconds
             )
+            raise_if_cancelled(db, job_id)
             if parsed:
                 job.message = "Reviewing parsed shot plan"
                 db.commit()
@@ -79,6 +106,7 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
                     ),
                     planning_duration,
                 )
+            raise_if_cancelled(db, job_id)
             job.progress = 0.55
             job.message = "Building scenes and suggestions"
             db.commit()
@@ -93,7 +121,7 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
                 scene = Scene(
                     script_version_id=version.id,
                     order_index=scene_index,
-                    **scene_data,
+                    **_scene_kwargs(scene_data),
                 )
                 db.add(scene)
                 db.flush()
@@ -119,16 +147,22 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
             for suggestion in result.get("suggestions", []):
                 db.add(Suggestion(script_version_id=version.id, **suggestion))
 
+            raise_if_cancelled(db, job_id)
             version.structured_data = result
             version.status = "review"
             project.status = "review"
+            sync_project_cast(project, db, source_text=version.source_text, tag_shots=True)
             job.status = "completed"
             job.progress = 1
             job.message = "Review ready"
             db.commit()
+        except JobCancelled:
+            return
         except Exception as exc:
             db.rollback()
             job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
             if job:
                 job.status = "failed"
                 job.message = "Script analysis failed"
@@ -223,7 +257,10 @@ def _analyze_continuation(
         )
         if not job or not project or not version:
             return
+        if job.status == "cancelled":
+            return
         try:
+            raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.1
             job.message = "Reading screenplay continuation"
@@ -231,6 +268,7 @@ def _analyze_continuation(
 
             provider = get_script_provider(project.text_provider)
             parsed = parse_structured_screenplay(source_text)
+            raise_if_cancelled(db, job_id)
             if parsed:
                 job.message = "Reviewing continuation shot plan"
                 db.commit()
@@ -288,7 +326,7 @@ NEW SCREENPLAY CONTINUATION:
                 scene = Scene(
                     script_version_id=version.id,
                     order_index=len(existing_scenes) + relative_index,
-                    **scene_data,
+                    **_scene_kwargs(scene_data),
                 )
                 db.add(scene)
                 db.flush()
@@ -315,14 +353,20 @@ NEW SCREENPLAY CONTINUATION:
 
             if project.target_duration_seconds > 0:
                 project.target_duration_seconds += target_duration_seconds
+            raise_if_cancelled(db, job_id)
             project.status = "review"
+            sync_project_cast(project, db, source_text=version.source_text, tag_shots=True)
             job.status = "completed"
             job.progress = 1
             job.message = "Continuation ready for review"
             db.commit()
+        except JobCancelled:
+            return
         except Exception as exc:
             db.rollback()
             job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
             if job:
                 job.status = "failed"
                 job.message = "Continuation analysis failed"
@@ -367,7 +411,10 @@ def _generate_shot_image(
         shot = db.get(Shot, shot_id)
         if not job or not shot:
             return
+        if job.status == "cancelled":
+            return
         try:
+            raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.15
             job.message = "Rendering storyboard frame"
@@ -375,7 +422,9 @@ def _generate_shot_image(
 
             project = shot.scene.script_version.project
             target_aspect = aspect_ratio or project.aspect_ratio
-            prompt = (prompt_override or shot.image_prompt).strip()
+            from .takes import continuity_prompt_suffix, record_take
+
+            prompt = (prompt_override or shot.image_prompt).strip() + continuity_prompt_suffix(shot.scene)
             references: list[FaceReferenceImage] = []
             selected_ids = list(dict.fromkeys(character_ids or []))
             if selected_ids:
@@ -407,6 +456,7 @@ def _generate_shot_image(
                     raise RuntimeError("Selected cast characters have no usable reference images on disk")
 
             def report_progress(update: dict) -> None:
+                raise_if_cancelled(db, job_id)
                 provider = str(update.get("provider") or "")
                 phase = str(update.get("phase") or "generating")
                 labels = {"chatgpt_web": "ChatGPT Web", "gemini_web": "Gemini Web"}
@@ -423,13 +473,23 @@ def _generate_shot_image(
                 if update.get("conversation_url"):
                     job.conversation_url = str(update["conversation_url"])
                 attempts = deepcopy(job.attempts or [])
-                attempt = next((item for item in attempts if item.get("provider") == provider), None)
+                meta = [
+                    item
+                    for item in attempts
+                    if isinstance(item, dict)
+                    and (item.get("shot_id") or item.get("character_id") or item.get("character_ids"))
+                    and not item.get("provider")
+                ]
+                provider_attempts = [
+                    item for item in attempts if isinstance(item, dict) and item.get("provider")
+                ]
+                attempt = next((item for item in provider_attempts if item.get("provider") == provider), None)
                 values = {key: update[key] for key in ("provider", "phase", "error", "failure_category", "conversation_url") if update.get(key)}
                 if attempt:
                     attempt.update(values)
                 elif provider:
-                    attempts.append(values)
-                job.attempts = attempts
+                    provider_attempts.append(values)
+                job.attempts = meta + provider_attempts
                 db.commit()
 
             filename, mime_type, provider = generate_storyboard_image(
@@ -472,8 +532,20 @@ def _generate_shot_image(
                 variant.created_at = now()
             else:
                 db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=prompt))
+            record_take(
+                db,
+                shot,
+                media_type="image",
+                aspect_ratio=target_aspect,
+                filename=filename,
+                mime_type=mime_type,
+                source="generated",
+                provider=provider,
+                prompt=prompt,
+            )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
+            raise_if_cancelled(db, job_id)
             shot.status = "image_ready"
             job.status = "completed"
             job.provider_phase = "completed"
@@ -484,10 +556,15 @@ def _generate_shot_image(
             if previous_filename != filename:
                 delete_media_file(previous_filename)
             delete_media_file(final_cut_filename)
+        except JobCancelled:
+            delete_media_file(generated_filename)
+            return
         except Exception as exc:
             db.rollback()
             delete_media_file(generated_filename)
             job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
             if job:
                 job.status = "failed"
                 job.provider_phase = "failed"
@@ -522,16 +599,140 @@ def enqueue_shot_image(
     return generate_shot_image_worker(shot_id, job_id, aspect_ratio, prompt_override, character_ids)
 
 
+def _generate_cast_reference(character_id: str, job_id: str, look: str | None = None) -> None:
+    with SessionLocal() as db:
+        generated_filename = None
+        job = db.get(Job, job_id)
+        character = db.scalar(
+            select(Character)
+            .where(Character.id == character_id)
+            .options(selectinload(Character.references))
+        )
+        if not job or not character:
+            return
+        if job.status == "cancelled":
+            return
+        try:
+            raise_if_cancelled(db, job_id)
+            job.status = "running"
+            job.progress = 0.15
+            job.message = f"Generating face reference for {character.name}"
+            db.commit()
+
+            prompt = cast_portrait_prompt(character, look=look)
+
+            def report_progress(update: dict) -> None:
+                raise_if_cancelled(db, job_id)
+                provider = str(update.get("provider") or "")
+                phase = str(update.get("phase") or "generating")
+                labels = {"chatgpt_web": "ChatGPT Web", "gemini_web": "Gemini Web"}
+                messages = {
+                    "submitting": f"Submitting {character.name} to {labels.get(provider, provider)}",
+                    "generating": f"Generating {character.name} face with {labels.get(provider, provider)}",
+                    "downloading": "Downloading face reference",
+                    "saving": "Saving face reference",
+                    "failed": f"{labels.get(provider, provider)} attempt failed",
+                }
+                job.provider = provider or job.provider
+                job.provider_phase = phase
+                job.message = str(update.get("message") or messages.get(phase, job.message))
+                if update.get("conversation_url"):
+                    job.conversation_url = str(update["conversation_url"])
+                attempts = deepcopy(job.attempts or [])
+                meta = [item for item in attempts if isinstance(item, dict) and item.get("character_id")]
+                provider_attempts = [
+                    item for item in attempts if isinstance(item, dict) and item.get("provider")
+                ]
+                attempt = next((item for item in provider_attempts if item.get("provider") == provider), None)
+                values = {
+                    key: update[key]
+                    for key in ("provider", "phase", "error", "failure_category", "conversation_url")
+                    if update.get(key)
+                }
+                if attempt:
+                    attempt.update(values)
+                elif provider:
+                    provider_attempts.append(values)
+                job.attempts = meta + provider_attempts
+                job.progress = min(0.9, max(job.progress, 0.2))
+                db.commit()
+
+            filename, mime_type, provider = generate_storyboard_image(
+                prompt,
+                f"Cast · {character.name}",
+                "Close-up",
+                "9:16",
+                progress=report_progress,
+            )
+            generated_filename = filename
+            # Normalize to cast-ref-* naming used by uploads.
+            extension = Path(filename).suffix or ".png"
+            cast_filename = f"cast-ref-{uuid4()}{extension}"
+            source_path = settings.media_dir / filename
+            target_path = settings.media_dir / cast_filename
+            shutil.move(str(source_path), str(target_path))
+            generated_filename = cast_filename
+
+            raise_if_cancelled(db, job_id)
+            db.add(
+                CharacterReference(
+                    character_id=character.id,
+                    filename=cast_filename,
+                    mime_type=mime_type,
+                )
+            )
+            job.status = "completed"
+            job.provider = provider
+            job.provider_phase = "completed"
+            job.progress = 1
+            job.message = f"Face reference ready for {character.name}"
+            db.commit()
+            generated_filename = None
+        except JobCancelled:
+            delete_media_file(generated_filename)
+            return
+        except Exception as exc:
+            db.rollback()
+            delete_media_file(generated_filename)
+            job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
+            if job:
+                job.status = "failed"
+                job.provider_phase = "failed"
+                job.message = (
+                    "Clarify character ages and retry"
+                    if "safety system could not verify" in str(exc)
+                    else "Face reference generation failed"
+                )
+                job.error = str(exc)
+                db.commit()
+            raise
+
+
+@image_huey.task()
+def generate_cast_reference_worker(character_id: str, job_id: str, look: str | None = None) -> None:
+    _generate_cast_reference(character_id, job_id, look)
+
+
+def enqueue_cast_reference(character_id: str, job_id: str, look: str | None = None):
+    return generate_cast_reference_worker(character_id, job_id, look)
+
+
 def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
         shot = db.get(Shot, shot_id)
         if not job or not shot:
             return
+        if job.status == "cancelled":
+            return
         try:
+            raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.1
-            job.message = "Sending shot to ComfyUI"
+            provider_name = (settings.video_provider or "runway").strip().lower()
+            job.message = f"Sending shot to {'Runway' if provider_name == 'runway' else 'ComfyUI'}"
             db.commit()
 
             project = shot.scene.script_version.project
@@ -543,7 +744,12 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             base_prompt = (prompt_override or shot.video_prompt).strip()
             if target_aspect == "9:16" and not prompt_override:
                 base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
-            effective_prompt = compose_video_prompt(base_prompt, shot.sound)
+            from .takes import continuity_prompt_suffix, record_take
+
+            effective_prompt = compose_video_prompt(
+                base_prompt + continuity_prompt_suffix(shot.scene),
+                shot.sound,
+            )
             filename, mime_type, provider = render_shot_clip(
                 settings.media_dir / source_image.filename,
                 effective_prompt,
@@ -580,8 +786,20 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 variant.created_at = now()
             else:
                 db.add(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
+            record_take(
+                db,
+                shot,
+                media_type="clip",
+                aspect_ratio=target_aspect,
+                filename=filename,
+                mime_type=mime_type,
+                source="generated",
+                provider=provider,
+                prompt=effective_prompt,
+            )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
+            raise_if_cancelled(db, job_id)
             shot.status = "clip_ready"
             job.status = "completed"
             job.progress = 1
@@ -590,9 +808,13 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             if previous_filename != filename:
                 delete_media_file(previous_filename)
             delete_media_file(final_cut_filename)
+        except JobCancelled:
+            return
         except Exception as exc:
             db.rollback()
             job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
             if job:
                 job.status = "failed"
                 job.message = "Video generation failed"
@@ -624,7 +846,10 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
         project = db.get(Project, project_id)
         if not job or not project:
             return
+        if job.status == "cancelled":
+            return
         try:
+            raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.05
             job.message = "Preparing the edit timeline"
@@ -632,9 +857,16 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
 
             timeline = ensure_timeline(project, db)
             promote_available_clips(project, db)
-            document = TimelineDocument.model_validate(timeline.document)
+            if variant == "shorts":
+                if not timeline.shorts_document:
+                    timeline.shorts_document = deepcopy(timeline.document)
+                    db.commit()
+                document = TimelineDocument.model_validate(timeline.shorts_document)
+            else:
+                document = TimelineDocument.model_validate(timeline.document)
 
             def update_progress(completed: int, total: int) -> None:
+                raise_if_cancelled(db, job_id)
                 job.progress = 0.1 + (completed / total) * 0.8
                 job.message = f"Rendering shot {completed} of {total}"
                 db.commit()
@@ -665,15 +897,20 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
                         timeline_revision=timeline.revision,
                     )
                 )
+            raise_if_cancelled(db, job_id)
             job.status = "completed"
             job.progress = 1
             job.message = "Final cut ready"
             db.commit()
             if previous_filename != result.filename:
                 delete_media_file(previous_filename)
+        except JobCancelled:
+            return
         except Exception as exc:
             db.rollback()
             job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
             if job:
                 job.status = "failed"
                 job.message = "Final cut render failed"

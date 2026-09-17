@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from .runway_video import generate_runway_clip, runway_status
 from .settings import settings
 
 
@@ -81,7 +82,29 @@ def comfyui_status() -> tuple[bool, bool, str]:
     return configured, available, detail
 
 
+def video_provider_status() -> tuple[str, str, bool, bool, str, str]:
+    """Return id, label, configured, available, model, detail."""
+    provider = (settings.video_provider or "runway").strip().lower()
+    if provider == "comfyui":
+        configured, available, detail = comfyui_status()
+        return "comfyui", "ComfyUI", configured, available, "workflow", detail
+    configured, available, detail = runway_status()
+    return "runway", "Runway", configured, available, settings.runway_model, detail
+
+
 def generate_shot_clip(
+    image_path: Path,
+    prompt: str,
+    duration_ms: int,
+    aspect_ratio: str,
+) -> tuple[str, str, str]:
+    provider = (settings.video_provider or "runway").strip().lower()
+    if provider == "runway":
+        return generate_runway_clip(image_path, prompt, duration_ms, aspect_ratio)
+    return generate_comfyui_clip(image_path, prompt, duration_ms, aspect_ratio)
+
+
+def generate_comfyui_clip(
     image_path: Path,
     prompt: str,
     duration_ms: int,
@@ -161,3 +184,4 @@ def generate_shot_clip(
         filename = f"clip-{uuid.uuid4()}{extension}"
         (settings.media_dir / filename).write_bytes(result.content)
         return filename, mime_type, "comfyui"
+

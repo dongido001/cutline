@@ -1,5 +1,5 @@
 export interface ProviderStatus {
-  id: 'mock' | 'ollama' | 'gemini_web' | 'chatgpt_web' | 'compatible' | 'comfyui'
+  id: string
   label: string
   configured: boolean
   available: boolean
@@ -28,10 +28,31 @@ export interface Shot {
   image_prompt: string
   video_prompt: string
   title_card_text: string
+  character_ids: string[]
   status: string
+  selected_image_take_id?: string | null
+  selected_clip_take_id?: string | null
+  selected_audio_take_id?: string | null
+  dialogue_audio_filename?: string | null
+  dialogue_audio_mime?: string | null
   image: ShotImage | null
   clip: ShotClip | null
   media_variants: ShotMediaVariant[]
+  takes?: ShotTake[]
+}
+
+export interface ShotTake {
+  id: string
+  media_type: 'image' | 'clip' | 'audio'
+  aspect_ratio: string
+  url: string
+  mime_type: string
+  source: string
+  provider: string
+  prompt: string
+  settings: Record<string, unknown>
+  selected: boolean
+  created_at: string
 }
 
 export interface ShotImage {
@@ -57,6 +78,7 @@ export interface ShotUpdate {
   image_prompt: string
   video_prompt: string
   title_card_text: string
+  character_ids?: string[]
 }
 
 export interface Scene {
@@ -69,6 +91,10 @@ export interface Scene {
   end_ms: number | null
   action: string
   dialogue: Array<{ character: string; text: string }>
+  set_notes?: string
+  lighting_notes?: string
+  wardrobe_notes?: string
+  props_notes?: string
   shots: Shot[]
 }
 
@@ -213,6 +239,7 @@ export interface TimelineAsset {
 export interface ProjectTimeline {
   revision: number
   document: TimelineDocument
+  edit?: OutputVariant
   assets: TimelineAsset[]
 }
 
@@ -220,15 +247,17 @@ export interface Job {
   id: string
   project_id: string
   kind: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   message: string
   error: string | null
   provider: string | null
-  provider_phase: 'submitting' | 'generating' | 'downloading' | 'saving' | 'completed' | 'failed' | null
+  provider_phase: 'submitting' | 'generating' | 'downloading' | 'saving' | 'completed' | 'failed' | 'cancelled' | null
   conversation_url: string | null
-  attempts: Array<{ provider: string; phase: string; error?: string; conversation_url?: string }>
+  attempts: Array<Record<string, unknown>>
   queue_position: number | null
+  created_at?: string
+  updated_at?: string
 }
 
 export interface ProjectInput {
@@ -268,6 +297,34 @@ export const api = {
   providers: () => request<ProviderStatus[]>('/api/providers'),
   imageProviders: () => request<ImageProviderStatus[]>('/api/image-providers'),
   videoProvider: () => request<ProviderStatus>('/api/video-provider'),
+  audioProvider: () => request<ProviderStatus>('/api/audio-provider'),
+  draftReadiness: (projectId: string) =>
+    request<{
+      attention: Array<{ code: string; message: string; shot_id?: string }>
+      missing_images: string[]
+      missing_clips: string[]
+      missing_audio: string[]
+      can_start: boolean
+      video_provider: ProviderStatus
+      vibevoice: { configured: boolean; available: boolean; detail: string }
+    }>(`/api/projects/${projectId}/draft/readiness`),
+  createDraft: (projectId: string, input?: { variant?: 'landscape' | 'shorts'; retry_failed_only?: boolean }) =>
+    request<Job>(`/api/projects/${projectId}/draft`, {
+      method: 'POST',
+      body: JSON.stringify({
+        variant: input?.variant || 'landscape',
+        retry_failed_only: Boolean(input?.retry_failed_only),
+      }),
+    }),
+  updateScene: (
+    id: string,
+    input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
+  ) => request<Scene>(`/api/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  selectTake: (shotId: string, takeId: string) =>
+    request<Shot>(`/api/shots/${shotId}/takes/select`, {
+      method: 'POST',
+      body: JSON.stringify({ take_id: takeId }),
+    }),
   projects: () => request<ProjectSummary[]>('/api/projects'),
   project: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: 'DELETE' }),
@@ -276,6 +333,9 @@ export const api = {
   continueProject: (id: string, input: ProjectContinuationInput) =>
     request<Job>(`/api/projects/${id}/continue`, { method: 'POST', body: JSON.stringify(input) }),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
+  projectJobs: (projectId: string, active = true) =>
+    request<Job[]>(`/api/projects/${projectId}/jobs?active=${active ? 'true' : 'false'}`),
+  cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   updateShot: (id: string, input: ShotUpdate) =>
     request<Shot>(`/api/shots/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   generateShotImage: (id: string, aspectRatio?: AspectRatio, characterIds: string[] = []) =>
@@ -296,8 +356,15 @@ export const api = {
     body.append('file', file)
     return request<Character>(`/api/characters/${id}/references`, { method: 'POST', body })
   },
+  generateCharacterReference: (id: string, look?: string) =>
+    request<Job>(
+      `/api/characters/${id}/references/generate${look ? `?look=${encodeURIComponent(look)}` : ''}`,
+      { method: 'POST' },
+    ),
   deleteCharacterReference: (id: string) =>
     request<void>(`/api/character-references/${id}`, { method: 'DELETE' }),
+  syncCast: (projectId: string) =>
+    request<Character[]>(`/api/projects/${projectId}/cast/sync`, { method: 'POST' }),
   uploadShotImage: (id: string, file: File, aspectRatio?: AspectRatio) => {
     const body = new FormData()
     body.append('file', file)
@@ -318,11 +385,17 @@ export const api = {
     request<Job>(`/api/projects/${id}/final-cut/render?variant=${variant}`, { method: 'POST' }),
   deleteFinalCut: (id: string, variant: OutputVariant = 'landscape') =>
     request<void>(`/api/projects/${id}/final-cut?variant=${variant}`, { method: 'DELETE' }),
-  timeline: (id: string) => request<ProjectTimeline>(`/api/projects/${id}/timeline`),
-  saveTimeline: (id: string, timeline: ProjectTimeline) => request<ProjectTimeline>(`/api/projects/${id}/timeline`, {
-    method: 'PUT',
-    body: JSON.stringify({ revision: timeline.revision, document: timeline.document }),
-  }),
+  timeline: (id: string, edit: OutputVariant = 'landscape') =>
+    request<ProjectTimeline>(`/api/projects/${id}/timeline?edit=${edit}`),
+  saveTimeline: (id: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape') =>
+    request<ProjectTimeline>(`/api/projects/${id}/timeline`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        revision: timeline.revision,
+        document: timeline.document,
+        edit: timeline.edit || edit,
+      }),
+    }),
   resetTimeline: (id: string) => request<ProjectTimeline>(`/api/projects/${id}/timeline/reset`, { method: 'POST' }),
   uploadTimelineAsset: (id: string, file: File, label = file.name) => {
     const body = new FormData()

@@ -9,15 +9,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
+from .cast import sync_project_cast
 from .database import Base, engine, get_db
 from .final_cut import invalidate_final_cut
 from .media import delete_media_file, image_provider_statuses
 from .migrations import migrate_schema
-from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, TimelineAsset
+from .video import video_provider_status
+from .vibevoice_tts import vibevoice_status
+from .draft import enqueue_create_draft, project_readiness
+from .takes import select_take
+from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset
 from .schemas import (
     CharacterCreate,
     CharacterRead,
     CharacterUpdate,
+    CreateDraftRequest,
     JobRead,
     ImageProviderStatus,
     ProjectTimelineRead,
@@ -27,18 +33,28 @@ from .schemas import (
     ProjectDetail,
     ProjectSummary,
     ProviderStatus,
+    SceneRead,
+    SceneUpdate,
     ShotImageGenerateRequest,
     ShotRead,
     ShotUpdate,
     SuggestionDecision,
     SuggestionRead,
+    TakeSelectRequest,
     TimelineDocument,
     TimelineUpdate,
 )
 from .settings import settings
-from .tasks import enqueue_final_cut, enqueue_script_analysis, enqueue_script_continuation, enqueue_shot_clip, enqueue_shot_image
+from .jobs import mark_job_cancelled, revoke_job_task
+from .tasks import (
+    enqueue_cast_reference,
+    enqueue_final_cut,
+    enqueue_script_analysis,
+    enqueue_script_continuation,
+    enqueue_shot_clip,
+    enqueue_shot_image,
+)
 from .timeline import append_missing_shots, ensure_timeline, initial_document, promote_available_clips, validate_timeline
-from .video import comfyui_status
 
 
 @asynccontextmanager
@@ -140,13 +156,26 @@ def providers() -> list[ProviderStatus]:
 
 @app.get("/api/video-provider", response_model=ProviderStatus)
 def video_provider() -> ProviderStatus:
-    configured, available, detail = comfyui_status()
+    provider_id, label, configured, available, model, detail = video_provider_status()
     return ProviderStatus(
-        id="comfyui",
-        label="ComfyUI",
+        id=provider_id,
+        label=label,
         configured=configured,
         available=available,
-        model="workflow",
+        model=model,
+        detail=detail,
+    )
+
+
+@app.get("/api/audio-provider", response_model=ProviderStatus)
+def audio_provider() -> ProviderStatus:
+    configured, available, detail = vibevoice_status()
+    return ProviderStatus(
+        id="vibevoice",
+        label="VibeVoice",
+        configured=configured,
+        available=available,
+        model=settings.vibevoice_model,
         detail=detail,
     )
 
@@ -248,6 +277,9 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail
             selectinload(ScriptVersion.scenes)
             .selectinload(Scene.shots)
             .selectinload(Shot.media_variants),
+            selectinload(ScriptVersion.scenes)
+            .selectinload(Scene.shots)
+            .selectinload(Shot.takes),
             selectinload(ScriptVersion.suggestions),
         )
         .order_by(ScriptVersion.version_number.desc())
@@ -329,15 +361,31 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     queue_position = None
-    if job.kind == "shot_image" and job.status == "queued":
+    if job.kind in {"shot_image", "cast_reference"} and job.status == "queued":
         pending = db.scalars(
             select(Job)
-            .where(Job.kind == "shot_image", Job.status == "queued")
+            .where(Job.kind.in_(["shot_image", "cast_reference"]), Job.status == "queued")
             .order_by(Job.created_at, Job.id)
         ).all()
         queue_position = next((index for index, item in enumerate(pending, start=1) if item.id == job.id), None)
     result = JobRead.model_validate(job)
     return result.model_copy(update={"queue_position": queue_position})
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=JobRead)
+def cancel_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return JobRead.model_validate(job)
+    if job.status not in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail=f"Cannot cancel a job in status {job.status}")
+    mark_job_cancelled(job)
+    db.commit()
+    db.refresh(job)
+    revoke_job_task(job)
+    return JobRead.model_validate(job)
 
 
 @app.patch("/api/shots/{shot_id}", response_model=ShotRead)
@@ -357,6 +405,19 @@ def update_shot(
     shot.image_prompt = payload.image_prompt
     shot.video_prompt = payload.video_prompt
     shot.title_card_text = payload.title_card_text
+    if payload.character_ids is not None:
+        project = shot.scene.script_version.project
+        requested = list(dict.fromkeys(payload.character_ids))
+        if requested:
+            characters = db.scalars(
+                select(Character).where(
+                    Character.project_id == project.id,
+                    Character.id.in_(requested),
+                )
+            ).all()
+            if len(characters) != len(requested):
+                raise HTTPException(status_code=404, detail="One or more cast characters were not found")
+        shot.character_ids = requested
     db.commit()
     db.refresh(shot)
     delete_media_file(invalidated_filename)
@@ -386,7 +447,7 @@ def queue_shot_image(
         raise HTTPException(
             status_code=409, detail="Add an image prompt before generating"
         )
-    character_ids = list(dict.fromkeys(payload.character_ids or []))
+    character_ids = list(dict.fromkeys(payload.character_ids or shot.character_ids or []))
     if character_ids:
         characters = db.scalars(
             select(Character)
@@ -404,17 +465,62 @@ def queue_shot_image(
                 status_code=409,
                 detail=f"Add a reference image for: {', '.join(missing_refs)}",
             )
-    job = Job(project_id=project.id, kind="shot_image")
-    db.add(job)
-    db.commit()
+    shot.character_ids = character_ids
     target_aspect = aspect_ratio or project.aspect_ratio
     if target_aspect not in {"16:9", "9:16"}:
         raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+    job = Job(
+        project_id=project.id,
+        kind="shot_image",
+        message="Queued",
+        attempts=[
+            {
+                "shot_id": shot.id,
+                "aspect_ratio": target_aspect,
+                "character_ids": character_ids,
+            }
+        ],
+    )
+    db.add(job)
+    db.commit()
     task = enqueue_shot_image(shot.id, job.id, target_aspect, character_ids=character_ids)
     job.task_id = task.id
     db.commit()
     db.refresh(job)
     return job
+
+
+@app.get("/api/projects/{project_id}/jobs", response_model=list[JobRead])
+def list_project_jobs(
+    project_id: str,
+    active: bool = True,
+    db: Session = Depends(get_db),
+) -> list[JobRead]:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    query = select(Job).where(Job.project_id == project_id).order_by(Job.created_at.desc())
+    if active:
+        query = query.where(Job.status.in_(["queued", "running"]))
+    jobs = list(db.scalars(query).all())
+    results: list[JobRead] = []
+    for job in jobs:
+        queue_position = None
+        if job.kind in {"shot_image", "cast_reference"} and job.status == "queued":
+            pending = db.scalars(
+                select(Job)
+                .where(
+                    Job.kind.in_(["shot_image", "cast_reference"]),
+                    Job.status == "queued",
+                )
+                .order_by(Job.created_at, Job.id)
+            ).all()
+            queue_position = next(
+                (index for index, item in enumerate(pending, start=1) if item.id == job.id),
+                None,
+            )
+        results.append(JobRead.model_validate(job).model_copy(update={"queue_position": queue_position}))
+    return results
 
 
 @app.get("/api/projects/{project_id}/characters", response_model=list[CharacterRead])
@@ -551,6 +657,57 @@ async def upload_character_reference(
     return character
 
 
+@app.post(
+    "/api/characters/{character_id}/references/generate",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def generate_character_reference(
+    character_id: str,
+    look: str | None = None,
+    db: Session = Depends(get_db),
+) -> Job:
+    character = db.scalar(
+        select(Character)
+        .where(Character.id == character_id)
+        .options(selectinload(Character.references))
+    )
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    if not (character.notes or "").strip() and not character.name.strip():
+        raise HTTPException(status_code=409, detail="Add appearance notes before generating a face")
+    if not any(item.get("available") for item in image_provider_statuses()):
+        raise HTTPException(
+            status_code=409,
+            detail="No image provider is available. Start the ChatGPT/Gemini bridges or upload a face still.",
+        )
+    active = db.scalars(
+        select(Job).where(
+            Job.project_id == character.project_id,
+            Job.kind == "cast_reference",
+            Job.status.in_(["queued", "running"]),
+        )
+    ).all()
+    for job in active:
+        attempts = job.attempts or []
+        if any(item.get("character_id") == character.id for item in attempts if isinstance(item, dict)):
+            return JobRead.model_validate(job)
+
+    job = Job(
+        project_id=character.project_id,
+        kind="cast_reference",
+        message=f"Queued face reference for {character.name}",
+        attempts=[{"character_id": character.id, "look": look or ""}],
+    )
+    db.add(job)
+    db.commit()
+    task = enqueue_cast_reference(character.id, job.id, look)
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 @app.delete("/api/character-references/{reference_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_character_reference(reference_id: str, db: Session = Depends(get_db)) -> None:
     reference = db.get(CharacterReference, reference_id)
@@ -678,10 +835,15 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
         )
     if not shot.video_prompt.strip():
         raise HTTPException(status_code=409, detail="Add a video prompt first")
-    configured, available, detail = comfyui_status()
+    _, _, configured, available, _, detail = video_provider_status()
     if not configured or not available:
         raise HTTPException(status_code=503, detail=detail)
-    job = Job(project_id=project.id, kind="shot_clip")
+    job = Job(
+        project_id=project.id,
+        kind="shot_clip",
+        message="Queued",
+        attempts=[{"shot_id": shot.id, "aspect_ratio": target_aspect}],
+    )
     db.add(job)
     db.commit()
     task = enqueue_shot_clip(shot.id, job.id, target_aspect)
@@ -820,8 +982,13 @@ def queue_final_cut(project_id: str, variant: str = "landscape", db: Session = D
         return active_job
 
     timeline = ensure_timeline(project, db)
+    document_data = (
+        timeline.shorts_document or timeline.document
+        if variant == "shorts"
+        else timeline.document
+    )
     try:
-        validate_timeline(TimelineDocument.model_validate(timeline.document), project, db)
+        validate_timeline(TimelineDocument.model_validate(document_data), project, db)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -833,6 +1000,133 @@ def queue_final_cut(project_id: str, variant: str = "landscape", db: Session = D
     db.commit()
     db.refresh(job)
     return job
+
+
+@app.get("/api/projects/{project_id}/draft/readiness")
+def draft_readiness(project_id: str, db: Session = Depends(get_db)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_readiness(project, db)
+
+
+@app.post(
+    "/api/projects/{project_id}/draft",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_draft(
+    project_id: str,
+    payload: CreateDraftRequest = Body(default_factory=CreateDraftRequest),
+    db: Session = Depends(get_db),
+) -> Job:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status != "shot_plan":
+        raise HTTPException(status_code=409, detail="Approve the script before creating a draft")
+    active = db.scalar(
+        select(Job).where(
+            Job.project_id == project.id,
+            Job.kind == "create_draft",
+            Job.status.in_(["queued", "running"]),
+        )
+    )
+    if active:
+        return active
+    job = Job(
+        project_id=project.id,
+        kind="create_draft",
+        attempts=[{"variant": payload.variant, "retry_failed_only": payload.retry_failed_only}],
+    )
+    db.add(job)
+    db.commit()
+    task = enqueue_create_draft(project.id, job.id, payload.variant, payload.retry_failed_only)
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.patch("/api/scenes/{scene_id}", response_model=SceneRead)
+def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_db)) -> Scene:
+    scene = db.get(Scene, scene_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    scene.set_notes = payload.set_notes
+    scene.lighting_notes = payload.lighting_notes
+    scene.wardrobe_notes = payload.wardrobe_notes
+    scene.props_notes = payload.props_notes
+    db.commit()
+    db.refresh(scene)
+    return scene
+
+
+@app.post("/api/shots/{shot_id}/takes/select", response_model=ShotRead)
+def select_shot_take(
+    shot_id: str,
+    payload: TakeSelectRequest,
+    db: Session = Depends(get_db),
+) -> Shot:
+    shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.image),
+            selectinload(Shot.clip),
+            selectinload(Shot.media_variants),
+            selectinload(Shot.scene).selectinload(Scene.script_version).selectinload(ScriptVersion.project),
+        )
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    try:
+        select_take(db, shot, payload.take_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # Mirror selected take into legacy current media slots for edit compatibility.
+    take = next(item for item in shot.takes if item.id == payload.take_id)
+    project = shot.scene.script_version.project
+    if take.media_type == "image" and take.aspect_ratio == project.aspect_ratio:
+        if shot.image:
+            shot.image.filename = take.filename
+            shot.image.mime_type = take.mime_type
+            shot.image.provider = take.provider
+            shot.image.prompt = take.prompt
+            shot.image.source = take.source
+        else:
+            db.add(
+                ShotImage(
+                    shot_id=shot.id,
+                    filename=take.filename,
+                    mime_type=take.mime_type,
+                    source=take.source,
+                    provider=take.provider,
+                    prompt=take.prompt,
+                )
+            )
+    if take.media_type == "clip" and take.aspect_ratio == project.aspect_ratio:
+        if shot.clip:
+            shot.clip.filename = take.filename
+            shot.clip.mime_type = take.mime_type
+            shot.clip.provider = take.provider
+            shot.clip.prompt = take.prompt
+            shot.clip.source = take.source
+        else:
+            db.add(
+                ShotClip(
+                    shot_id=shot.id,
+                    filename=take.filename,
+                    mime_type=take.mime_type,
+                    source=take.source,
+                    provider=take.provider,
+                    prompt=take.prompt,
+                )
+            )
+    db.commit()
+    db.refresh(shot)
+    return shot
 
 
 @app.delete(
@@ -850,13 +1144,27 @@ def delete_final_cut(project_id: str, variant: str = "landscape", db: Session = 
 
 
 @app.get("/api/projects/{project_id}/timeline", response_model=ProjectTimelineRead)
-def get_timeline(project_id: str, db: Session = Depends(get_db)) -> dict:
+def get_timeline(project_id: str, edit: str = "landscape", db: Session = Depends(get_db)) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if edit not in {"landscape", "shorts"}:
+        raise HTTPException(status_code=422, detail="edit must be landscape or shorts")
     timeline = ensure_timeline(project, db)
+    if edit == "shorts":
+        if not timeline.shorts_document:
+            timeline.shorts_document = deepcopy(timeline.document)
+            db.commit()
+        document = timeline.shorts_document
+    else:
+        document = timeline.document
     db.commit()
-    return {"revision": timeline.revision, "document": timeline.document, "assets": project.timeline_assets}
+    return {
+        "revision": timeline.revision,
+        "document": document,
+        "edit": edit,
+        "assets": project.timeline_assets,
+    }
 
 
 @app.put("/api/projects/{project_id}/timeline", response_model=ProjectTimelineRead)
@@ -871,11 +1179,21 @@ def update_timeline(project_id: str, payload: TimelineUpdate, db: Session = Depe
         validate_timeline(payload.document, project, db)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    timeline.document = payload.document.model_dump(mode="json")
+    dumped = payload.document.model_dump(mode="json")
+    if payload.edit == "shorts":
+        timeline.shorts_document = dumped
+    else:
+        timeline.document = dumped
+    # Planned shot durations stay separate; edit timing lives only on the timeline document.
     timeline.revision += 1
     db.commit()
     db.refresh(timeline)
-    return {"revision": timeline.revision, "document": timeline.document, "assets": project.timeline_assets}
+    return {
+        "revision": timeline.revision,
+        "document": dumped,
+        "edit": payload.edit,
+        "assets": project.timeline_assets,
+    }
 
 
 @app.post("/api/projects/{project_id}/timeline/reset", response_model=ProjectTimelineRead)
@@ -1151,9 +1469,38 @@ def approve_project(
     invalidated_filename = None
     if payload.approved and append_missing_shots(project, db):
         invalidated_filename = invalidate_final_cut(project, db)
+    if payload.approved:
+        sync_project_cast(project, db, source_text=version.source_text, tag_shots=True)
     version.status = "approved" if payload.approved else "review"
     project.status = "shot_plan" if payload.approved else "review"
     db.commit()
     db.refresh(project)
     delete_media_file(invalidated_filename)
     return project
+
+
+@app.post("/api/projects/{project_id}/cast/sync", response_model=list[CharacterRead])
+def sync_cast_from_script(project_id: str, db: Session = Depends(get_db)) -> list[Character]:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    version = db.scalar(
+        select(ScriptVersion)
+        .where(ScriptVersion.project_id == project_id)
+        .order_by(ScriptVersion.version_number.desc())
+    )
+    sync_project_cast(
+        project,
+        db,
+        source_text=version.source_text if version else "",
+        tag_shots=True,
+    )
+    db.commit()
+    return list(
+        db.scalars(
+            select(Character)
+            .where(Character.project_id == project_id)
+            .options(selectinload(Character.references))
+            .order_by(Character.name)
+        )
+    )

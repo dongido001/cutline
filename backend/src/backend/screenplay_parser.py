@@ -14,6 +14,69 @@ TIME_RANGE = re.compile(
     r"(?P<start>\d{1,2}:\d{2}(?::\d{2})?)\s*[\u2014\u2013-]\s*"
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?)"
 )
+CHARACTER_SECTION = re.compile(
+    r"(?im)^(?:Character consistency|MAIN CHARACTERS|Characters)\s*:?\s*$"
+)
+CHARACTER_SECTION_STOP = re.compile(
+    r"(?im)^(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+)\b"
+)
+CHARACTER_LINE = re.compile(
+    r"^(?P<name>[A-Z][A-Z0-9' .\-]{0,80}?)"
+    r"(?:\s*\((?P<role>[^)]+)\))?"
+    r"\s*[—–\-:]\s*(?P<notes>.+)$"
+)
+
+
+def canonical_character_name(name: str) -> str:
+    cleaned = re.sub(r"\s*\([^)]*\)\s*", " ", name or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.upper()
+
+
+def parse_character_consistency(script: str) -> list[dict[str, str]]:
+    """Extract named cast descriptions from a structured screenplay preamble."""
+    if not script or not script.strip():
+        return []
+
+    lines = script.replace("\r\n", "\n").split("\n")
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if CHARACTER_SECTION.match(line.strip()):
+            start = index + 1
+            break
+    if start is None:
+        return []
+
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    blank_streak = 0
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            blank_streak += 1
+            if found and blank_streak >= 2:
+                break
+            continue
+        blank_streak = 0
+        if CHARACTER_SECTION_STOP.match(stripped):
+            break
+        if stripped.lower() in {"character consistency", "main characters", "characters"}:
+            continue
+        match = CHARACTER_LINE.match(stripped)
+        if not match:
+            if found:
+                break
+            continue
+        name = canonical_character_name(match.group("name"))
+        if not name or name in seen:
+            continue
+        role = (match.group("role") or "").strip()
+        notes = match.group("notes").strip()
+        if role:
+            notes = f"({role}) {notes}".strip()
+        seen.add(name)
+        found.append({"name": name, "notes": notes})
+    return found
 
 
 def _timecode_to_ms(value: str) -> int:
@@ -244,16 +307,31 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
     shot_targets: dict[int, tuple[int, int]] = {}
     for source_index, source_scene in enumerate(scenes):
         group_title = source_scene.pop("_group_title")
-        if not grouped_scenes or grouped_scenes[-1]["title"] != group_title:
+        group_location = (source_scene.get("location") or "Unspecified").strip()
+        group_time = (source_scene.get("time_of_day") or "Unspecified").strip()
+        group_key = (group_title.strip().lower(), group_location.lower(), group_time.lower())
+        previous_key = None
+        if grouped_scenes:
+            previous = grouped_scenes[-1]
+            previous_key = (
+                previous["title"].strip().lower(),
+                (previous.get("location") or "Unspecified").strip().lower(),
+                (previous.get("time_of_day") or "Unspecified").strip().lower(),
+            )
+        if not grouped_scenes or previous_key != group_key:
             grouped_scenes.append(
                 {
                     "title": group_title,
-                    "location": source_scene["location"],
-                    "time_of_day": source_scene["time_of_day"],
+                    "location": group_location,
+                    "time_of_day": group_time,
                     "start_ms": source_scene["start_ms"],
                     "end_ms": source_scene["end_ms"],
                     "action": source_scene["action"],
                     "dialogue": list(source_scene["dialogue"]),
+                    "set_notes": "",
+                    "lighting_notes": "",
+                    "wardrobe_notes": "",
+                    "props_notes": "",
                     "shots": [],
                 }
             )
@@ -281,5 +359,6 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
     return {
         "scenes": grouped_scenes,
         "suggestions": suggestions,
+        "characters": parse_character_consistency(script),
         "parser": "structured-shot-v2",
     }

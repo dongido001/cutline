@@ -191,8 +191,8 @@ const demoScenes: Scene[] = [
       { character: 'ELIAS', text: 'And go where?' },
     ],
     shots: [
-      { id: 'shot-1', order_index: 0, title: 'Kitchen wide', start_ms: 0, end_ms: 6000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Medium', image_prompt: '', video_prompt: '', title_card_text: '', status: 'planned', image: null, clip: null, media_variants: [] },
-      { id: 'shot-2', order_index: 1, title: 'Mara reacts', start_ms: 6000, end_ms: 12000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Close-up', image_prompt: '', video_prompt: '', title_card_text: '', status: 'planned', image: null, clip: null, media_variants: [] },
+      { id: 'shot-1', order_index: 0, title: 'Kitchen wide', start_ms: 0, end_ms: 6000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Medium', image_prompt: '', video_prompt: '', title_card_text: '', character_ids: [], status: 'planned', image: null, clip: null, media_variants: [] },
+      { id: 'shot-2', order_index: 1, title: 'Mara reacts', start_ms: 6000, end_ms: 12000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Close-up', image_prompt: '', video_prompt: '', title_card_text: '', character_ids: [], status: 'planned', image: null, clip: null, media_variants: [] },
     ],
   },
   {
@@ -317,14 +317,18 @@ function imageJobForShot(shotId: string) {
 
 function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
   if (!shot) return []
+  const valid = new Set(castCharacters.value.map((character) => character.id))
+  const persisted = (shot.character_ids || []).filter((id) => valid.has(id))
+  if (persisted.length) return persisted
+
   const dialogueNames = new Set(
     shot.dialogue.map((line) => line.character.trim().toLowerCase()).filter(Boolean),
   )
-  const prompt = `${shot.image_prompt} ${shot.action}`.toLowerCase()
+  const prompt = `${shot.image_prompt} ${shot.action} ${shot.video_prompt}`.toLowerCase()
   return castCharacters.value
     .filter((character) => {
       const name = character.name.trim().toLowerCase()
-      if (!name || !character.references.length) return false
+      if (!name) return false
       return dialogueNames.has(name) || prompt.includes(name)
     })
     .map((character) => character.id)
@@ -333,7 +337,9 @@ function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
 function syncSelectedCharactersForShot(shot: Shot | null | undefined) {
   const defaults = defaultCharacterIdsForShot(shot)
   const valid = new Set(castCharacters.value.map((character) => character.id))
-  selectedCharacterIds.value = (defaults.length ? defaults : selectedCharacterIds.value.filter((id) => valid.has(id)))
+  selectedCharacterIds.value = defaults.length
+    ? defaults
+    : selectedCharacterIds.value.filter((id) => valid.has(id))
 }
 
 function toggleCharacterForGeneration(characterId: string) {
@@ -347,7 +353,7 @@ function toggleCharacterForGeneration(characterId: string) {
 watch(() => route.params.projectId, async (projectId) => {
   if (typeof projectId !== 'string' || store.currentProject?.id === projectId) return
   try {
-    await store.loadProject(projectId)
+    await store.selectProject(projectId)
   } catch {
     await router.replace('/')
   }
@@ -585,7 +591,43 @@ async function approveAndOpenShots() {
 
 async function saveShot() {
   if (!selectedShot.value) return
-  await store.updateShot(selectedShot.value.id, { ...shotDraft })
+  await store.updateShot(selectedShot.value.id, {
+    ...shotDraft,
+    character_ids: selectedCharacterIds.value,
+  })
+}
+
+async function syncCastFromScript() {
+  if (castingBusy.value) return
+  castingBusy.value = true
+  try {
+    await store.syncCast()
+    syncSelectedCharactersForShot(selectedShot.value)
+  } catch {
+    // Store error surface.
+  } finally {
+    castingBusy.value = false
+  }
+}
+
+async function generateCastFace(character: Character) {
+  try {
+    await store.generateCharacterReference(character.id)
+  } catch {
+    // Store error surface.
+  }
+}
+
+async function generateMissingCastFaces() {
+  const missing = castCharacters.value.filter((character) => !character.references.length)
+  for (const character of missing) {
+    if (store.isGeneratingCast(character.id)) continue
+    await generateCastFace(character)
+  }
+}
+
+function castJobFor(characterId: string) {
+  return store.castJobs[characterId] ?? null
 }
 
 async function generateShotImage() {
@@ -916,6 +958,19 @@ function formatRenderedAt(value: string) {
 
     <section class="workspace" :class="{ 'final-cut-stage': activeStage === 'final-cut' }">
       <div v-if="store.error" class="error-banner"><CircleAlert :size="15" />{{ store.error }}</div>
+      <div v-if="store.draftAttention.length" class="error-banner">
+        <CircleAlert :size="15" />
+        <span>Needs attention: {{ store.draftAttention.map((item) => item.message).slice(0, 4).join(' · ') }}</span>
+        <button
+          v-if="isScriptApproved"
+          type="button"
+          class="secondary-button"
+          :disabled="store.creatingDraft"
+          @click="store.createDraft({ retry_failed_only: true })"
+        >
+          Retry failed steps
+        </button>
+      </div>
       <header class="project-header">
         <div>
           <div class="breadcrumb"><span>Projects</span><ChevronRight :size="14" /><span>{{ projectTitle }}</span></div>
@@ -925,6 +980,16 @@ function formatRenderedAt(value: string) {
           <span class="save-state"><Check :size="14" /> Saved</span>
           <button class="secondary-button format-guide-trigger" title="Script format guide" @click="showScriptGuide = true"><BookOpen :size="15" /><span>Script format</span></button>
           <button class="secondary-button preview-trigger" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
+          <button
+            v-if="isScriptApproved"
+            class="primary-button"
+            :disabled="store.creatingDraft"
+            :title="store.draftJob?.message || 'Generate missing images, clips, dialogue, and a preview'"
+            @click="store.createDraft()"
+          >
+            <Sparkles :size="15" />
+            {{ store.creatingDraft ? (store.draftJob?.message || 'Creating draft…') : 'Create draft video' }}
+          </button>
           <button v-if="activeStage === 'script'" class="primary-button" :disabled="isScriptApproved || store.approvingScript" @click="approveAndOpenShots">
             <Check v-if="isScriptApproved" :size="16" />
             {{ store.approvingScript ? 'Approving...' : isScriptApproved ? 'Script approved' : 'Approve script' }}
@@ -1078,7 +1143,19 @@ function formatRenderedAt(value: string) {
             <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
               <img v-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
               <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} storyboard yet</strong><span>Generate from the image prompt or upload a frame for this format.</span></div>
-              <div v-if="store.isProcessingShot(selectedShot.id)" class="render-overlay"><RefreshCw :size="24" /><strong>{{ selectedImageJob?.message || 'Rendering storyboard' }}</strong></div>
+              <div v-if="store.isProcessingShot(selectedShot.id)" class="render-overlay">
+                <RefreshCw class="spinning" :size="24" />
+                <strong>{{ selectedImageJob?.message || 'Rendering storyboard' }}</strong>
+                <button
+                  v-if="selectedImageJob && (selectedImageJob.status === 'queued' || selectedImageJob.status === 'running')"
+                  type="button"
+                  class="overlay-cancel"
+                  :disabled="store.isCancellingJob(selectedImageJob.id)"
+                  @click="store.cancelJob(selectedImageJob.id)"
+                >
+                  <X :size="14" />{{ store.isCancellingJob(selectedImageJob.id) ? 'Cancelling…' : 'Cancel' }}
+                </button>
+              </div>
             </div>
 
             <section class="cast-library">
@@ -1087,12 +1164,25 @@ function formatRenderedAt(value: string) {
                   <span class="section-label">Cast library</span>
                   <strong>Reusable face references</strong>
                 </div>
-                <form class="cast-add" @submit.prevent="addCastCharacter">
-                  <input v-model="newCharacterName" type="text" maxlength="120" placeholder="Add character (e.g. MARA)" :disabled="castingBusy" />
-                  <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
-                </form>
+                <div class="cast-header-actions">
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    :disabled="castingBusy || !castCharacters.some((character) => !character.references.length) || !imageGenerationAvailable"
+                    @click="generateMissingCastFaces"
+                  >
+                    <Sparkles :size="15" />Generate missing faces
+                  </button>
+                  <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">
+                    Sync from script
+                  </button>
+                  <form class="cast-add" @submit.prevent="addCastCharacter">
+                    <input v-model="newCharacterName" type="text" maxlength="120" placeholder="Add character (e.g. MARA)" :disabled="castingBusy" />
+                    <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
+                  </form>
+                </div>
               </header>
-              <div v-if="!castCharacters.length" class="cast-empty">Add named cast members, upload face stills, then select them when generating for consistency.</div>
+              <div v-if="!castCharacters.length" class="cast-empty">Import a script with a Character consistency block, or add cast members here. Generate or upload face stills, then keep them tagged on each shot.</div>
               <div v-else class="cast-list">
                 <article v-for="character in castCharacters" :key="character.id" class="cast-card">
                   <div class="cast-card-head">
@@ -1100,20 +1190,43 @@ function formatRenderedAt(value: string) {
                       class="cast-name-input"
                       :value="character.name"
                       @change="renameCastCharacter(character, $event)"
-                      :disabled="castingBusy"
+                      :disabled="castingBusy || store.isGeneratingCast(character.id)"
                     />
-                    <button class="icon-danger-button" type="button" title="Remove character" aria-label="Remove character" :disabled="castingBusy" @click="removeCastCharacter(character.id)">
+                    <button class="icon-danger-button" type="button" title="Remove character" aria-label="Remove character" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="removeCastCharacter(character.id)">
                       <Trash2 :size="14" />
                     </button>
                   </div>
+                  <p v-if="character.notes" class="cast-notes">{{ character.notes }}</p>
                   <div class="cast-refs">
                     <div v-for="reference in character.references" :key="reference.id" class="cast-ref">
                       <img :src="reference.url" :alt="`${character.name} reference`" />
-                      <button type="button" class="cast-ref-remove" title="Remove reference" aria-label="Remove reference" :disabled="castingBusy" @click="removeCastReference(reference.id)"><X :size="12" /></button>
+                      <button type="button" class="cast-ref-remove" title="Remove reference" aria-label="Remove reference" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="removeCastReference(reference.id)"><X :size="12" /></button>
                     </div>
-                    <button class="cast-ref-add" type="button" :disabled="castingBusy" @click="chooseCastReference(character.id)">
+                    <button
+                      class="cast-ref-add"
+                      type="button"
+                      :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable"
+                      @click="generateCastFace(character)"
+                    >
+                      <Sparkles :size="14" />
+                      {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Generate another' : 'Generate face' }}
+                    </button>
+                    <button class="cast-ref-add" type="button" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="chooseCastReference(character.id)">
                       <Upload :size="14" />
-                      Add face
+                      Upload
+                    </button>
+                  </div>
+                  <div v-if="castJobFor(character.id)" class="cast-job-status" :class="castJobFor(character.id)?.status">
+                    <strong>{{ castJobFor(character.id)?.message }}</strong>
+                    <span v-if="castJobFor(character.id)?.status === 'failed' && castJobFor(character.id)?.error">{{ castJobFor(character.id)?.error }}</span>
+                    <button
+                      v-if="castJobFor(character.id)?.status === 'queued' || castJobFor(character.id)?.status === 'running'"
+                      type="button"
+                      class="secondary-button"
+                      :disabled="store.isCancellingJob(castJobFor(character.id)!.id)"
+                      @click="store.cancelJob(castJobFor(character.id)!.id)"
+                    >
+                      <X :size="14" />Cancel
                     </button>
                   </div>
                 </article>
@@ -1129,16 +1242,16 @@ function formatRenderedAt(value: string) {
                   :key="character.id"
                   type="button"
                   class="cast-chip"
-                  :class="{ active: selectedCharacterIds.includes(character.id), disabled: !character.references.length }"
-                  :disabled="!character.references.length || store.isProcessingShot(selectedShot.id)"
-                  :title="character.references.length ? `Use ${character.name} face references` : `Upload a face reference for ${character.name} first`"
+                  :class="{ active: selectedCharacterIds.includes(character.id), warn: !character.references.length }"
+                  :disabled="store.isProcessingShot(selectedShot.id)"
+                  :title="character.references.length ? `Use ${character.name} face references` : `Tag ${character.name} now, then generate or upload a face before shot generate`"
                   @click="toggleCharacterForGeneration(character.id)"
                 >
                   {{ character.name }}
                   <small v-if="!character.references.length">no ref</small>
                 </button>
               </div>
-              <p v-if="selectedCast.length" class="cast-chip-hint">Generating with {{ selectedCast.map((item) => item.name).join(', ') }}</p>
+              <p v-if="selectedCast.length" class="cast-chip-hint">Tagged for this shot: {{ selectedCast.map((item) => item.name).join(', ') }}. Save or generate to keep the tags. Faces with “no ref” need Generate face or Upload first.</p>
             </div>
 
             <div class="storyboard-actions">
@@ -1157,7 +1270,15 @@ function formatRenderedAt(value: string) {
                 <span v-if="selectedImageJob.status === 'failed' && selectedImageJob.error" class="image-job-error">{{ selectedImageJob.error }}</span>
               </div>
               <a v-if="selectedImageJob.conversation_url" :href="selectedImageJob.conversation_url" target="_blank" rel="noopener noreferrer"><ExternalLink :size="14" />Open generation chat</a>
-              <button v-if="selectedImageJob.status === 'failed'" class="secondary-button" @click="generateShotImage"><RefreshCw :size="14" />Retry</button>
+              <button
+                v-if="selectedImageJob.status === 'queued' || selectedImageJob.status === 'running'"
+                class="secondary-button"
+                :disabled="store.isCancellingJob(selectedImageJob.id)"
+                @click="store.cancelJob(selectedImageJob.id)"
+              >
+                <X :size="14" />{{ store.isCancellingJob(selectedImageJob.id) ? 'Cancelling…' : 'Cancel' }}
+              </button>
+              <button v-if="selectedImageJob.status === 'failed' || selectedImageJob.status === 'cancelled'" class="secondary-button" @click="generateShotImage"><RefreshCw :size="14" />Retry</button>
             </div>
           </div>
 
@@ -1216,7 +1337,7 @@ function formatRenderedAt(value: string) {
 
           <div class="video-provider-bar" :class="{ ready: store.videoProvider?.configured && store.videoProvider?.available }">
             <span class="provider-dot"></span>
-            <div><strong>{{ store.videoProvider?.label || 'ComfyUI' }}</strong><small>{{ store.videoProvider?.detail || 'Checking local video provider' }}</small></div>
+            <div><strong>{{ store.videoProvider?.label || 'Video provider' }}</strong><small>{{ store.videoProvider?.detail || 'Checking video provider' }}</small></div>
           </div>
 
           <div class="storyboard-area clip-area">
@@ -1224,19 +1345,35 @@ function formatRenderedAt(value: string) {
               <video v-if="selectedAspectClip" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
               <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`Starting frame for ${selectedShotLabel}`" />
               <div v-else class="empty-storyboard"><Video :size="30" /><strong>No starting frame</strong><span>Generate or upload an image in Shot plan before creating this clip.</span></div>
-              <div v-if="store.processingClipId === selectedShot.id" class="render-overlay"><RefreshCw :size="24" /><strong>Generating video</strong><span>This runs in the dedicated video queue.</span></div>
+              <div v-if="store.processingClipId === selectedShot.id" class="render-overlay">
+                <RefreshCw class="spinning" :size="24" />
+                <strong>{{ store.clipJob?.message || 'Generating video' }}</strong>
+                <span>This runs in the dedicated video queue.</span>
+                <button
+                  v-if="store.clipJob && (store.clipJob.status === 'queued' || store.clipJob.status === 'running')"
+                  type="button"
+                  class="overlay-cancel"
+                  :disabled="store.isCancellingJob(store.clipJob.id)"
+                  @click="store.cancelJob(store.clipJob.id)"
+                >
+                  <X :size="14" />{{ store.isCancellingJob(store.clipJob.id) ? 'Cancelling…' : 'Cancel' }}
+                </button>
+              </div>
             </div>
             <p v-if="store.error" class="form-error clip-error">{{ store.error }}</p>
             <div class="storyboard-actions">
               <button
                 class="primary-button"
                 :disabled="store.processingClipId === selectedShot.id || !selectedAspectImage || !store.videoProvider?.configured || !store.videoProvider?.available"
-                :title="store.videoProvider?.detail"
+                :title="!store.videoProvider?.configured || !store.videoProvider?.available ? (store.videoProvider?.detail || 'Configure MOVIE_RUNWAY_API_KEY') : store.videoProvider?.detail"
                 @click="generateShotClip"
               >
                 <RefreshCw v-if="selectedAspectClip" :size="15" /><Sparkles v-else :size="15" />
                 {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
               </button>
+              <p v-if="!store.videoProvider?.configured || !store.videoProvider?.available" class="form-error clip-error">
+                {{ store.videoProvider?.detail || 'Video provider is not ready. Set MOVIE_RUNWAY_API_KEY or upload a clip.' }}
+              </p>
               <button v-if="!selectedAspectImage" class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="generateVariantFrame"><Image :size="15" />Generate {{ mediaAspect }} frame</button>
               <button class="secondary-button" :disabled="store.processingClipId === selectedShot.id" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
               <button v-if="selectedAspectClip" class="secondary-button" @click="openTrimEditor"><Scissors :size="15" />Trim</button>
@@ -1286,14 +1423,20 @@ function formatRenderedAt(value: string) {
         <div class="field-heading"><label for="screenplay-source">Screenplay</label><button type="button" @click="showScriptGuide = true"><BookOpen :size="13" />Format guide</button></div>
         <textarea id="screenplay-source" v-model="form.script" rows="13" required spellcheck="false"></textarea>
       </div>
-      <div
-        v-if="store.currentJob && store.busy"
-        class="job-progress"
-        :class="{ indeterminate: store.currentJob.status === 'running' && store.currentJob.progress < 0.5 }"
-      >
-        <span :style="{ width: `${store.currentJob.progress * 100}%` }"></span>
-        <small>{{ store.currentJob.message }} · {{ formatElapsed(store.jobElapsedSeconds) }}</small>
-      </div>
+        <div
+          v-if="store.currentJob && store.busy"
+          class="job-progress"
+          :class="{ indeterminate: store.currentJob.status === 'running' && store.currentJob.progress < 0.5 }"
+        >
+          <span :style="{ width: `${store.currentJob.progress * 100}%` }"></span>
+          <small>{{ store.currentJob.message }} · {{ formatElapsed(store.jobElapsedSeconds) }}</small>
+          <button
+            type="button"
+            class="job-cancel-button"
+            :disabled="store.isCancellingJob(store.currentJob.id)"
+            @click="store.cancelJob(store.currentJob.id)"
+          >{{ store.isCancellingJob(store.currentJob.id) ? 'Cancelling…' : 'Cancel' }}</button>
+        </div>
       <p v-if="store.error" class="form-error">{{ store.error }}</p>
       <footer><button type="button" class="secondary-button" @click="showCreate = false">Cancel</button><button class="primary-button" :disabled="store.busy"><Sparkles :size="15" />{{ store.busy ? 'Analyzing...' : 'Analyze script' }}</button></footer>
     </form>
@@ -1323,7 +1466,16 @@ function formatRenderedAt(value: string) {
         <div class="field-heading"><label for="continuation-source">New screenplay section</label><button type="button" @click="showScriptGuide = true"><BookOpen :size="13" />Format guide</button></div>
         <textarea id="continuation-source" v-model="continuationForm.script" rows="13" required spellcheck="false" placeholder="Paste only the new scenes or shots that continue the story."></textarea>
       </div>
-      <div v-if="store.currentJob && store.continuingScript" class="job-progress" :class="{ indeterminate: store.currentJob.status === 'running' && store.currentJob.progress < 0.5 }"><span :style="{ width: `${store.currentJob.progress * 100}%` }"></span><small>{{ store.currentJob.message }} · {{ formatElapsed(store.jobElapsedSeconds) }}</small></div>
+      <div v-if="store.currentJob && store.continuingScript" class="job-progress" :class="{ indeterminate: store.currentJob.status === 'running' && store.currentJob.progress < 0.5 }">
+        <span :style="{ width: `${store.currentJob.progress * 100}%` }"></span>
+        <small>{{ store.currentJob.message }} · {{ formatElapsed(store.jobElapsedSeconds) }}</small>
+        <button
+          type="button"
+          class="job-cancel-button"
+          :disabled="store.isCancellingJob(store.currentJob.id)"
+          @click="store.cancelJob(store.currentJob.id)"
+        >{{ store.isCancellingJob(store.currentJob.id) ? 'Cancelling…' : 'Cancel' }}</button>
+      </div>
       <p v-if="store.error" class="form-error">{{ store.error }}</p>
       <footer><button type="button" class="secondary-button" :disabled="store.continuingScript" @click="showContinuation = false">Cancel</button><button class="primary-button" :disabled="store.continuingScript || !continuationForm.script.trim()"><Sparkles :size="15" />{{ store.continuingScript ? 'Analyzing...' : 'Analyze and append' }}</button></footer>
     </form>

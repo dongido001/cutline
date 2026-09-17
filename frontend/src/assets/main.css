@@ -147,13 +147,31 @@
 .empty-storyboard { display: flex; flex-direction: column; align-items: center; gap: 7px; color: #89908b; text-align: center; }
 .empty-storyboard strong { color: #d5dad6; font-size: 12px; }
 .empty-storyboard span { max-width: 260px; font-size: 9px; line-height: 1.45; }
-.render-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; background: rgba(26, 30, 27, .78); color: white; font-size: 10px; }
-.render-overlay svg { animation: spin 1.1s linear infinite; }
+.render-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; background: rgba(26, 30, 27, .78); color: white; font-size: 10px; z-index: 2; }
+.render-overlay > svg.spinning { animation: spin 1.1s linear infinite; }
+.render-overlay .overlay-cancel {
+  height: 34px;
+  padding: 0 14px;
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d7dcd8;
+  border-radius: 5px;
+  background: #fff;
+  color: #1a1e1b;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.render-overlay .overlay-cancel svg { animation: none; color: #1a1e1b; }
+.render-overlay .overlay-cancel:disabled { opacity: 0.65; cursor: default; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .storyboard-actions { width: min(760px, 100%); margin: 10px auto 0; display: flex; align-items: center; gap: 8px; }
 .cast-library { width: min(760px, 100%); margin: 14px auto 0; padding: 14px; border: 1px solid var(--line); background: white; border-radius: 12px; display: grid; gap: 12px; }
 .cast-library > header { display: flex; align-items: end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .cast-library > header strong { display: block; margin-top: 2px; font-size: 14px; }
+.cast-header-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
 .cast-add { display: flex; gap: 8px; align-items: center; }
 .cast-add input { min-width: 180px; }
 .cast-empty { color: var(--muted); font-size: 13px; line-height: 1.45; }
@@ -161,15 +179,21 @@
 .cast-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: #fbfcfb; display: grid; gap: 8px; }
 .cast-card-head { display: flex; align-items: center; gap: 8px; }
 .cast-name-input { flex: 1; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.cast-notes { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .cast-refs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .cast-ref { position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #eceeea; }
 .cast-ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cast-ref-remove { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border: 0; border-radius: 999px; background: rgba(20, 24, 22, 0.72); color: white; display: grid; place-items: center; cursor: pointer; }
 .cast-ref-add { min-height: 56px; padding: 0 10px; border: 1px dashed var(--line); border-radius: 8px; background: transparent; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
+.cast-job-status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #f7f9f7; font-size: 12px; }
+.cast-job-status.failed { border-color: #e4b9b4; background: #fff4f2; }
+.cast-job-status strong { font-size: 12px; }
+.cast-job-status span { color: #8f3029; }
 .cast-generate-chips { width: min(760px, 100%); margin: 12px auto 0; display: grid; gap: 8px; }
 .cast-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .cast-chip { border: 1px solid var(--line); background: white; border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .cast-chip.active { background: #14201a; color: white; border-color: #14201a; }
+.cast-chip.warn:not(.active) { border-style: dashed; }
 .cast-chip.disabled, .cast-chip:disabled { opacity: 0.45; cursor: not-allowed; }
 .cast-chip small { text-transform: none; font-weight: 500; opacity: 0.75; }
 .cast-chip-hint { margin: 0; color: var(--muted); font-size: 12px; }
@@ -180,6 +204,9 @@
 .image-job-status .image-job-error { color:#8f3029; text-transform:none; }
 .image-job-status a { display:inline-flex; align-items:center; gap:5px; color:#256349; font-size:9px; font-weight:800; text-decoration:none; }
 .image-job-status.failed { border-color:#e4b9b4; background:#fff4f2; }
+.image-job-status.cancelled { border-color:#d7dcd8; background:#f3f4f3; }
+.image-job-status.queued,
+.image-job-status.running { border-color:#c5d8cc; background:#f3faf6; }
 .icon-danger-button { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #deb7b3; border-radius: 5px; background: white; color: #a33a32; cursor: pointer; }
 .icon-danger-button:hover { background: #fae8e6; }
 .shot-fields { width: min(820px, 100%); padding: 18px 28px 28px; margin: 0 auto; display: flex; flex-direction: column; gap: 13px; }
@@ -283,10 +310,13 @@
 .danger-button:disabled { opacity: .55; cursor: wait; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-error { margin: 0; color: #9a3028; font-size: 10px; }
-.job-progress { position: relative; height: 25px; overflow: hidden; border-radius: 4px; background: #eceeec; }
+.job-progress { position: relative; height: 25px; overflow: hidden; border-radius: 4px; background: #eceeec; display: grid; grid-template-columns: 1fr auto; align-items: center; }
 .job-progress > span { position: absolute; inset: 0 auto 0 0; background: #cfe2d7; transition: width .3s ease; }
 .job-progress.indeterminate > span { width: 28% !important; animation: local-analysis 1.8s ease-in-out infinite; }
 .job-progress small { position: relative; height: 100%; display: grid; place-items: center; color: #2b6046; font-size: 9px; }
+.job-cancel-button { position: relative; z-index: 1; margin-right: 6px; height: 18px; padding: 0 8px; border: 1px solid #b7c4bc; border-radius: 3px; background: #fff; color: #2b6046; font-size: 8px; font-weight: 800; cursor: pointer; }
+.job-cancel-button:disabled { opacity: .6; cursor: default; }
+.render-overlay .secondary-button { margin-top: 8px; }
 @keyframes local-analysis { 0% { transform: translateX(-100%); } 100% { transform: translateX(360%); } }
 .project-modal .primary-button:disabled { opacity: .55; cursor: wait; }
 .continuation-modal { width: min(680px, 100%); }

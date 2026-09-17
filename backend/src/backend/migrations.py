@@ -12,6 +12,21 @@ SHOT_COLUMNS = {
     "dialogue": "JSON NOT NULL DEFAULT '[]'",
     "sound": "TEXT NOT NULL DEFAULT ''",
     "title_card_text": "TEXT NOT NULL DEFAULT ''",
+    "character_ids": "JSON NOT NULL DEFAULT '[]'",
+    "selected_image_take_id": "VARCHAR",
+    "selected_clip_take_id": "VARCHAR",
+    "selected_audio_take_id": "VARCHAR",
+    "dialogue_audio_filename": "VARCHAR(240)",
+    "dialogue_audio_mime": "VARCHAR(80)",
+}
+SCENE_COLUMNS = {
+    "set_notes": "TEXT NOT NULL DEFAULT ''",
+    "lighting_notes": "TEXT NOT NULL DEFAULT ''",
+    "wardrobe_notes": "TEXT NOT NULL DEFAULT ''",
+    "props_notes": "TEXT NOT NULL DEFAULT ''",
+}
+TIMELINE_COLUMNS = {
+    "shorts_document": "JSON",
 }
 LEGACY_SHOT_COLUMNS = {
     "title",
@@ -92,6 +107,24 @@ def migrate_schema(engine: Engine) -> None:
             for name, definition in JOB_COLUMNS.items():
                 if name not in job_existing:
                     connection.execute(text(f"ALTER TABLE jobs ADD COLUMN {name} {definition}"))
+
+    if "scenes" in inspect(engine).get_table_names():
+        scene_existing = {column["name"] for column in inspect(engine).get_columns("scenes")}
+        with engine.begin() as connection:
+            for name, definition in SCENE_COLUMNS.items():
+                if name not in scene_existing:
+                    connection.execute(text(f"ALTER TABLE scenes ADD COLUMN {name} {definition}"))
+
+    if "project_timelines" in inspect(engine).get_table_names():
+        timeline_existing = {
+            column["name"] for column in inspect(engine).get_columns("project_timelines")
+        }
+        with engine.begin() as connection:
+            for name, definition in TIMELINE_COLUMNS.items():
+                if name not in timeline_existing:
+                    connection.execute(
+                        text(f"ALTER TABLE project_timelines ADD COLUMN {name} {definition}")
+                    )
 
     _group_legacy_structured_shots(engine)
 

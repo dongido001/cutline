@@ -11,7 +11,9 @@ export const useStudioStore = defineStore('studio', () => {
   const videoProvider = ref<ProviderStatus | null>(null)
   const imageProviders = ref<ImageProviderStatus[]>([])
   const imageJobs = ref<Record<string, Job>>({})
+  const castJobs = ref<Record<string, Job>>({})
   const currentJob = ref<Job | null>(null)
+  const clipJob = ref<Job | null>(null)
   const jobElapsedSeconds = ref(0)
   const busy = ref(false)
   const approvingScript = ref(false)
@@ -19,8 +21,14 @@ export const useStudioStore = defineStore('studio', () => {
   const processingShotIds = ref<string[]>([])
   const processingClipId = ref<string | null>(null)
   const finalCutJob = ref<Job | null>(null)
+  const draftJob = ref<Job | null>(null)
+  const draftAttention = ref<Array<{ code: string; message: string; shot_id?: string }>>([])
+  const creatingDraft = ref(false)
   const renderingFinalCut = ref(false)
+  const cancellingJobIds = ref<string[]>([])
   const error = ref('')
+  const watchingJobIds = new Set<string>()
+  const watchers = new Map<string, { promise: Promise<Job | null>; listeners: Set<(job: Job) => void> }>()
 
   const pendingSuggestions = computed(
     () => currentProject.value?.current_version?.suggestions.filter((item) => item.status === 'pending') ?? [],
@@ -38,6 +46,183 @@ export const useStudioStore = defineStore('studio', () => {
     return processingShotIds.value.includes(id)
   }
 
+  function isGeneratingCast(id: string) {
+    const job = castJobs.value[id]
+    return Boolean(job && (job.status === 'queued' || job.status === 'running'))
+  }
+
+  function isCancellingJob(id: string) {
+    return cancellingJobIds.value.includes(id)
+  }
+
+  function jobMeta(job: Job): Record<string, unknown> {
+    const rows = Array.isArray(job.attempts) ? job.attempts : []
+    return (rows.find((item) => item && typeof item === 'object' && (item.shot_id || item.character_id)) as Record<string, unknown> | undefined) ?? {}
+  }
+
+  function withQueueLabel(job: Job): Job {
+    if (job.status === 'queued' && job.queue_position) {
+      return { ...job, message: `Queued · position ${job.queue_position}` }
+    }
+    return job
+  }
+
+  async function watchJob(
+    jobId: string,
+    onUpdate: (job: Job) => void,
+    options?: { reloadOnComplete?: boolean },
+  ): Promise<Job | null> {
+    if (!jobId) return null
+    const existing = watchers.get(jobId)
+    if (existing) {
+      existing.listeners.add(onUpdate)
+      try {
+        return await existing.promise
+      } finally {
+        existing.listeners.delete(onUpdate)
+      }
+    }
+    const listeners = new Set<(job: Job) => void>([onUpdate])
+    const run = (async (): Promise<Job | null> => {
+      watchingJobIds.add(jobId)
+      const emit = (job: Job) => {
+        for (const listener of [...listeners]) listener(job)
+      }
+      const fetchJob = async (): Promise<Job> => {
+        let lastError: unknown
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try {
+            return withQueueLabel(await api.job(jobId))
+          } catch (error) {
+            lastError = error
+            await delay(400 * (attempt + 1))
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error('Failed to load job status')
+      }
+      try {
+        let job = await fetchJob()
+        emit(job)
+        while (job.status === 'queued' || job.status === 'running') {
+          await delay(500)
+          try {
+            job = await fetchJob()
+            emit(job)
+          } catch {
+            // Transient status failures should not abort an otherwise healthy job.
+            continue
+          }
+        }
+        if (options?.reloadOnComplete !== false && job.status === 'completed' && currentProject.value) {
+          await loadProject(currentProject.value.id, { resumeJobs: false })
+        }
+        return job
+      } finally {
+        watchingJobIds.delete(jobId)
+        watchers.delete(jobId)
+      }
+    })()
+    watchers.set(jobId, { promise: run, listeners })
+    return run
+  }
+
+  async function resumeActiveJobs(projectId: string) {
+    try {
+      const jobs = await api.projectJobs(projectId, true)
+      for (const raw of jobs) {
+        const job = withQueueLabel(raw)
+        const meta = jobMeta(job)
+        if (job.kind === 'cast_reference') {
+          const characterId = typeof meta.character_id === 'string' ? meta.character_id : null
+          if (!characterId) continue
+          castJobs.value = { ...castJobs.value, [characterId]: job }
+          void watchJob(job.id, (next) => {
+            if (currentProject.value?.id !== projectId) return
+            castJobs.value = { ...castJobs.value, [characterId]: next }
+          }).then((finalJob) => {
+            if (currentProject.value?.id !== projectId) return
+            if (finalJob?.status === 'failed') {
+              error.value = String(finalJob.error || 'Face reference generation failed')
+            }
+          })
+          continue
+        }
+        if (job.kind === 'shot_image') {
+          const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
+          if (!shotId) continue
+          beginShotProcessing(shotId)
+          imageJobs.value = { ...imageJobs.value, [shotId]: job }
+          void watchJob(job.id, (next) => {
+            if (currentProject.value?.id !== projectId) return
+            imageJobs.value = { ...imageJobs.value, [shotId]: next }
+          }).then((finalJob) => {
+            if (currentProject.value?.id !== projectId) return
+            endShotProcessing(shotId)
+            if (finalJob?.status === 'failed') {
+              error.value = String(finalJob.error || 'Image generation failed')
+            }
+          })
+          continue
+        }
+        if (job.kind === 'shot_clip') {
+          const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
+          if (!shotId) continue
+          processingClipId.value = shotId
+          clipJob.value = job
+          void watchJob(job.id, (next) => {
+            if (currentProject.value?.id !== projectId) return
+            clipJob.value = next
+          }).then((finalJob) => {
+            if (currentProject.value?.id !== projectId) return
+            if (processingClipId.value === shotId) processingClipId.value = null
+            if (finalJob?.status === 'failed') {
+              error.value = String(finalJob.error || 'Could not generate video')
+            }
+          })
+          continue
+        }
+        if (job.kind === 'create_draft') {
+          draftJob.value = job
+          creatingDraft.value = true
+          void watchJob(job.id, (next) => {
+            if (currentProject.value?.id !== projectId) return
+            draftJob.value = next
+          }).then((finalJob) => {
+            if (currentProject.value?.id !== projectId) return
+            creatingDraft.value = false
+            if (finalJob?.status === 'failed') {
+              error.value = String(finalJob.error || 'Create draft failed')
+            }
+          })
+        }
+      }
+    } catch {
+      // Project load still succeeds even if job resume fails.
+    }
+  }
+
+  async function cancelJob(jobId: string) {
+    if (!jobId || isCancellingJob(jobId)) return
+    cancellingJobIds.value = [...cancellingJobIds.value, jobId]
+    error.value = ''
+    try {
+      const job = await api.cancelJob(jobId)
+      if (currentJob.value?.id === jobId) currentJob.value = job
+      if (clipJob.value?.id === jobId) clipJob.value = job
+      if (finalCutJob.value?.id === jobId) finalCutJob.value = job
+      const shotId = Object.entries(imageJobs.value).find(([, item]) => item.id === jobId)?.[0]
+      if (shotId) imageJobs.value = { ...imageJobs.value, [shotId]: job }
+      const characterId = Object.entries(castJobs.value).find(([, item]) => item.id === jobId)?.[0]
+      if (characterId) castJobs.value = { ...castJobs.value, [characterId]: job }
+      return job
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not cancel job'
+      throw cause
+    } finally {
+      cancellingJobIds.value = cancellingJobIds.value.filter((id) => id !== jobId)
+    }
+  }
+
   async function initialize(projectId?: string) {
     error.value = ''
     try {
@@ -46,14 +231,26 @@ export const useStudioStore = defineStore('studio', () => {
       imageProviders.value = imageProviderResult
       videoProvider.value = videoProviderResult
       projects.value = projectResult
-      if (projectId) await loadProject(projectId)
+      if (projectId) await loadProject(projectId, { resumeJobs: true })
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not connect to the local API'
     }
   }
 
-  async function loadProject(id: string) {
+  async function loadProject(id: string, options?: { resumeJobs?: boolean }) {
     currentProject.value = await api.project(id)
+    if (options?.resumeJobs) {
+      imageJobs.value = {}
+      castJobs.value = {}
+      clipJob.value = null
+      processingShotIds.value = []
+      processingClipId.value = null
+      void resumeActiveJobs(id)
+    }
+  }
+
+  async function selectProject(id: string) {
+    await loadProject(id, { resumeJobs: true })
   }
 
   async function deleteProject(id: string) {
@@ -63,7 +260,7 @@ export const useStudioStore = defineStore('studio', () => {
       projects.value = await api.projects()
       if (currentProject.value?.id === id) {
         currentProject.value = null
-        if (projects.value[0]) await loadProject(projects.value[0].id)
+        if (projects.value[0]) await loadProject(projects.value[0].id, { resumeJobs: true })
       }
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not delete project'
@@ -84,6 +281,7 @@ export const useStudioStore = defineStore('studio', () => {
         currentJob.value = await api.job(currentJob.value.id)
       }
       if (currentJob.value.status === 'failed') throw new Error(currentJob.value.error || 'Analysis failed')
+      if (currentJob.value.status === 'cancelled') return
       projects.value = await api.projects()
       await loadProject(currentJob.value.project_id)
     } catch (cause) {
@@ -108,6 +306,7 @@ export const useStudioStore = defineStore('studio', () => {
         currentJob.value = await api.job(currentJob.value.id)
       }
       if (currentJob.value.status === 'failed') throw new Error(currentJob.value.error || 'Continuation analysis failed')
+      if (currentJob.value.status === 'cancelled') return
       await loadProject(currentProject.value.id)
       projects.value = await api.projects()
     } catch (cause) {
@@ -158,17 +357,13 @@ export const useStudioStore = defineStore('studio', () => {
     beginShotProcessing(id)
     try {
       let job = await api.generateShotImage(id, aspectRatio, characterIds)
-      imageJobs.value = { ...imageJobs.value, [id]: job }
-      while (job.status === 'queued' || job.status === 'running') {
-        await delay(500)
-        job = await api.job(job.id)
-        if (job.status === 'queued' && job.queue_position) {
-          job.message = `Queued · position ${job.queue_position}`
-        }
-        imageJobs.value = { ...imageJobs.value, [id]: job }
-      }
+      imageJobs.value = { ...imageJobs.value, [id]: withQueueLabel(job) }
+      const finalJob = await watchJob(job.id, (next) => {
+        imageJobs.value = { ...imageJobs.value, [id]: next }
+      })
+      job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Image generation failed')
-      await loadProject(currentProject.value.id)
+      if (job.status === 'cancelled') return
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not generate image'
       throw cause
@@ -185,6 +380,18 @@ export const useStudioStore = defineStore('studio', () => {
       await loadProject(currentProject.value.id)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not create character'
+      throw cause
+    }
+  }
+
+  async function syncCast() {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      await api.syncCast(currentProject.value.id)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not sync cast from script'
       throw cause
     }
   }
@@ -221,6 +428,24 @@ export const useStudioStore = defineStore('studio', () => {
       await loadProject(currentProject.value.id)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not upload reference image'
+      throw cause
+    }
+  }
+
+  async function generateCharacterReference(id: string, look?: string) {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      let job = await api.generateCharacterReference(id, look)
+      castJobs.value = { ...castJobs.value, [id]: withQueueLabel(job) }
+      const finalJob = await watchJob(job.id, (next) => {
+        castJobs.value = { ...castJobs.value, [id]: next }
+      })
+      job = finalJob ?? (await api.job(job.id))
+      if (job.status === 'failed') throw new Error(job.error || 'Face reference generation failed')
+      if (job.status === 'cancelled') return
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not generate face reference'
       throw cause
     }
   }
@@ -273,12 +498,13 @@ export const useStudioStore = defineStore('studio', () => {
     processingClipId.value = id
     try {
       let job = await api.generateShotClip(id, aspectRatio)
-      while (job.status === 'queued' || job.status === 'running') {
-        await delay(750)
-        job = await api.job(job.id)
-      }
+      clipJob.value = withQueueLabel(job)
+      const finalJob = await watchJob(job.id, (next) => {
+        clipJob.value = next
+      })
+      job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
-      await loadProject(currentProject.value.id)
+      if (job.status === 'cancelled') return
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not generate video'
       throw cause
@@ -330,12 +556,46 @@ export const useStudioStore = defineStore('studio', () => {
       if (finalCutJob.value.status === 'failed') {
         throw new Error(finalCutJob.value.error || 'Final cut render failed')
       }
+      if (finalCutJob.value.status === 'cancelled') return
       await loadProject(currentProject.value.id)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not render final cut'
       throw cause
     } finally {
       renderingFinalCut.value = false
+    }
+  }
+
+  async function createDraft(options?: { variant?: OutputVariant; retry_failed_only?: boolean }) {
+    if (!currentProject.value) return
+    error.value = ''
+    creatingDraft.value = true
+    draftAttention.value = []
+    try {
+      const readiness = await api.draftReadiness(currentProject.value.id)
+      draftAttention.value = readiness.attention
+      draftJob.value = await api.createDraft(currentProject.value.id, options)
+      const finalJob = await watchJob(draftJob.value.id, (next) => {
+        draftJob.value = next
+      })
+      if (finalJob?.status === 'failed') {
+        throw new Error(finalJob.error || 'Create draft failed')
+      }
+      if (finalJob?.error) {
+        draftAttention.value = [
+          ...draftAttention.value,
+          ...String(finalJob.error)
+            .split(';')
+            .map((message) => ({ code: 'draft', message: message.trim() }))
+            .filter((item) => item.message),
+        ]
+      }
+      await loadProject(currentProject.value.id, { resumeJobs: false })
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not create draft'
+      throw cause
+    } finally {
+      creatingDraft.value = false
     }
   }
 
@@ -358,20 +618,29 @@ export const useStudioStore = defineStore('studio', () => {
     videoProvider,
     imageProviders,
     imageJobs,
+    castJobs,
     currentJob,
+    clipJob,
     jobElapsedSeconds,
     busy,
     approvingScript,
     continuingScript,
     processingShotIds,
     isProcessingShot,
+    isGeneratingCast,
+    isCancellingJob,
+    cancelJob,
     processingClipId,
     finalCutJob,
+    draftJob,
+    draftAttention,
+    creatingDraft,
     renderingFinalCut,
     error,
     pendingSuggestions,
     initialize,
     loadProject,
+    selectProject,
     deleteProject,
     createProject,
     continueProject,
@@ -380,15 +649,18 @@ export const useStudioStore = defineStore('studio', () => {
     updateShot,
     generateShotImage,
     createCharacter,
+    syncCast,
     updateCharacter,
     deleteCharacter,
     uploadCharacterReference,
+    generateCharacterReference,
     deleteCharacterReference,
     uploadShotImage,
     deleteShotImage,
     generateShotClip,
     uploadShotClip,
     deleteShotClip,
+    createDraft,
     renderFinalCut,
     deleteFinalCut,
   }

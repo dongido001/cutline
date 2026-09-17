@@ -63,8 +63,8 @@ def test_timeline_renders_both_variants_with_text_overlay(tmp_path, monkeypatch)
     shorts = assemble_timeline(project, document, "shorts", session)
     assert (tmp_path / "media" / landscape.filename).is_file()
     assert (tmp_path / "media" / shorts.filename).is_file()
-    assert (landscape.width, landscape.height) == (1280, 720)
-    assert (shorts.width, shorts.height) == (720, 1280)
+    assert (landscape.width, landscape.height) == (1920, 1080)
+    assert (shorts.width, shorts.height) == (1080, 1920)
     assert 450 <= landscape.duration_ms <= 600
     assert 450 <= shorts.duration_ms <= 600
     session.close()

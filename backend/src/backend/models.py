@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -84,6 +84,10 @@ class Scene(Base):
     end_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     action: Mapped[str] = mapped_column(Text, default="")
     dialogue: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    set_notes: Mapped[str] = mapped_column(Text, default="")
+    lighting_notes: Mapped[str] = mapped_column(Text, default="")
+    wardrobe_notes: Mapped[str] = mapped_column(Text, default="")
+    props_notes: Mapped[str] = mapped_column(Text, default="")
 
     script_version: Mapped[ScriptVersion] = relationship(back_populates="scenes")
     shots: Mapped[list["Shot"]] = relationship(
@@ -108,7 +112,13 @@ class Shot(Base):
     image_prompt: Mapped[str] = mapped_column(Text, default="")
     video_prompt: Mapped[str] = mapped_column(Text, default="")
     title_card_text: Mapped[str] = mapped_column(Text, default="")
+    character_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(32), default="planned")
+    selected_image_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_clip_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_audio_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    dialogue_audio_filename: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    dialogue_audio_mime: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     scene: Mapped[Scene] = relationship(back_populates="shots")
     image: Mapped["ShotImage | None"] = relationship(
@@ -119,6 +129,9 @@ class Shot(Base):
     )
     media_variants: Mapped[list["ShotMediaVariant"]] = relationship(
         back_populates="shot", cascade="all, delete-orphan"
+    )
+    takes: Mapped[list["ShotTake"]] = relationship(
+        back_populates="shot", cascade="all, delete-orphan", order_by="ShotTake.created_at"
     )
 
 
@@ -186,6 +199,31 @@ class ShotMediaVariant(Base):
         return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
 
 
+class ShotTake(Base):
+    """Selectable generation result for a shot (image, clip, or dialogue audio)."""
+
+    __tablename__ = "shot_takes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    media_type: Mapped[str] = mapped_column(String(12))
+    aspect_ratio: Mapped[str] = mapped_column(String(12), default="16:9")
+    filename: Mapped[str] = mapped_column(String(240))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    source: Mapped[str] = mapped_column(String(24))
+    provider: Mapped[str] = mapped_column(String(80))
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+    shot: Mapped[Shot] = relationship(back_populates="takes")
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
+
+
 class ProjectFinalCut(Base):
     __tablename__ = "project_final_cuts"
 
@@ -218,6 +256,7 @@ class ProjectTimeline(Base):
     )
     revision: Mapped[int] = mapped_column(Integer, default=1)
     document: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    shorts_document: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
     project: Mapped[Project] = relationship(back_populates="timeline")
