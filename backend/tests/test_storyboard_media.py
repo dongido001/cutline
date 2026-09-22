@@ -49,7 +49,7 @@ def test_image_generation_falls_back_in_configured_order(tmp_path, monkeypatch) 
     ])
     calls = []
 
-    def request(provider, prompt, aspect_ratio, progress=None, references=None):
+    def request(provider, prompt, aspect_ratio, progress=None, references=None, conversation_url=None):
         calls.append(provider)
         if provider == "chatgpt_web":
             raise RuntimeError("no generated image")
@@ -104,25 +104,31 @@ def test_image_generation_passes_references_to_provider(tmp_path, monkeypatch) -
     ])
     seen = {}
 
-    def request(provider, prompt, aspect_ratio, progress=None, references=None):
+    def request(provider, prompt, aspect_ratio, progress=None, references=None, conversation_url=None):
         seen["provider"] = provider
         seen["prompt"] = prompt
         seen["references"] = list(references or [])
-        return b"\x89PNG\r\n\x1a\nimage", "model", {}
+        seen["conversation_url"] = conversation_url
+        return b"\x89PNG\r\n\x1a\nimage", "model", {"conversation_url": "https://chatgpt.com/c/project"}
 
     monkeypatch.setattr(media, "_request_provider_image", request)
     refs = [FaceReferenceImage(character_name="MARA", mime_type="image/png", data=b"face")]
+    remember = {}
     filename, mime_type, provider = generate_storyboard_image(
         "MARA smiles",
         "scene",
         "wide",
         "16:9",
         references=refs,
+        conversation_url="https://chatgpt.com/c/old",
+        remember=remember,
     )
 
     assert provider == "chatgpt_web"
     assert mime_type == "image/png"
     assert seen["provider"] == "chatgpt_web"
     assert seen["references"] == refs
+    assert seen["conversation_url"] == "https://chatgpt.com/c/old"
+    assert remember["url"] == "https://chatgpt.com/c/project"
     assert "Identity references are attached for: MARA" in seen["prompt"]
     assert (settings.media_dir / filename).is_file()

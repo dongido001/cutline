@@ -1,0 +1,1152 @@
+GREENHOUSE
+
+Genre: psychological mystery
+Duration: 300 seconds
+Format: 50 shots x ~6 seconds
+Aspect ratio: 16:9
+
+Character consistency
+
+JUN (lead) — JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. Soft-spoken Korean writer, socially careful, watches more than he speaks. Never changes clothes in this film.
+MIRA (supporting) — MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors. Warm, impulsive, theatrical when happy. Barefoot indoors until exit. Never changes clothes except adding white sneakers at the door.
+BEN (antagonist) — BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression. Wealthy, gently predatory calm. Treats people like rare objects. Never changes clothes.
+
+Location: Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. Entire film stays in or immediately outside this apartment door/stair landing. Maintain identical set dressing: low table, oranges and juice after Shot 5, floor lamp, thin grey curtains, blue-hour then night progression only through window light — no location changes, no costume changes, no new major props.
+
+MAIN SEQUENCE
+
+
+SHOT 1 - STAIRWELL ARRIVAL
+
+Scene: RETURN
+Location: Apartment stair landing outside Mira's door
+Time of day: Evening
+Time: 00:00-00:06
+Framing: Wide establishing shot
+
+Action:
+Jun climbs the last stairs to Mira's floor, pauses with a plastic bag of fruit, listening.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Distant traffic, soft stairwell echo, keys faintly jingling.
+
+Image prompt:
+Exterior-adjacent stair landing leading to apartment door, dusk through a small window. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. He holds a small grocery bag. Door number faintly visible. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Slow push toward Jun as he reaches the landing; subtle breathing; identity preserved.
+
+SHOT 2 - DOOR KNOCK
+
+Scene: RETURN
+Location: Apartment stair landing outside Mira's door
+Time of day: Evening
+Time: 00:06-00:11
+Framing: Medium shot
+
+Action:
+Jun knocks twice on Mira's door, then waits, bag hanging from his fingers.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Two soft knocks, hallway hush.
+
+Image prompt:
+Apartment hallway, Mira's door closed. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers knocking. Warm spill under the door. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations continuity through the door crack. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Hand knocks twice; slight body sway; camera locked; face consistent.
+
+SHOT 3 - DOOR OPENS
+
+Scene: RETURN
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:11-00:16
+Framing: Over-the-shoulder
+
+Action:
+Mira opens the door mid-laugh, surprised and delighted to see Jun.
+
+Dialogue:
+MIRA:
+"Jun? You actually came."
+
+Sound: Door latch, warm room tone, Mira's bright voice.
+
+Image prompt:
+Doorway threshold. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors opening the door toward camera. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers on the landing in soft focus foreground shoulder. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations visible behind her. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Door swings open; Mira's smile widens; light lipsync on dialogue; keep both faces locked.
+
+SHOT 4 - THRESHOLD HUG
+
+Scene: RETURN
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:16-00:22
+Framing: Medium two-shot
+
+Action:
+Mira pulls Jun into a quick half-hug; he stiffens then softens, still holding the bag.
+
+Dialogue:
+MIRA:
+"Come in before the neighbours invent a story."
+
+Sound: Fabric rustle, room tone, distant city.
+
+Image prompt:
+Inside the doorway. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors and JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers embracing lightly. Same mustard cardigan and olive jacket. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Short embrace; bag swings; camera slow lateral drift; identity preserved.
+
+SHOT 5 - FRUIT ON THE TABLE
+
+Scene: RETURN
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:22-00:29
+Framing: High angle
+
+Action:
+Jun sets oranges and a small carton of juice on the low table. Mira pads barefoot to the lamp and brightens it.
+
+Dialogue:
+JUN:
+"I brought fruit. You said you forget to eat."
+
+Sound: Bag on wood, lamp click, soft room hum.
+
+Image prompt:
+Low table with oranges and juice. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers placing them. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors at the floor lamp. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. Blue hour at the window. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Hands set fruit down; lamp brightens; gentle camera settle; continuity of wardrobe and set.
+
+SHOT 6 - WINDOW BLUE HOUR
+
+Scene: RETURN
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:29-00:36
+Framing: Wide shot
+
+Action:
+They stand near the window. Mira points at the skyline as if showing a secret; Jun watches her more than the view.
+
+Dialogue:
+MIRA:
+"Look — the greenhouses on the ridge look like tiny planets when the lights come on."
+
+Sound: City murmur under glass, Mira's voice soft.
+
+Image prompt:
+Wide of living room. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors and JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers at the window. Distant greenhouse lights as tiny warm dots outside. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Subtle city light flicker; Mira gestures; Jun's gaze shifts to her; slow push-in.
+
+SHOT 7 - A VOICE FROM THE HALL
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:36-00:42
+Framing: Medium close-up
+
+Action:
+Jun freezes as a calm male voice calls from deeper in the apartment, already at home.
+
+Dialogue:
+BEN:
+"Mira, is that your writer friend?"
+
+Sound: Ben's voice off-screen, room tone.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers, startled, looking toward an off-screen hallway. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations bokeh. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Micro expression of surprise; slight head turn; hold identity; no cutaway yet.
+
+SHOT 8 - BEN APPEARS
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:42-00:48
+Framing: Medium shot
+
+Action:
+Ben steps in from the short hall with easy ownership, glass of water in hand, smiling as if he expected Jun.
+
+Dialogue:
+BEN:
+"I'm Ben. Don't look so hunted — I'm harmless."
+
+Sound: Soft footsteps, glass clink, amused voice.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression entering the living room with a glass of water. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers and MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors present. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Ben walks in smoothly; offers a polite smile; lipsync; keep all three identities locked.
+
+SHOT 9 - INTRODUCTIONS
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:48-00:55
+Framing: Three-shot
+
+Action:
+Awkward triangle: Mira bright, Ben relaxed, Jun polite and cornered.
+
+Dialogue:
+MIRA:
+"Ben gave me a ride back from Gangnam. He was already upstairs when you texted."
+
+Sound: Room tone, overlapping soft city noise.
+
+Image prompt:
+Three people standing in the small living room. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors, BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. Same clothes. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Small shifts in weight; Mira glances between them; subtle tension in Jun's shoulders.
+
+SHOT 10 - HANDSHAKE
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 00:55-01:02
+Framing: Close-up insert
+
+Action:
+Ben extends a clean hand. Jun hesitates half a beat, then shakes.
+
+Dialogue:
+BEN:
+"I've read nothing you've written. That makes me honest."
+
+Sound: Quiet handshake, Ben's dry humor.
+
+Image prompt:
+Close insert of handshake between BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression and JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. Gold watch visible. Olive jacket sleeve vs charcoal sweater. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Handshake completes; slight camera push; faces partially in frame stay consistent.
+
+SHOT 11 - WHO SITS WHERE
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:02-01:08
+Framing: Wide shot
+
+Action:
+Mira sits on the floor by the table. Ben takes the only chair. Jun remains standing a moment too long, then sits opposite.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Floor creak, fabric, room tone.
+
+Image prompt:
+Blocking diagram as image: MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors on floor, BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression in chair, JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers sitting opposite. Oranges on table. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+They settle into positions; camera slow arc; maintain identities and set.
+
+SHOT 12 - SMALL TALK CUTS
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:08-01:14
+Framing: Medium close-up
+
+Action:
+Ben studies Jun with mild curiosity while peeling an orange slowly, as if he has all night.
+
+Dialogue:
+BEN:
+"Mira says you notice things. Dangerous hobby."
+
+Sound: Orange peel soft tears, Ben's low voice.
+
+Image prompt:
+Close on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression peeling an orange, eyes on off-screen Jun. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations warm lamp. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Fingers peel orange; tiny smile; lipsync; identity locked.
+
+SHOT 13 - JUN DEFLECTS
+
+Scene: THE THIRD
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:14-01:20
+Framing: Medium close-up
+
+Action:
+Jun tries to smile it off, fingers worrying the edge of the table.
+
+Dialogue:
+JUN:
+"I mostly notice when people leave."
+
+Sound: Room tone, Jun's quieter voice.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers, uneasy smile, olive jacket, grey crewneck. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Fingers fidget; eyes flick toward Ben; lipsync; preserve face.
+
+SHOT 14 - MIRA'S IDEA
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:20-01:25
+Framing: Medium shot
+
+Action:
+Mira kneels up suddenly, excited, palms open like a stage magician.
+
+Dialogue:
+MIRA:
+"Wait — I learned something in Africa. A dance for hunger."
+
+Sound: Her bright energy cutting the tension.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors rising onto her knees, animated. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers and BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression watching. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+She sits up with energy; hair moves; keep mustard cardigan and necklace consistent.
+
+SHOT 15 - INVISIBLE TANGERINE
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:25-01:31
+Framing: Medium close-up
+
+Action:
+Mira mimes plucking a huge invisible tangerine from the air, cradling it with reverence.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Soft breath, fabric, distant traffic.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors hands cupped around empty air as if holding fruit. Soft focus lamp. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Hands shape imaginary fruit; sincere face; slow camera drift.
+
+SHOT 16 - SHE EATS AIR
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:31-01:38
+Framing: Close-up
+
+Action:
+She bites the invisible fruit, eyes closing, juice that isn't there running down an imagined chin — fully committed.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Quiet room, almost ceremonial silence.
+
+Image prompt:
+Intimate close-up of MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors biting invisible fruit, eyes closed, emotional. Mustard cardigan, silver necklace. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Bite motion, swallow, emotional micro-expressions; no real fruit appears.
+
+SHOT 17 - BEN APPLAUDS
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:38-01:44
+Framing: Medium shot
+
+Action:
+Ben claps once, delighted like a collector who found a rare piece.
+
+Dialogue:
+BEN:
+"Beautiful. Most people mime appetite. You mime need."
+
+Sound: Single clap, Ben's pleased voice.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression clapping lightly, watching Mira. MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors still mid-pantomime. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+One clap; Ben leans forward; keep both faces locked.
+
+SHOT 18 - JUN WATCHES BOTH
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:44-01:50
+Framing: Over-the-shoulder
+
+Action:
+Jun's face from behind Mira's shoulder: fascination mixed with the first real unease about Ben's gaze.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Room tone, faint fridge hum.
+
+Image prompt:
+OTS past MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors's shoulder onto JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers's unsettled face. BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression soft in background. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Jun's eyes track from Mira to Ben; subtle tension; continuity of positions.
+
+SHOT 19 - PANTOMIME ENDS
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:50-01:56
+Framing: Medium two-shot
+
+Action:
+Mira laughs it off, wiping imaginary juice, then reaches for a real orange and tosses it to Jun.
+
+Dialogue:
+MIRA:
+"Your turn someday. When you're starving enough."
+
+Sound: Soft laugh, orange catch.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors tossing a real orange to JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. Warm lamp. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Toss and catch; laughter; identities preserved.
+
+SHOT 20 - ORANGE IN JUN'S HAND
+
+Scene: PANTOMIME
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 01:56-02:02
+Framing: Insert close-up
+
+Action:
+Jun holds the real orange too tightly, thumb pressing the peel until oil shines.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Soft peel stress, room tone.
+
+Image prompt:
+Close insert: JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers's hand crushing an orange slightly, olive jacket cuff. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Thumb press; oil glints; tiny tremor.
+
+SHOT 21 - AFTER SHE SETTLES
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:02-02:08
+Framing: Wide shot
+
+Action:
+Mira curls against the wall with juice. Ben and Jun face each other across the low table like a quiet duel.
+
+Dialogue:
+Dialogue: None.
+
+Sound: City hush, lamp buzz almost inaudible.
+
+Image prompt:
+Wide: MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors against wall, BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression in chair, JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers opposite. Oranges. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations dusk deeper. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Slow push into the two men; Mira soft in frame edge.
+
+SHOT 22 - BEN NAMES THE HOBBY
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:08-02:15
+Framing: Medium close-up
+
+Action:
+Ben speaks lightly, almost bored, as if describing a golf handicap.
+
+Dialogue:
+BEN:
+"I have a hobby. I burn greenhouses."
+
+Sound: Ben's calm voice, no music swell.
+
+Image prompt:
+Close on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, soft smile, charcoal sweater, gold watch. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Still face; precise lipsync; tiny head tilt; identity locked.
+
+SHOT 23 - JUN DOESN'T LAUGH
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:15-02:22
+Framing: Medium close-up
+
+Action:
+Jun waits for the joke. It doesn't arrive. His throat works.
+
+Dialogue:
+JUN:
+"For money?"
+
+Sound: Tight room tone.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers, stunned, trying to stay polite. Olive jacket. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Swallow; eyes search Ben; lipsync; preserve face.
+
+SHOT 24 - FOR THE LITTLE FLAME
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:22-02:29
+Framing: Medium close-up
+
+Action:
+Ben shakes his head, amused at the misunderstanding.
+
+Dialogue:
+BEN:
+"For the little flame. The moment the plastic skin collapses. It's... purifying."
+
+Sound: Quiet voice, almost intimate.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression leaning slightly forward, eyes bright without heat. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Lean-in; soft gesture with hand; lipsync; keep identity.
+
+SHOT 25 - HOW OFTEN
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:29-02:36
+Framing: Two-shot
+
+Action:
+Jun stares. Ben peels another segment of orange and eats it without hurry.
+
+Dialogue:
+JUN:
+"How often?"
+
+BEN:
+"When I get bored. Maybe once every month or two."
+
+Sound: Chewing soft, dual voices.
+
+Image prompt:
+Two-shot JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers and BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression across the table. Orange segments. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Ben eats; Jun still; lipsync both; continuity of wardrobe and set.
+
+SHOT 26 - MIRA HALF-LISTENS
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:36-02:43
+Framing: Medium shot
+
+Action:
+Mira, half-drowsy against the wall, smiles as if she's heard a charming exaggeration.
+
+Dialogue:
+MIRA:
+"He says things like that. Rich people metaphors."
+
+Sound: Her soft dismissive laugh.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors against the wall with juice, sleepy smile. Mustard cardigan. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Small laugh; head tip; lipsync; identity locked.
+
+SHOT 27 - NOT A METAPHOR
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:43-02:50
+Framing: Close-up
+
+Action:
+Ben glances at Mira, then back to Jun — polite correction without heat.
+
+Dialogue:
+BEN:
+"Sometimes a metaphor is also a map."
+
+Sound: Dry delivery, room hush.
+
+Image prompt:
+Close on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, eyes steady. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Minimal movement; precise lipsync; hold tension.
+
+SHOT 28 - GREENHOUSE LIGHTS OUTSIDE
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:50-02:55
+Framing: Point-of-view wide
+
+Action:
+Jun looks to the window. Far ridge greenhouse lights blink. One cluster seems darker than the rest.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Distant city, almost wind.
+
+Image prompt:
+POV through Mira's window at dusk: distant greenhouse lights on a ridge, one dark patch. Reflection of room lamp. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Subtle light flicker; slow push toward glass; no new characters.
+
+SHOT 29 - AFTERTHOUGHT
+
+Scene: THE HOBBY
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 02:55-03:01
+Framing: Medium shot
+
+Action:
+Ben wipes his fingers with a napkin, then adds something like a footnote.
+
+Dialogue:
+BEN:
+"There's also the wells."
+
+Sound: Napkin soft sound, calm voice.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression wiping fingers, conversational. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers rigid. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Wipe hands; casual tone; lipsync; identities locked.
+
+SHOT 30 - WELLS WHERE GIRLS VANISH
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:01-03:08
+Framing: Medium close-up
+
+Action:
+Ben continues as if discussing weather, eyes on Jun for reaction more than confession.
+
+Dialogue:
+BEN:
+"Korea is full of abandoned wells. Useful places. Girls go missing near them sometimes."
+
+Sound: Even quieter voice; no score.
+
+Image prompt:
+Tight on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, soft lamp key light, charcoal sweater. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Stillness; measured lipsync; micro-smile at the end.
+
+SHOT 31 - JUN PUSHES
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:08-03:15
+Framing: Medium close-up
+
+Action:
+Jun's voice goes thin. He tries to keep it a writer's question.
+
+Dialogue:
+JUN:
+"You're saying you put someone in a well."
+
+Sound: Tight breath under dialogue.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers, pale under lamp, jaw tight. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Breath hitch; lipsync; eyes wet without crying; preserve face.
+
+SHOT 32 - MAYBE A JOKE
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:15-03:22
+Framing: Medium two-shot
+
+Action:
+Ben shrugs, offering Jun an exit ramp and a trap at once.
+
+Dialogue:
+BEN:
+"I'm saying the world has unused holes. What people do with them is... flexible. Maybe I'm joking."
+
+Sound: Shrug, soft fabric, calm voice.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression shrugging opposite JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers. Table between them. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Shrug; Jun leans in; lipsync; continuity.
+
+SHOT 33 - MIRA CHECKS HER PHONE
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:22-03:28
+Framing: Medium shot
+
+Action:
+Mira's phone buzzes. She glances, stands, suddenly in another story.
+
+Dialogue:
+MIRA:
+"Work. They want me downstairs in ten."
+
+Sound: Phone buzz, her brighter tone returning.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors standing with phone glow on her face. Mustard cardigan, bare feet. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Phone light; she stands; lipsync; identity locked.
+
+SHOT 34 - SHE DOESN'T HEAR IT
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:28-03:34
+Framing: Over-the-shoulder
+
+Action:
+Jun looks at Mira as if to warn her; she is already hunting for shoes, missing the undercurrent.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Drawer rummage, room tone.
+
+Image prompt:
+OTS JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers watching MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors search for shoes near the door. BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression seated, watching both. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Mira moves; Jun frozen; Ben still; slow camera pan.
+
+SHOT 35 - BEN SMILES AT THE CHAOS
+
+Scene: THE WELL
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:34-03:40
+Framing: Close-up
+
+Action:
+Ben watches Mira's exit prep with fond ownership, then flicks his eyes to Jun — checkmate energy without words.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Room tone only.
+
+Image prompt:
+Close on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, fond then sharp. Gold watch. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Eye flick toward Jun; tiny smile; no dialogue.
+
+SHOT 36 - SHOES ON
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:40-03:45
+Framing: Medium shot
+
+Action:
+Mira pulls on white sneakers by the door, cardigan still on, necklace catching lamp light.
+
+Dialogue:
+MIRA:
+"Don't interrogate each other. You're both weird in different fonts."
+
+Sound: Shoe scuff, light laugh.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors at the door putting on white sneakers. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers and BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression behind her. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+She ties laces; laugh; lipsync; identities preserved.
+
+SHOT 37 - KISS ON THE CHEEK
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:45-03:51
+Framing: Medium close-up
+
+Action:
+Mira kisses Jun's cheek quickly, then squeezes Ben's shoulder like a hostess leaving her own party.
+
+Dialogue:
+MIRA:
+"Eat the oranges. Somebody should."
+
+Sound: Quick kiss sound, door approaching.
+
+Image prompt:
+MIRA: Korean woman mid-20s, shoulder-length black hair with soft waves, warm open face, mustard knit cardigan over a white tee, high-waisted blue jeans, thin silver necklace, bare feet indoors kissing JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers's cheek; BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression nearby. Same wardrobe. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Kiss; step to Ben; squeeze shoulder; continuity.
+
+SHOT 38 - DOOR CLOSES
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:51-03:57
+Framing: Wide shot
+
+Action:
+Door closes. The apartment feels smaller. Two men and the oranges remain.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Door latch, sudden quieter room.
+
+Image prompt:
+Wide after exit: JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers and BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression alone at the table. Empty space where Mira was. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Door closes; ambient drop; slow push on the two men.
+
+SHOT 39 - SILENCE GAME
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 03:57-04:03
+Framing: Two-shot
+
+Action:
+They sit in silence. Ben finishes the orange. Jun does not blink enough.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Chewing, city far away.
+
+Image prompt:
+Two-shot silence. BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression eating; JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers staring. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations night deepening outside. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Ben chews; Jun still; long held tension.
+
+SHOT 40 - BEN OFFERS NORMAL
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:03-04:09
+Framing: Medium close-up
+
+Action:
+Ben breaks the silence with hospitality, as if the well never existed.
+
+Dialogue:
+BEN:
+"She's special. People like her vanish if nobody pays attention."
+
+Sound: Conversational, soft threat under care.
+
+Image prompt:
+Close on BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression, caring tone that doesn't comfort. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Slight lean; lipsync; eyes sincere and wrong.
+
+SHOT 41 - JUN'S LINE
+
+Scene: EXIT
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:09-04:15
+Framing: Medium close-up
+
+Action:
+Jun answers carefully, like placing a glass on thin ice.
+
+Dialogue:
+JUN:
+"Then maybe stop talking about wells."
+
+Sound: Tight, controlled voice.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers, controlled fear. Olive jacket. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Jaw set; lipsync; tiny eye twitch.
+
+SHOT 42 - LIFT OFFER
+
+Scene: OFFER
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:15-04:20
+Framing: Medium shot
+
+Action:
+Ben stands, smooth, collecting his keys from the table.
+
+Dialogue:
+BEN:
+"I can drop you somewhere. My car's downstairs."
+
+Sound: Keys lift, chair scrape.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression standing with keys. JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers still seated. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Ben stands; keys glint; lipsync; identity locked.
+
+SHOT 43 - JUN DECLINES
+
+Scene: OFFER
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:20-04:25
+Framing: Medium close-up
+
+Action:
+Jun shakes his head once, too fast.
+
+Dialogue:
+JUN:
+"I'll walk."
+
+Sound: Short refusal.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers refusing. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Head shake; lipsync; held breath.
+
+SHOT 44 - BEN ACCEPTS THE REFUSAL
+
+Scene: OFFER
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:25-04:30
+Framing: Medium shot
+
+Action:
+Ben smiles like a man who already won a different game.
+
+Dialogue:
+BEN:
+"Good. Walking clears the metaphors."
+
+Sound: Amused voice, keys pocketed.
+
+Image prompt:
+BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression smiling, pocketing keys near the door. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Smile; pocket keys; step toward door; lipsync.
+
+SHOT 45 - AT THE DOOR
+
+Scene: OFFER
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:30-04:35
+Framing: Over-the-shoulder
+
+Action:
+Ben pauses at the door, looking back at Jun still seated among oranges.
+
+Dialogue:
+BEN:
+"If a greenhouse burns this month, don't write me into it."
+
+Sound: Doorframe hush, dry joke.
+
+Image prompt:
+OTS from JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers to BEN: Korean man early 30s, polished calm face, neat side-part black hair, expensive charcoal crewneck sweater, black slim trousers, clean black loafers, thin gold watch, faintly amused expression at the open door. Hall light colder. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Ben half-turns; lipsync; Jun frozen in FG.
+
+SHOT 46 - BEN LEAVES
+
+Scene: OFFER
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:35-04:40
+Framing: Wide shot
+
+Action:
+Ben leaves. Door closes. Jun alone with fruit, lamp, and the window.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Door latch, thick silence.
+
+Image prompt:
+Wide: JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers alone in Mira's apartment. Oranges on table. Empty chair. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations night. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Door closes; Jun doesn't move; slow push-in.
+
+SHOT 47 - ALONE WITH THE WINDOW
+
+Scene: RESIDUE
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:40-04:45
+Framing: Wide shot
+
+Action:
+Jun stands and goes to the window. Ridge lights glitter. One dark gap holds.
+
+Dialogue:
+Dialogue: None.
+
+Sound: City night murmur.
+
+Image prompt:
+JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers at the window, back partly to camera, olive jacket. Distant greenhouse lights. Mira's small Seoul apartment living room at blue-hour dusk: worn wood floor, one large window with thin grey curtains half-drawn, a low table with an empty glass, a single warm floor lamp, sparse plants, soft urban glow outside, no other locations. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+He approaches glass; city lights breathe; hold identity.
+
+SHOT 48 - PHONE BUZZ
+
+Scene: RESIDUE
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:45-04:50
+Framing: Insert close-up
+
+Action:
+Jun's phone buzzes on the table beside the oranges.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Harsh phone buzz in quiet room.
+
+Image prompt:
+Insert: phone vibrating beside oranges and juice carton on the low table. Lamp glow. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Phone buzzes; subtle table vibration.
+
+SHOT 49 - THE MESSAGE
+
+Scene: RESIDUE
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:50-04:55
+Framing: Over-the-shoulder phone
+
+Action:
+On screen, a message from Mira: don't trust him. Then a second bubble typing… that never sends.
+
+Dialogue:
+Dialogue: None.
+
+Sound: Notification tap, room tone.
+
+Image prompt:
+OTS JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers reading phone. Message text clearly readable: "don't trust him." Typing dots appear then vanish. Keep Jun face consistent in profile. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Thumb unlocks; message appears; typing dots fail; Jun's profile stiffens.
+
+SHOT 50 - FINAL LOOK
+
+Scene: RESIDUE
+Location: Mira's small Seoul apartment living room
+Time of day: Evening
+Time: 04:55-05:00
+Framing: Close-up
+
+Action:
+Jun looks from the phone to the dark ridge. He does not call her. He only watches the place where a little flame could start.
+
+Dialogue:
+Dialogue: None.
+
+Sound: City hush, almost nothing.
+
+Image prompt:
+Close on JUN: Korean man mid-20s, lean build, short black hair slightly messy, quiet watchful eyes, light stubble, faded olive utility jacket over a grey crewneck, dark jeans, scuffed white sneakers's face, phone light fading, eyes on off-screen window. Fear without spectacle. Olive jacket collar. cinematic still, naturalistic Korean indie drama, soft practical lighting, subtle film grain, 16:9, no text, no subtitles, no watermark
+
+Video prompt:
+Eyes shift to window; tiny exhale; hold; slow fade of phone light; end.

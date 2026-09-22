@@ -35,10 +35,13 @@ class Settings(BaseSettings):
     comfyui_timeout_seconds: int = 1800
     video_fps: int = 16
     runway_api_key: str = ""
-    runway_model: str = "gen4.5"
+    # gen4_turbo is cheaper/faster for long-form drafts; set gen4.5 for highest quality.
+    runway_model: str = "gen4_turbo"
     runway_ratio_landscape: str = "1280:720"
     runway_ratio_portrait: str = "720:1280"
     runway_timeout_seconds: int = 900
+    # Cap Runway clip length at 5s (vs 10) to control cost on long films.
+    runway_max_duration: int = 5
     vibevoice_root: Path = Path("/Users/gideon/Projects/VibeVoice")
     vibevoice_model: str = "microsoft/VibeVoice-1.5B"
     vibevoice_python: str = "python"

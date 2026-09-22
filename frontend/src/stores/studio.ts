@@ -20,9 +20,21 @@ export const useStudioStore = defineStore('studio', () => {
   const continuingScript = ref(false)
   const processingShotIds = ref<string[]>([])
   const processingClipId = ref<string | null>(null)
+  const processingAudioId = ref<string | null>(null)
   const finalCutJob = ref<Job | null>(null)
   const draftJob = ref<Job | null>(null)
   const draftAttention = ref<Array<{ code: string; message: string; shot_id?: string }>>([])
+  const draftScenes = ref<Array<{
+    id: string
+    title: string
+    order_index: number
+    shot_count: number
+    images_ready: number
+    clips_ready: number
+    audio_ready: number
+    audio_needed: number
+    status: 'pending' | 'in_progress' | 'ready'
+  }>>([])
   const creatingDraft = ref(false)
   const renderingFinalCut = ref(false)
   const cancellingJobIds = ref<string[]>([])
@@ -351,6 +363,21 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  async function updateScene(
+    id: string,
+    input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
+  ) {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      await api.updateScene(id, input)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not update scene continuity'
+      throw cause
+    }
+  }
+
   async function generateShotImage(id: string, aspectRatio?: AspectRatio, characterIds: string[] = []) {
     if (!currentProject.value) return
     error.value = ''
@@ -369,6 +396,21 @@ export const useStudioStore = defineStore('studio', () => {
       throw cause
     } finally {
       endShotProcessing(id)
+    }
+  }
+
+  async function generateShotAudio(id: string) {
+    if (!currentProject.value) return
+    error.value = ''
+    processingAudioId.value = id
+    try {
+      await api.generateShotAudio(id)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not generate narration'
+      throw cause
+    } finally {
+      processingAudioId.value = null
     }
   }
 
@@ -574,9 +616,15 @@ export const useStudioStore = defineStore('studio', () => {
     try {
       const readiness = await api.draftReadiness(currentProject.value.id)
       draftAttention.value = readiness.attention
+      draftScenes.value = readiness.scenes || []
       draftJob.value = await api.createDraft(currentProject.value.id, options)
+      let pollTicks = 0
       const finalJob = await watchJob(draftJob.value.id, (next) => {
         draftJob.value = next
+        pollTicks += 1
+        if (pollTicks % 4 === 0 && currentProject.value) {
+          void loadProject(currentProject.value.id, { resumeJobs: false })
+        }
       })
       if (finalJob?.status === 'failed') {
         throw new Error(finalJob.error || 'Create draft failed')
@@ -591,6 +639,12 @@ export const useStudioStore = defineStore('studio', () => {
         ]
       }
       await loadProject(currentProject.value.id, { resumeJobs: false })
+      try {
+        const refreshed = await api.draftReadiness(currentProject.value.id)
+        draftScenes.value = refreshed.scenes || []
+      } catch {
+        // Banner still works from local scene ready counts.
+      }
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not create draft'
       throw cause
@@ -631,9 +685,11 @@ export const useStudioStore = defineStore('studio', () => {
     isCancellingJob,
     cancelJob,
     processingClipId,
+    processingAudioId,
     finalCutJob,
     draftJob,
     draftAttention,
+    draftScenes,
     creatingDraft,
     renderingFinalCut,
     error,
@@ -647,7 +703,9 @@ export const useStudioStore = defineStore('studio', () => {
     decideSuggestion,
     approveScript,
     updateShot,
+    updateScene,
     generateShotImage,
+    generateShotAudio,
     createCharacter,
     syncCast,
     updateCharacter,

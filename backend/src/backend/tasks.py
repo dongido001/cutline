@@ -5,12 +5,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from .cast import cast_portrait_prompt, sync_project_cast
+from .cast import cast_portrait_prompt, load_cast_references, sync_project_cast
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
-from .media import FaceReferenceImage, delete_media_file, generate_storyboard_image
+from .media import delete_media_file, generate_storyboard_image
 from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
 from .providers import get_script_provider, normalize_analysis_result
 from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
@@ -425,35 +425,11 @@ def _generate_shot_image(
             from .takes import continuity_prompt_suffix, record_take
 
             prompt = (prompt_override or shot.image_prompt).strip() + continuity_prompt_suffix(shot.scene)
-            references: list[FaceReferenceImage] = []
-            selected_ids = list(dict.fromkeys(character_ids or []))
-            if selected_ids:
-                characters = db.scalars(
-                    select(Character)
-                    .where(
-                        Character.project_id == project.id,
-                        Character.id.in_(selected_ids),
-                    )
-                    .options(selectinload(Character.references))
-                ).all()
-                by_id = {character.id: character for character in characters}
-                for character_id in selected_ids:
-                    character = by_id.get(character_id)
-                    if not character:
-                        continue
-                    for ref in character.references:
-                        path = settings.media_dir / ref.filename
-                        if not path.is_file():
-                            continue
-                        references.append(
-                            FaceReferenceImage(
-                                character_name=character.name,
-                                mime_type=ref.mime_type,
-                                data=path.read_bytes(),
-                            )
-                        )
-                if not references:
-                    raise RuntimeError("Selected cast characters have no usable reference images on disk")
+            references = load_cast_references(
+                db, project.id,
+                shot.character_ids if character_ids is None else character_ids,
+            )
+            image_session: dict[str, str] = {}
 
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
@@ -499,7 +475,11 @@ def _generate_shot_image(
                 target_aspect,
                 progress=report_progress,
                 references=references,
+                conversation_url=project.image_conversation_url,
+                remember=image_session,
             )
+            if image_session.get("url"):
+                project.image_conversation_url = image_session["url"]
             generated_filename = filename
             variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio

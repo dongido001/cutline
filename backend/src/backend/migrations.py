@@ -42,10 +42,27 @@ JOB_COLUMNS = {
     "conversation_url": "TEXT",
     "attempts": "JSON NOT NULL DEFAULT '[]'",
 }
+PROJECT_COLUMNS = {
+    "image_conversation_url": "TEXT",
+}
+
+
+def _ensure_columns(engine: Engine, table: str, columns: dict[str, str]) -> None:
+    inspector = inspect(engine)
+    if table not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns(table)}
+    missing = [name for name in columns if name not in existing]
+    if not missing:
+        return
+    with engine.begin() as connection:
+        for name in missing:
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {columns[name]}"))
 
 
 def migrate_schema(engine: Engine) -> None:
     """Apply the small additive migrations needed by the local prototype."""
+    _ensure_columns(engine, "projects", PROJECT_COLUMNS)
     existing = {column["name"] for column in inspect(engine).get_columns("shots")}
     missing = [name for name in SHOT_COLUMNS if name not in existing]
     needs_legacy_backfill = any(name in LEGACY_SHOT_COLUMNS for name in missing)

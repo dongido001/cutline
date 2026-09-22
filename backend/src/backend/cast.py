@@ -8,6 +8,8 @@ from typing import Any, Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from .media import FaceReferenceImage
+from .settings import settings
 from .models import Character, Project, Scene, ScriptVersion, Shot
 from .screenplay_parser import canonical_character_name, parse_character_consistency
 
@@ -165,3 +167,41 @@ def sync_project_cast(
 
     db.flush()
     return list(by_name.values())
+
+
+def load_cast_references(
+    db: Session, project_id: str, character_ids: Iterable[str]
+) -> list[FaceReferenceImage]:
+    """Resolve the complete selected cast, without silently dropping identities."""
+    selected_ids = list(dict.fromkeys(character_ids))
+    if not selected_ids:
+        return []
+    characters = db.scalars(
+        select(Character)
+        .where(Character.project_id == project_id, Character.id.in_(selected_ids))
+        .options(selectinload(Character.references))
+    ).all()
+    by_id = {character.id: character for character in characters}
+    if any(character_id not in by_id for character_id in selected_ids):
+        raise RuntimeError("One or more selected cast characters were not found in this project")
+    references: list[FaceReferenceImage] = []
+    missing: list[str] = []
+    for character_id in selected_ids:
+        character = by_id[character_id]
+        usable = []
+        for ref in character.references:
+            path = settings.media_dir / ref.filename
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if data:
+                usable.append(FaceReferenceImage(
+                    character_name=character.name, mime_type=ref.mime_type, data=data,
+                ))
+        if not usable:
+            missing.append(character.name)
+        references.extend(usable)
+    if missing:
+        raise RuntimeError("Add a usable reference image for: " + ", ".join(missing))
+    return references

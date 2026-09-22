@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from .cast import load_cast_references
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
@@ -29,12 +30,13 @@ from .settings import settings
 from .takes import continuity_prompt_suffix, record_take
 from .timeline import ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
+from .timing import estimate_dialogue_duration_ms
 from .video import generate_shot_clip, video_provider_status
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
 
 
-def _latest_shots(db: Session, project_id: str) -> list[Shot]:
-    version = db.scalar(
+def _latest_version(db: Session, project_id: str) -> ScriptVersion | None:
+    return db.scalar(
         select(ScriptVersion)
         .where(ScriptVersion.project_id == project_id)
         .options(
@@ -46,9 +48,49 @@ def _latest_shots(db: Session, project_id: str) -> list[Shot]:
         )
         .order_by(ScriptVersion.version_number.desc())
     )
+
+
+def _latest_shots(db: Session, project_id: str) -> list[Shot]:
+    version = _latest_version(db, project_id)
     if not version:
         return []
     return [shot for scene in version.scenes for shot in scene.shots]
+
+
+def _scene_index_map(shots: list[Shot]) -> dict[str, tuple[int, int, str]]:
+    """shot_id → (scene_number_1based, scene_total, scene_title)."""
+    ordered: list[Scene] = []
+    seen: set[str] = set()
+    for shot in shots:
+        scene = shot.scene
+        if scene.id in seen:
+            continue
+        seen.add(scene.id)
+        ordered.append(scene)
+    total = len(ordered)
+    by_scene = {
+        scene.id: (index + 1, total, scene.title or f"Scene {index + 1}")
+        for index, scene in enumerate(ordered)
+    }
+    return {shot.id: by_scene[shot.scene_id] for shot in shots if shot.scene_id in by_scene}
+
+
+def _format_scene_message(shot: Shot, scene_map: dict[str, tuple[int, int, str]], action: str) -> str:
+    info = scene_map.get(shot.id)
+    shot_label = shot.title or "shot"
+    if not info:
+        return f"{action} · {shot_label}"
+    number, total, title = info
+    return f"Scene {number}/{total} · {action} · {title}"
+
+
+def _clip_duration_for_shot(shot: Shot) -> int:
+    """Prefer authored duration; raise to dialogue speech-rate estimate when longer."""
+    authored = int(shot.duration_ms or 5000)
+    spoken = estimate_dialogue_duration_ms(shot.dialogue)
+    if spoken is None:
+        return authored
+    return max(authored, spoken)
 
 
 def _shot_image(shot: Shot, aspect: str) -> ShotImage | ShotMediaVariant | None:
@@ -110,6 +152,40 @@ def project_readiness(project: Project, db: Session) -> dict[str, Any]:
         if shot.dialogue and not shot.dialogue_audio_filename:
             missing_audio.append(shot.id)
 
+    scenes_progress: list[dict[str, Any]] = []
+    version = _latest_version(db, project.id)
+    if version:
+        for index, scene in enumerate(version.scenes):
+            scene_shots = list(scene.shots)
+            images_ready = sum(1 for shot in scene_shots if _shot_image(shot, aspect))
+            clips_ready = sum(1 for shot in scene_shots if _shot_clip(shot, aspect))
+            audio_needed = sum(1 for shot in scene_shots if shot.dialogue)
+            audio_ready = sum(
+                1
+                for shot in scene_shots
+                if shot.dialogue and shot.dialogue_audio_filename
+            )
+            shot_count = len(scene_shots)
+            if shot_count and clips_ready >= shot_count and audio_ready >= audio_needed:
+                status = "ready"
+            elif clips_ready or images_ready:
+                status = "in_progress"
+            else:
+                status = "pending"
+            scenes_progress.append(
+                {
+                    "id": scene.id,
+                    "title": scene.title or f"Scene {index + 1}",
+                    "order_index": index,
+                    "shot_count": shot_count,
+                    "images_ready": images_ready,
+                    "clips_ready": clips_ready,
+                    "audio_ready": audio_ready,
+                    "audio_needed": audio_needed,
+                    "status": status,
+                }
+            )
+
     return {
         "video_provider": {
             "id": video_id,
@@ -128,6 +204,8 @@ def project_readiness(project: Project, db: Session) -> dict[str, Any]:
         "missing_audio": missing_audio,
         "attention": attention,
         "shot_count": len(shots),
+        "scene_count": len(scenes_progress),
+        "scenes": scenes_progress,
         "can_start": project.status == "shot_plan",
     }
 
@@ -152,6 +230,10 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
 
     attention: list[str] = []
     aspect = project.aspect_ratio
+    scene_map = _scene_index_map(shots)
+    pending = [shot for shot in shots if not _shot_image(shot, aspect)]
+    total = max(len(pending), 1)
+    completed = 0
     for shot in shots:
         raise_if_cancelled(db, job.id)
         if _shot_image(shot, aspect):
@@ -159,18 +241,26 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
         prompt = (shot.image_prompt or "").strip()
         if not prompt:
             attention.append(f"{shot.title or shot.id}: missing image prompt")
+            completed += 1
             continue
         prompt = prompt + continuity_prompt_suffix(shot.scene)
-        job.message = f"Generating image for {shot.title or 'shot'}"
-        job.progress = min(0.35, job.progress + 0.02)
+        job.message = _format_scene_message(shot, scene_map, "Generating image")
+        job.progress = 0.05 + (completed / total) * 0.30
         db.commit()
         try:
+            references = load_cast_references(db, project.id, shot.character_ids or [])
+            remember: dict[str, str] = {}
             filename, mime_type, provider = generate_storyboard_image(
                 prompt,
                 shot.scene.title,
                 shot.framing,
                 aspect,
+                references=references,
+                conversation_url=project.image_conversation_url,
+                remember=remember,
             )
+            if remember.get("url"):
+                project.image_conversation_url = remember["url"]
             previous = shot.image.filename if shot.image else None
             invalidate_final_cut(project, db)
             if shot.image:
@@ -210,15 +300,22 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
             attention.append(f"{shot.title or shot.id}: image failed ({exc})")
             db.rollback()
             job = db.get(Job, job.id) or job
+        completed += 1
+        job.progress = 0.05 + (completed / total) * 0.30
+        db.commit()
     return attention
 
 
 def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list[Shot]) -> list[str]:
     attention: list[str] = []
     aspect = project.aspect_ratio
+    scene_map = _scene_index_map(shots)
     _, _, configured, available, _, detail = video_provider_status()
     if not configured or not available:
         return [detail]
+    pending = [shot for shot in shots if not _shot_clip(shot, aspect)]
+    total = max(len(pending), 1)
+    completed = 0
     for shot in shots:
         raise_if_cancelled(db, job.id)
         if _shot_clip(shot, aspect):
@@ -226,16 +323,20 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
         source = _shot_image(shot, aspect)
         if not source:
             attention.append(f"{shot.title or shot.id}: needs an image before video")
+            completed += 1
             continue
         prompt = ((shot.video_prompt or shot.image_prompt or "").strip() + continuity_prompt_suffix(shot.scene)).strip()
-        job.message = f"Generating clip for {shot.title or 'shot'}"
-        job.progress = min(0.7, max(job.progress, 0.4) + 0.02)
+        duration_ms = _clip_duration_for_shot(shot)
+        if duration_ms != shot.duration_ms:
+            shot.duration_ms = duration_ms
+        job.message = _format_scene_message(shot, scene_map, "Generating clip")
+        job.progress = 0.35 + (completed / total) * 0.35
         db.commit()
         try:
             filename, mime_type, provider = generate_shot_clip(
                 settings.media_dir / source.filename,
                 prompt,
-                shot.duration_ms,
+                duration_ms,
                 aspect,
             )
             invalidate_final_cut(project, db)
@@ -276,25 +377,32 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
             attention.append(f"{shot.title or shot.id}: clip failed ({exc})")
             db.rollback()
             job = db.get(Job, job.id) or job
+        completed += 1
+        job.progress = 0.35 + (completed / total) * 0.35
+        db.commit()
     return attention
 
 
 def _generate_missing_audio(db: Session, project: Project, job: Job, shots: list[Shot]) -> list[str]:
     attention: list[str] = []
+    scene_map = _scene_index_map(shots)
     configured, available, detail = vibevoice_status()
     if not configured or not available:
         return [detail]
+    pending = [shot for shot in shots if shot.dialogue and not shot.dialogue_audio_filename]
+    total = max(len(pending), 1)
+    completed = 0
     for shot in shots:
         raise_if_cancelled(db, job.id)
         if not shot.dialogue or shot.dialogue_audio_filename:
             continue
-        job.message = f"Synthesizing dialogue for {shot.title or 'shot'}"
-        job.progress = min(0.85, max(job.progress, 0.7) + 0.02)
+        job.message = _format_scene_message(shot, scene_map, "Synthesizing dialogue")
+        job.progress = 0.70 + (completed / total) * 0.15
         db.commit()
         try:
             filename, mime_type, provider = synthesize_dialogue(
                 shot.dialogue,
-                duration_hint_ms=shot.duration_ms,
+                duration_hint_ms=_clip_duration_for_shot(shot),
             )
             record_take(
                 db,
@@ -312,6 +420,9 @@ def _generate_missing_audio(db: Session, project: Project, job: Job, shots: list
             attention.append(f"{shot.title or shot.id}: dialogue failed ({exc})")
             db.rollback()
             job = db.get(Job, job.id) or job
+        completed += 1
+        job.progress = 0.70 + (completed / total) * 0.15
+        db.commit()
     return attention
 
 

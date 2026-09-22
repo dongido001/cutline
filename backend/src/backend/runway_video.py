@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from .settings import settings
+from .timing import runway_clip_duration_seconds
 
 RUNWAY_API = "https://api.dev.runwayml.com/v1"
 RUNWAY_VERSION = "2024-11-06"
@@ -52,8 +53,10 @@ def _ratio(aspect_ratio: str) -> str:
 
 
 def _duration_seconds(duration_ms: int) -> int:
-    seconds = max(2, round(duration_ms / 1000))
-    return min(10, max(5, seconds)) if seconds >= 5 else 5
+    return runway_clip_duration_seconds(
+        duration_ms,
+        max_seconds=max(5, min(10, int(settings.runway_max_duration or 5))),
+    )
 
 
 def _data_uri(image_path: Path) -> str:
@@ -86,7 +89,14 @@ def generate_runway_clip(
             headers=_headers(),
             json=payload,
         )
-        created.raise_for_status()
+        if created.is_error:
+            detail = created.text
+            try:
+                body = created.json()
+                detail = str(body.get("error") or body.get("message") or detail)
+            except Exception:
+                pass
+            raise RuntimeError(f"Runway rejected the request ({created.status_code}): {detail}")
         task_id = created.json().get("id")
         if not task_id:
             raise RuntimeError("Runway did not return a task id")

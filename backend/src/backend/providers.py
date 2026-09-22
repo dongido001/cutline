@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from .settings import settings
+from .timing import estimate_dialogue_duration_ms
 
 
 class ScriptProvider(ABC):
@@ -105,9 +106,18 @@ def normalize_analysis_result(
         for shot_index, raw_shot in enumerate(raw_shots):
             if not isinstance(raw_shot, dict):
                 continue
-            duration_ms = max(
-                2000, min(10000, _as_int(raw_shot.get("duration_ms"), 5000))
-            )
+            dialogue = _normalize_dialogue(raw_shot.get("dialogue"))
+            authored_duration = _as_int(raw_shot.get("duration_ms"), 0)
+            spoken = estimate_dialogue_duration_ms(dialogue)
+            if authored_duration > 0:
+                duration_ms = max(2000, min(10000, authored_duration))
+                if spoken is not None:
+                    duration_ms = max(duration_ms, spoken)
+            elif spoken is not None:
+                duration_ms = spoken
+            else:
+                duration_ms = 5000
+            duration_ms = max(2000, min(10000, duration_ms))
             shot_start_ms = max(
                 start_ms, _as_int(raw_shot.get("start_ms"), shot_cursor)
             )
@@ -123,7 +133,7 @@ def normalize_analysis_result(
                     "start_ms": shot_start_ms,
                     "end_ms": shot_end_ms,
                     "action": str(raw_shot.get("action") or action),
-                    "dialogue": _normalize_dialogue(raw_shot.get("dialogue")),
+                    "dialogue": dialogue,
                     "sound": str(raw_shot.get("sound") or ""),
                     "duration_ms": duration_ms,
                     "framing": str(raw_shot.get("framing") or "Medium"),

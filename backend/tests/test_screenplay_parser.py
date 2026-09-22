@@ -99,3 +99,34 @@ def test_flags_declared_shot_count_and_timeline_gaps() -> None:
     assert "Shot count does not match" in titles
     assert "Fix the timeline before Shot 2" in titles
     assert "Timeline does not match declared duration" in titles
+
+
+def test_estimates_duration_from_dialogue_when_time_missing() -> None:
+    script = """UNTIMED BEAT
+
+Format: 1 shot
+
+SHOT 1 - LONG LINE
+
+Framing: Close-up
+
+Action:
+She speaks carefully.
+
+Dialogue:
+MARA:
+"I need you to listen carefully because what happens next will change everything for both of us."
+
+Image prompt:
+Close-up of Mara.
+
+Video prompt:
+Subtle head movement.
+"""
+    result = parse_structured_screenplay(script)
+    assert result is not None
+    shot = result["scenes"][0]["shots"][0]
+    assert shot["duration_ms"] > 5000
+    assert shot["start_ms"] == 0
+    assert shot["end_ms"] == shot["duration_ms"]
+    assert any("Estimated timing" in item["title"] for item in result["suggestions"])

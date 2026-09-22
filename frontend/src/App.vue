@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Bot, Clapperboard, Command, Film, Image, ListChecks, MessageSquareText, RefreshCw, Search, Settings, Video, X } from '@lucide/vue'
+import { Bot, Clapperboard, Command, Film, MessageSquareText, RefreshCw, Search, Settings, X } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
 
 const router = useRouter()
@@ -15,11 +15,9 @@ const commands = computed(() => {
   const project = store.currentProject
   if (!project) return []
   const items = [
-    { label: 'Script review', stage: 'script', icon: MessageSquareText },
-    { label: 'Shot plan', stage: 'shots', icon: ListChecks },
-    { label: 'Storyboards', stage: 'storyboards', icon: Image },
-    { label: 'Clips', stage: 'clips', icon: Video },
-    { label: 'Final cut', stage: 'final-cut', icon: Film },
+    { label: 'Script', stage: 'script', icon: MessageSquareText },
+    { label: 'Produce', stage: 'shots', icon: Clapperboard },
+    { label: 'Assemble', stage: 'final-cut', icon: Film },
   ]
   const query = commandQuery.value.trim().toLowerCase()
   return query ? items.filter((item) => item.label.toLowerCase().includes(query)) : items

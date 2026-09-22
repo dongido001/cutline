@@ -25,6 +25,7 @@ class Project(Base):
     aspect_ratio: Mapped[str] = mapped_column(String(12), default="16:9")
     target_duration_seconds: Mapped[int] = mapped_column(Integer, default=60)
     text_provider: Mapped[str] = mapped_column(String(24), default="mock")
+    image_conversation_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 

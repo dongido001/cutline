@@ -15,9 +15,9 @@ from .final_cut import invalidate_final_cut
 from .media import delete_media_file, image_provider_statuses
 from .migrations import migrate_schema
 from .video import video_provider_status
-from .vibevoice_tts import vibevoice_status
 from .draft import enqueue_create_draft, project_readiness
-from .takes import select_take
+from .takes import record_take, select_take
+from .vibevoice_tts import synthesize_dialogue, vibevoice_status
 from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset
 from .schemas import (
     CharacterCreate,
@@ -1060,6 +1060,41 @@ def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_
     db.commit()
     db.refresh(scene)
     return scene
+
+
+@app.post("/api/shots/{shot_id}/audio/generate", response_model=ShotRead)
+def generate_shot_audio(shot_id: str, db: Session = Depends(get_db)) -> Shot:
+    shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.image),
+            selectinload(Shot.clip),
+            selectinload(Shot.media_variants),
+            selectinload(Shot.scene).selectinload(Scene.script_version).selectinload(ScriptVersion.project),
+        )
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    if not shot.dialogue:
+        raise HTTPException(status_code=400, detail="Shot has no dialogue")
+    configured, available, detail = vibevoice_status()
+    if not configured or not available:
+        raise HTTPException(status_code=503, detail=detail)
+    project = shot.scene.script_version.project
+    try:
+        filename, mime_type, provider = synthesize_dialogue(shot.dialogue, duration_hint_ms=shot.duration_ms)
+        record_take(
+            db, shot, media_type="audio", aspect_ratio=project.aspect_ratio, filename=filename,
+            mime_type=mime_type, source="generated", provider=provider, prompt="dialogue",
+        )
+        db.commit()
+        db.refresh(shot)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Dialogue generation failed: {exc}") from exc
+    return shot
 
 
 @app.post("/api/shots/{shot_id}/takes/select", response_model=ShotRead)

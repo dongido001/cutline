@@ -1,6 +1,8 @@
 import re
 from typing import Any
 
+from .timing import estimate_dialogue_duration_ms, resolve_shot_duration_ms
+
 
 SHOT_HEADING = re.compile(
     r"^SHOT\s+(?P<number>\d+)\s*[\u2014\u2013-]\s*(?P<title>.+?)\s*$",
@@ -147,10 +149,12 @@ def _suggestion(
     reason: str,
     before_value: Any = None,
     after_value: Any = None,
+    *,
+    severity: str = "blocking",
 ) -> dict[str, Any]:
     return {
         "category": "structure",
-        "severity": "blocking",
+        "severity": severity,
         "title": title,
         "reason": reason,
         "target": {"scene_index": scene_index, "shot_index": 0, "field": field},
@@ -231,15 +235,32 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         title = match.group("title").strip()
         scene_title = _field_text(fields, "scene") or film_title
         shot_location = _field_text(fields, "location") or location
-        duration_ms = (
-            end_ms - start_ms
-            if start_ms is not None and end_ms is not None
-            else 5000
+        duration_ms, used_dialogue_estimate = resolve_shot_duration_ms(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            dialogue=dialogue,
         )
+        if used_dialogue_estimate and start_ms is not None and end_ms is None:
+            end_ms = start_ms + duration_ms
+        elif used_dialogue_estimate and start_ms is None and end_ms is None and previous_end is not None:
+            start_ms = previous_end
+            end_ms = start_ms + duration_ms
+        elif used_dialogue_estimate and start_ms is None and end_ms is None and index == 0:
+            start_ms = 0
+            end_ms = duration_ms
         searchable = f"{title}\n{block}".lower()
-        time_of_day = next(
-            (value.title() for value in ("night", "morning", "afternoon", "evening", "day") if re.search(rf"\b{value}\b", searchable)),
-            "Unspecified",
+        explicit_tod = _field_text(fields, "time_of_day").strip()
+        time_of_day = (
+            explicit_tod.title()
+            if explicit_tod
+            else next(
+                (
+                    value.title()
+                    for value in ("night", "morning", "afternoon", "evening", "day")
+                    if re.search(rf"\b{value}\b", searchable)
+                ),
+                "Unspecified",
+            )
         )
 
         shot = {
@@ -270,13 +291,39 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         )
 
         if not time_match or start_ms is None or end_ms is None:
-            suggestions.append(
-                _suggestion(index, "timing", f"Add timing for Shot {index + 1}", "Every shot needs an explicit start and end time.")
-            )
+            if used_dialogue_estimate:
+                suggestions.append(
+                    _suggestion(
+                        index,
+                        "timing",
+                        f"Estimated timing for Shot {index + 1} from dialogue",
+                        "No Time: range found; duration was estimated from spoken dialogue (~2.5 words/sec).",
+                        duration_ms,
+                        severity="warning",
+                    )
+                )
+            else:
+                suggestions.append(
+                    _suggestion(index, "timing", f"Add timing for Shot {index + 1}", "Every shot needs an explicit start and end time.")
+                )
         elif duration_ms < 2000 or duration_ms > 10000:
             suggestions.append(
                 _suggestion(index, "duration_ms", f"Adjust Shot {index + 1} duration", "Generated video shots must be between 2 and 10 seconds.", duration_ms)
             )
+        else:
+            spoken = estimate_dialogue_duration_ms(dialogue)
+            if spoken is not None and spoken > duration_ms + 500:
+                suggestions.append(
+                    _suggestion(
+                        index,
+                        "duration_ms",
+                        f"Shot {index + 1} may be short for its dialogue",
+                        f"Dialogue needs about {spoken / 1000:.1f}s at a natural speech rate; timed duration is {duration_ms / 1000:.1f}s.",
+                        duration_ms,
+                        spoken,
+                        severity="warning",
+                    )
+                )
         if previous_end is not None and start_ms is not None and start_ms != previous_end:
             suggestions.append(
                 _suggestion(index, "start_ms", f"Fix the timeline before Shot {index + 1}", "Shot timings must be continuous without gaps or overlaps.", start_ms, previous_end)

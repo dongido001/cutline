@@ -5,8 +5,10 @@ import {
   BookOpen,
   Bot,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
+  Clapperboard,
   Clock3,
   Copy,
   Download,
@@ -32,6 +34,7 @@ import {
   X,
 } from '@lucide/vue'
 import type { AspectRatio, Character, OutputVariant, ProjectInput, ProjectSummary, Scene, Shot, Suggestion } from '@/lib/api'
+import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
 
@@ -48,18 +51,18 @@ type ProductionStage = 'script' | 'shots' | 'storyboards' | 'clips' | 'final-cut
 
 const stageTitles: Record<ProductionStage, string> = {
   script: 'Script review',
-  shots: 'Shot plan',
-  storyboards: 'Storyboards',
-  clips: 'Clips',
-  'final-cut': 'Final cut',
+  shots: 'Produce',
+  storyboards: 'Produce',
+  clips: 'Produce',
+  'final-cut': 'Assemble',
 }
 
 const stageSteps: Record<ProductionStage, number> = {
   script: 2,
   shots: 3,
-  storyboards: 4,
-  clips: 4,
-  'final-cut': 5,
+  storyboards: 3,
+  clips: 3,
+  'final-cut': 4,
 }
 
 const store = useStudioStore()
@@ -89,6 +92,12 @@ const selectedCharacterIds = ref<string[]>([])
 const newCharacterName = ref('')
 const castingBusy = ref(false)
 const clipUploadInput = ref<HTMLInputElement | null>(null)
+const produceDetailOpen = ref(false)
+const showPromptEditor = ref(false)
+const pendingPromptEditor = ref(false)
+const expandedProduceShotIds = ref<string[]>([])
+const continuityDrafts = reactive<Record<string, { set_notes: string; lighting_notes: string; wardrobe_notes: string; props_notes: string }>>({})
+const continuitySavingIds = ref<string[]>([])
 const mediaAspect = ref<AspectRatio>('16:9')
 const finalCutAspect = ref<AspectRatio>('16:9')
 const previewVideo = ref<HTMLVideoElement | null>(null)
@@ -277,6 +286,8 @@ const selectedAspectClip = computed(() => {
     ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? shot.clip : null)
 })
 const selectedShotScene = computed(() => scenes.value.find((scene) => scene.shots.some((shot) => shot.id === selectedShot.value?.id)))
+const selectedAudioTake = computed(() => selectedShot.value?.takes?.find((take) => take.id === selectedShot.value?.selected_audio_take_id) ?? null)
+const selectedAudioUrl = computed(() => selectedAudioTake.value?.url ?? (selectedShot.value?.dialogue_audio_filename ? `/media/${encodeURIComponent(selectedShot.value.dialogue_audio_filename)}` : null))
 const previewShot = computed(() => allShots.value[previewShotIndex.value])
 const nextPreviewShot = computed(() => allShots.value[previewShotIndex.value + 1] ?? null)
 const previewAspect = computed<AspectRatio>(() => activeStage.value === 'final-cut' ? finalCutAspect.value : mediaAspect.value)
@@ -310,6 +321,10 @@ const castCharacters = computed(() => store.currentProject?.characters ?? [])
 const selectedCast = computed(() =>
   castCharacters.value.filter((character) => selectedCharacterIds.value.includes(character.id)),
 )
+const selectedShotVideoPrompt = computed(() => selectedShot.value
+  ? buildShotVideoPrompt(selectedShot.value, selectedShotScene.value, selectedCast.value, mediaAspect.value)
+  : '')
+const copiedShotPrompt = ref(false)
 
 function imageJobForShot(shotId: string) {
   return store.imageJobs[shotId] ?? null
@@ -350,6 +365,13 @@ function toggleCharacterForGeneration(characterId: string) {
   }
 }
 
+async function copyShotVideoPrompt() {
+  if (!selectedShotVideoPrompt.value) return
+  await navigator.clipboard.writeText(selectedShotVideoPrompt.value)
+  copiedShotPrompt.value = true
+  window.setTimeout(() => { copiedShotPrompt.value = false }, 1800)
+}
+
 watch(() => route.params.projectId, async (projectId) => {
   if (typeof projectId !== 'string' || store.currentProject?.id === projectId) return
   try {
@@ -360,7 +382,17 @@ watch(() => route.params.projectId, async (projectId) => {
 })
 watch(() => store.currentProject?.id, () => {
   mediaAspect.value = (store.currentProject?.aspect_ratio as AspectRatio | undefined) ?? '16:9'
+  produceDetailOpen.value = false
+  showPromptEditor.value = false
 }, { immediate: true })
+watch(
+  () => scenes.value.map((scene) => `${scene.id}:${scene.shots[0]?.id || ''}:${scene.set_notes || ''}:${scene.lighting_notes || ''}:${scene.wardrobe_notes || ''}:${scene.props_notes || ''}`).join('|'),
+  () => {
+    ensureFirstShotsExpanded()
+    syncContinuityDrafts()
+  },
+  { immediate: true },
+)
 watch(
   () => [selectedShot.value?.id, castCharacters.value.map((character) => `${character.id}:${character.references.length}`).join('|')] as const,
   () => {
@@ -379,9 +411,13 @@ watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage
     void router.replace(projectRoute(store.currentProject.id, stage, activeShotId.value))
   }
 }, { immediate: true })
-watch(selectedShot, (shot) => {
+watch(selectedShot, (shot, previous) => {
   if (!shot) return
   activeShotId.value = shot.id
+  if (shot.id !== previous?.id) {
+    showPromptEditor.value = pendingPromptEditor.value
+    pendingPromptEditor.value = false
+  }
   Object.assign(shotDraft, {
     framing: shot.framing,
     duration_ms: shot.duration_ms,
@@ -449,6 +485,162 @@ function formatElapsed(seconds: number) {
 
 function shotCountLabel(count: number) {
   return `${count} ${count === 1 ? 'shot' : 'shots'}`
+}
+
+function sceneDurationLabel(scene: Scene) {
+  const ms = Math.max(0, (scene.end_ms ?? 0) - (scene.start_ms ?? 0))
+  if (!ms && scene.shots.length) {
+    return `${(scene.shots.reduce((total, shot) => total + shot.duration_ms, 0) / 1000).toFixed(0)}s`
+  }
+  return `${(ms / 1000).toFixed(0)}s`
+}
+
+function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
+  return shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === mediaAspect.value)
+    ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? (mediaType === 'clip' ? shot.clip : shot.image) : null)
+    ?? shot.media_variants.find((item) => item.media_type === mediaType)
+    ?? null
+}
+
+function sceneReadyCount(scene: Scene) {
+  return scene.shots.filter((shot) => shotMedia(shot, 'clip') || shotMedia(shot, 'image')).length
+}
+
+function sceneClipReadyCount(scene: Scene) {
+  return scene.shots.filter((shot) => shotMedia(shot, 'clip')).length
+}
+
+function sceneDraftStatus(scene: Scene): 'pending' | 'in_progress' | 'ready' {
+  if (!scene.shots.length) return 'pending'
+  const clips = sceneClipReadyCount(scene)
+  if (clips >= scene.shots.length) return 'ready'
+  if (clips > 0 || sceneReadyCount(scene) > 0) return 'in_progress'
+  return 'pending'
+}
+
+function scenePreviewShot(scene: Scene) {
+  const selectedInScene = scene.shots.find((shot) => shot.id === activeShotId.value)
+  if (selectedInScene) return selectedInScene
+  return scene.shots.find((shot) => shotMedia(shot, 'clip'))
+    ?? scene.shots.find((shot) => shotMedia(shot, 'image'))
+    ?? scene.shots[0]
+    ?? null
+}
+
+function scenePreviewClip(scene: Scene) {
+  const shot = scenePreviewShot(scene)
+  return shot ? shotMedia(shot, 'clip') : null
+}
+
+function scenePreviewImage(scene: Scene) {
+  const shot = scenePreviewShot(scene)
+  return shot ? shotMedia(shot, 'image') : null
+}
+
+function isProduceShotExpanded(shotId: string) {
+  return expandedProduceShotIds.value.includes(shotId)
+}
+
+function produceSceneBlurb(scene: Scene) {
+  const expanded = scene.shots.find((shot) => isProduceShotExpanded(shot.id))
+  const selectedInScene = scene.shots.find((shot) => shot.id === activeShotId.value)
+  const shot = expanded || selectedInScene || scenePreviewShot(scene)
+  return (shot?.action || scene.action || 'Scene beat from your screenplay.').trim()
+}
+
+function toggleProduceShot(shotId: string) {
+  if (isProduceShotExpanded(shotId)) {
+    expandedProduceShotIds.value = expandedProduceShotIds.value.filter((id) => id !== shotId)
+  } else {
+    expandedProduceShotIds.value = [...expandedProduceShotIds.value, shotId]
+  }
+  selectShot(shotId)
+}
+
+function openProduceDetail(shotId: string, opts?: { editPrompts?: boolean }) {
+  pendingPromptEditor.value = Boolean(opts?.editPrompts)
+  selectShot(shotId)
+  produceDetailOpen.value = true
+  void nextTick(() => {
+    showPromptEditor.value = pendingPromptEditor.value
+    pendingPromptEditor.value = false
+  })
+}
+
+function closeProduceDetail() {
+  produceDetailOpen.value = false
+  showPromptEditor.value = false
+}
+
+function ensureFirstShotsExpanded() {
+  const firstIds = scenes.value
+    .map((scene) => scene.shots[0]?.id)
+    .filter((id): id is string => Boolean(id))
+  const valid = new Set(allShots.value.map((shot) => shot.id))
+  const kept = expandedProduceShotIds.value.filter((id) => valid.has(id))
+  expandedProduceShotIds.value = [...new Set([...kept, ...firstIds])]
+}
+
+function continuityDraft(scene: Scene): { set_notes: string; lighting_notes: string; wardrobe_notes: string; props_notes: string } {
+  const existing = continuityDrafts[scene.id]
+  if (existing) return existing
+  const draft = {
+    set_notes: scene.set_notes || '',
+    lighting_notes: scene.lighting_notes || '',
+    wardrobe_notes: scene.wardrobe_notes || '',
+    props_notes: scene.props_notes || '',
+  }
+  continuityDrafts[scene.id] = draft
+  return draft
+}
+
+function syncContinuityDrafts() {
+  for (const scene of scenes.value) {
+    continuityDrafts[scene.id] = {
+      set_notes: scene.set_notes || '',
+      lighting_notes: scene.lighting_notes || '',
+      wardrobe_notes: scene.wardrobe_notes || '',
+      props_notes: scene.props_notes || '',
+    }
+  }
+}
+
+function continuityFilledCount(scene: Scene) {
+  const draft = continuityDraft(scene)
+  return [draft.set_notes, draft.lighting_notes, draft.wardrobe_notes, draft.props_notes]
+    .filter((value) => value.trim()).length
+}
+
+function isContinuitySaving(sceneId: string) {
+  return continuitySavingIds.value.includes(sceneId)
+}
+
+async function saveContinuity(scene: Scene) {
+  const draft = continuityDraft(scene)
+  if (isContinuitySaving(scene.id)) return
+  continuitySavingIds.value = [...continuitySavingIds.value, scene.id]
+  try {
+    await store.updateScene(scene.id, {
+      set_notes: draft.set_notes.trim(),
+      lighting_notes: draft.lighting_notes.trim(),
+      wardrobe_notes: draft.wardrobe_notes.trim(),
+      props_notes: draft.props_notes.trim(),
+    })
+  } catch {
+    // Store surfaces the error.
+  } finally {
+    continuitySavingIds.value = continuitySavingIds.value.filter((id) => id !== scene.id)
+  }
+}
+
+function beginRegenerateImage() {
+  showPromptEditor.value = true
+  void generateShotImage()
+}
+
+function beginRegenerateClip() {
+  showPromptEditor.value = true
+  void generateShotClip()
 }
 
 function sceneTime(scene: Scene) {
@@ -849,6 +1041,15 @@ async function confirmDeleteShotClip() {
   }
 }
 
+async function generateShotAudio() {
+  if (!selectedShot.value) return
+  try {
+    await store.generateShotAudio(selectedShot.value.id)
+  } catch {
+    // The store exposes the generation error in the workspace.
+  }
+}
+
 async function generateVariantFrame() {
   if (!selectedShot.value) return
   try {
@@ -937,12 +1138,10 @@ function formatRenderedAt(value: string) {
       </div>
 
       <div class="rail-section stage-list">
-        <span class="section-label">Production</span>
-        <RouterLink class="stage" :class="{ active: activeStage === 'script', complete: activeStage !== 'script' }" :to="stageRoute('script')"><MessageSquareText :size="16" /><span>Script review</span><small>{{ pendingCount }}</small></RouterLink>
-        <RouterLink class="stage" :class="{ active: activeStage === 'shots' }" :to="stageRoute('shots')"><ListChecks :size="16" /><span>Shot plan</span></RouterLink>
-        <RouterLink class="stage" :class="{ active: activeStage === 'storyboards' }" :to="stageRoute('storyboards')"><Image :size="16" /><span>Storyboards</span></RouterLink>
-        <RouterLink class="stage" :class="{ active: activeStage === 'clips' }" :to="stageRoute('clips')"><Video :size="16" /><span>Clips</span></RouterLink>
-        <RouterLink class="stage" :class="{ active: activeStage === 'final-cut' }" :to="stageRoute('final-cut')"><Film :size="16" /><span>Final cut</span></RouterLink>
+        <span class="section-label">Story</span>
+        <RouterLink class="stage" :class="{ active: activeStage === 'script', complete: activeStage !== 'script' }" :to="stageRoute('script')"><MessageSquareText :size="16" /><span>Script</span><small>{{ pendingCount }}</small></RouterLink>
+        <RouterLink class="stage" :class="{ active: activeStage === 'shots' || activeStage === 'storyboards' || activeStage === 'clips' }" :to="stageRoute('shots')"><Clapperboard :size="16" /><span>Produce</span></RouterLink>
+        <RouterLink class="stage" :class="{ active: activeStage === 'final-cut' }" :to="stageRoute('final-cut')"><Film :size="16" /><span>Assemble</span></RouterLink>
       </div>
 
       <div class="provider-panel">
@@ -1003,11 +1202,9 @@ function formatRenderedAt(value: string) {
         <div class="progress-line complete"></div>
         <div class="progress-step" :class="progressClass(2)"><span><Check v-if="currentProgressStep > 2" :size="13" /><template v-else>2</template></span><strong>Review</strong></div>
         <div class="progress-line" :class="{ complete: currentProgressStep > 2 }"></div>
-        <div class="progress-step" :class="progressClass(3)"><span><Check v-if="currentProgressStep > 3" :size="13" /><template v-else>3</template></span><strong>Shot plan</strong></div>
+        <div class="progress-step" :class="progressClass(3)"><span><Check v-if="currentProgressStep > 3" :size="13" /><template v-else>3</template></span><strong>Produce</strong></div>
         <div class="progress-line" :class="{ complete: currentProgressStep > 3 }"></div>
-        <div class="progress-step" :class="progressClass(4)"><span><Check v-if="currentProgressStep > 4" :size="13" /><template v-else>4</template></span><strong>Generate</strong></div>
-        <div class="progress-line" :class="{ complete: currentProgressStep > 4 }"></div>
-        <div class="progress-step" :class="progressClass(5)"><span>5</span><strong>Assemble</strong></div>
+        <div class="progress-step" :class="progressClass(4)"><span>4</span><strong>Assemble</strong></div>
       </div>
 
       <div v-if="activeStage === 'script'" class="review-grid">
@@ -1097,315 +1294,387 @@ function formatRenderedAt(value: string) {
         </aside>
       </div>
 
-      <div v-else-if="activeStage === 'shots'" class="shot-plan-workspace">
-        <aside class="shot-browser">
-          <div class="shot-browser-heading">
-            <div><span class="section-label">Shot list</span><strong>{{ allShots.length }} planned shots</strong></div>
-            <span>{{ allShots.filter((shot) => shot.image).length }}/{{ allShots.length }} ready</span>
-          </div>
-          <div class="shot-list">
-            <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
-              <header><strong>{{ String(sceneIndex + 1).padStart(2, '0') }} {{ scene.title }}</strong><span>{{ shotCountLabel(scene.shots.length) }}</span></header>
-              <button
-                v-for="shot in scene.shots"
-                :key="shot.id"
-                class="shot-list-item"
-                :class="{ active: selectedShot?.id === shot.id }"
-                @click="selectShot(shot.id)"
-              >
-                <span class="shot-list-thumb">
-                  <img v-if="shot.image" :src="shot.image.url" alt="" />
-                  <Image v-else :size="18" />
-                </span>
-                <span>
-                  <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
-                  <small>{{ shot.framing }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</small>
-                  <small v-if="store.isProcessingShot(shot.id)" class="shot-job-copy">{{ imageJobForShot(shot.id)?.message || 'Starting image generation' }}</small>
-                </span>
-                <RefreshCw v-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="15" />
-                <Check v-else-if="shot.image" class="shot-ready-icon" :size="15" />
-              </button>
-            </section>
-          </div>
-        </aside>
-
-        <section v-if="selectedShot" class="shot-editor">
-          <header class="shot-editor-header">
-            <div><span class="eyebrow">{{ selectedShotLabel }}</span><h2>{{ selectedShotScene?.title }}</h2></div>
-            <div class="media-variant-switch" role="group" aria-label="Storyboard image aspect ratio">
-              <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
-              <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
+      <div v-else-if="activeStage === 'shots' || activeStage === 'storyboards' || activeStage === 'clips'" class="produce-workspace">
+        <section v-if="!produceDetailOpen" class="produce-story">
+          <header class="produce-hero">
+            <div>
+              <span class="eyebrow">Tell the story</span>
+              <h2>Scene by scene — Cutline fills in the rest</h2>
+              <p>Review the beat, keep faces consistent, then generate the whole draft in one pass.</p>
             </div>
-            <span class="image-source" :class="{ ready: selectedAspectImage }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : `No ${mediaAspect} image` }}</span>
-          </header>
-
-          <div class="storyboard-area">
-            <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
-              <img v-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
-              <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} storyboard yet</strong><span>Generate from the image prompt or upload a frame for this format.</span></div>
-              <div v-if="store.isProcessingShot(selectedShot.id)" class="render-overlay">
-                <RefreshCw class="spinning" :size="24" />
-                <strong>{{ selectedImageJob?.message || 'Rendering storyboard' }}</strong>
-                <button
-                  v-if="selectedImageJob && (selectedImageJob.status === 'queued' || selectedImageJob.status === 'running')"
-                  type="button"
-                  class="overlay-cancel"
-                  :disabled="store.isCancellingJob(selectedImageJob.id)"
-                  @click="store.cancelJob(selectedImageJob.id)"
-                >
-                  <X :size="14" />{{ store.isCancellingJob(selectedImageJob.id) ? 'Cancelling…' : 'Cancel' }}
-                </button>
+            <div class="produce-hero-actions">
+              <div class="media-variant-switch" role="group" aria-label="Output aspect ratio">
+                <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
+                <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16</button>
               </div>
-            </div>
-
-            <section class="cast-library">
-              <header>
-                <div>
-                  <span class="section-label">Cast library</span>
-                  <strong>Reusable face references</strong>
-                </div>
-                <div class="cast-header-actions">
-                  <button
-                    class="secondary-button"
-                    type="button"
-                    :disabled="castingBusy || !castCharacters.some((character) => !character.references.length) || !imageGenerationAvailable"
-                    @click="generateMissingCastFaces"
-                  >
-                    <Sparkles :size="15" />Generate missing faces
-                  </button>
-                  <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">
-                    Sync from script
-                  </button>
-                  <form class="cast-add" @submit.prevent="addCastCharacter">
-                    <input v-model="newCharacterName" type="text" maxlength="120" placeholder="Add character (e.g. MARA)" :disabled="castingBusy" />
-                    <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
-                  </form>
-                </div>
-              </header>
-              <div v-if="!castCharacters.length" class="cast-empty">Import a script with a Character consistency block, or add cast members here. Generate or upload face stills, then keep them tagged on each shot.</div>
-              <div v-else class="cast-list">
-                <article v-for="character in castCharacters" :key="character.id" class="cast-card">
-                  <div class="cast-card-head">
-                    <input
-                      class="cast-name-input"
-                      :value="character.name"
-                      @change="renameCastCharacter(character, $event)"
-                      :disabled="castingBusy || store.isGeneratingCast(character.id)"
-                    />
-                    <button class="icon-danger-button" type="button" title="Remove character" aria-label="Remove character" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="removeCastCharacter(character.id)">
-                      <Trash2 :size="14" />
-                    </button>
-                  </div>
-                  <p v-if="character.notes" class="cast-notes">{{ character.notes }}</p>
-                  <div class="cast-refs">
-                    <div v-for="reference in character.references" :key="reference.id" class="cast-ref">
-                      <img :src="reference.url" :alt="`${character.name} reference`" />
-                      <button type="button" class="cast-ref-remove" title="Remove reference" aria-label="Remove reference" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="removeCastReference(reference.id)"><X :size="12" /></button>
-                    </div>
-                    <button
-                      class="cast-ref-add"
-                      type="button"
-                      :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable"
-                      @click="generateCastFace(character)"
-                    >
-                      <Sparkles :size="14" />
-                      {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Generate another' : 'Generate face' }}
-                    </button>
-                    <button class="cast-ref-add" type="button" :disabled="castingBusy || store.isGeneratingCast(character.id)" @click="chooseCastReference(character.id)">
-                      <Upload :size="14" />
-                      Upload
-                    </button>
-                  </div>
-                  <div v-if="castJobFor(character.id)" class="cast-job-status" :class="castJobFor(character.id)?.status">
-                    <strong>{{ castJobFor(character.id)?.message }}</strong>
-                    <span v-if="castJobFor(character.id)?.status === 'failed' && castJobFor(character.id)?.error">{{ castJobFor(character.id)?.error }}</span>
-                    <button
-                      v-if="castJobFor(character.id)?.status === 'queued' || castJobFor(character.id)?.status === 'running'"
-                      type="button"
-                      class="secondary-button"
-                      :disabled="store.isCancellingJob(castJobFor(character.id)!.id)"
-                      @click="store.cancelJob(castJobFor(character.id)!.id)"
-                    >
-                      <X :size="14" />Cancel
-                    </button>
-                  </div>
-                </article>
-              </div>
-              <input ref="castRefInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleCastReferenceUpload" />
-            </section>
-
-            <div v-if="castCharacters.length" class="cast-generate-chips">
-              <span class="section-label">Use face refs</span>
-              <div class="cast-chip-row">
-                <button
-                  v-for="character in castCharacters"
-                  :key="character.id"
-                  type="button"
-                  class="cast-chip"
-                  :class="{ active: selectedCharacterIds.includes(character.id), warn: !character.references.length }"
-                  :disabled="store.isProcessingShot(selectedShot.id)"
-                  :title="character.references.length ? `Use ${character.name} face references` : `Tag ${character.name} now, then generate or upload a face before shot generate`"
-                  @click="toggleCharacterForGeneration(character.id)"
-                >
-                  {{ character.name }}
-                  <small v-if="!character.references.length">no ref</small>
-                </button>
-              </div>
-              <p v-if="selectedCast.length" class="cast-chip-hint">Tagged for this shot: {{ selectedCast.map((item) => item.name).join(', ') }}. Save or generate to keep the tags. Faces with “no ref” need Generate face or Upload first.</p>
-            </div>
-
-            <div class="storyboard-actions">
-              <button class="primary-button" :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable" @click="generateShotImage">
-                <RefreshCw v-if="selectedAspectImage" :size="15" /><Sparkles v-else :size="15" />
-                {{ selectedAspectImage ? `Regenerate ${mediaAspect} image` : `Generate ${mediaAspect} image` }}
-              </button>
-              <button class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="chooseUpload"><Upload :size="15" />Upload image</button>
-              <button v-if="selectedAspectImage" class="icon-danger-button" :title="`Delete ${mediaAspect} image`" :aria-label="`Delete ${mediaAspect} shot image`" @click="deleteShotImageCandidate = true"><Trash2 :size="16" /></button>
-              <input ref="uploadInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleUpload" />
-            </div>
-            <div v-if="selectedImageJob" class="image-job-status" :class="selectedImageJob.status">
-              <div>
-                <strong>{{ selectedImageJob.message }}</strong>
-                <span v-if="selectedImageJob.provider_phase">{{ selectedImageJob.provider_phase.replace('_', ' ') }}</span>
-                <span v-if="selectedImageJob.status === 'failed' && selectedImageJob.error" class="image-job-error">{{ selectedImageJob.error }}</span>
-              </div>
-              <a v-if="selectedImageJob.conversation_url" :href="selectedImageJob.conversation_url" target="_blank" rel="noopener noreferrer"><ExternalLink :size="14" />Open generation chat</a>
-              <button
-                v-if="selectedImageJob.status === 'queued' || selectedImageJob.status === 'running'"
-                class="secondary-button"
-                :disabled="store.isCancellingJob(selectedImageJob.id)"
-                @click="store.cancelJob(selectedImageJob.id)"
-              >
-                <X :size="14" />{{ store.isCancellingJob(selectedImageJob.id) ? 'Cancelling…' : 'Cancel' }}
-              </button>
-              <button v-if="selectedImageJob.status === 'failed' || selectedImageJob.status === 'cancelled'" class="secondary-button" @click="generateShotImage"><RefreshCw :size="14" />Retry</button>
-            </div>
-          </div>
-
-          <form class="shot-fields" @submit.prevent="saveShot">
-            <div class="shot-field-row">
-              <label>Framing<input v-model="shotDraft.framing" list="framing-options" /><datalist id="framing-options"><option value="Wide" /><option value="Medium" /><option value="Close-up" /><option value="Extreme close-up" /><option value="Over-the-shoulder" /><option value="Insert" /></datalist></label>
-              <label>Duration (seconds)<input type="number" min="1" max="30" step="0.5" :value="shotDraft.duration_ms / 1000" @input="setShotDuration" /></label>
-            </div>
-            <label>Image prompt<textarea v-model="shotDraft.image_prompt" rows="5" required></textarea></label>
-            <label>Video prompt<textarea v-model="shotDraft.video_prompt" rows="3"></textarea></label>
-            <label>Title-card text (optional)<textarea v-model="shotDraft.title_card_text" rows="2" placeholder="Rendered over black during the final two seconds."></textarea></label>
-            <footer>
-              <span>{{ selectedAspectImage?.source === 'generated' ? `${selectedAspectImage.provider} renderer · ${mediaAspect}` : selectedAspectImage ? `Manual upload · ${mediaAspect}` : imageGenerationAvailable ? `${imageProviderOrder} · ${mediaAspect}` : 'Image providers offline · manual upload available' }}</span>
-              <button class="secondary-button"><Save :size="15" />Save shot</button>
-            </footer>
-          </form>
-        </section>
-
-        <div v-else class="empty-shot-plan"><ListChecks :size="28" /><strong>No shots were created</strong><span>Return to script review and add shot prompts before continuing.</span></div>
-      </div>
-
-      <div v-else-if="activeStage === 'clips'" class="shot-plan-workspace clips-workspace">
-        <aside class="shot-browser">
-          <div class="shot-browser-heading">
-            <div><span class="section-label">Clip list</span><strong>{{ allShots.length }} planned clips</strong></div>
-            <span>{{ allShots.filter((shot) => shot.clip).length }}/{{ allShots.length }} ready</span>
-          </div>
-          <div class="shot-list">
-            <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
-              <header><strong>{{ String(sceneIndex + 1).padStart(2, '0') }} {{ scene.title }}</strong><span>{{ shotCountLabel(scene.shots.length) }}</span></header>
-              <button
-                v-for="shot in scene.shots"
-                :key="shot.id"
-                class="shot-list-item"
-                :class="{ active: selectedShot?.id === shot.id }"
-                @click="selectShot(shot.id, 'clips')"
-              >
-                <span class="shot-list-thumb clip-thumb">
-                  <img v-if="shot.image" :src="shot.image.url" alt="" />
-                  <Video v-else :size="18" />
-                  <span v-if="shot.clip" class="clip-play-mark"><Play :size="10" fill="currentColor" /></span>
-                </span>
-                <span><strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong><small>{{ (shot.duration_ms / 1000).toFixed(1) }}s · {{ shot.clip ? 'video ready' : shot.image ? 'frame ready' : 'needs frame' }}</small></span>
-                <Check v-if="shot.clip" class="shot-ready-icon" :size="15" />
-              </button>
-            </section>
-          </div>
-        </aside>
-
-        <section v-if="selectedShot" class="shot-editor clip-editor">
-          <header class="shot-editor-header">
-            <div><span class="eyebrow">{{ selectedShotLabel }}</span><h2>{{ selectedShot.title || selectedShotScene?.title }}</h2></div>
-            <div class="media-variant-switch" role="group" aria-label="Media aspect ratio"><button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button><button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button></div>
-            <span class="image-source" :class="{ ready: selectedAspectClip }">{{ selectedAspectClip ? selectedAspectClip.source.replace('_', ' ') : 'No clip' }}</span>
-          </header>
-
-          <div class="video-provider-bar" :class="{ ready: store.videoProvider?.configured && store.videoProvider?.available }">
-            <span class="provider-dot"></span>
-            <div><strong>{{ store.videoProvider?.label || 'Video provider' }}</strong><small>{{ store.videoProvider?.detail || 'Checking video provider' }}</small></div>
-          </div>
-
-          <div class="storyboard-area clip-area">
-            <div class="storyboard-frame clip-frame" :class="{ portrait: mediaAspect === '9:16' }">
-              <video v-if="selectedAspectClip" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
-              <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`Starting frame for ${selectedShotLabel}`" />
-              <div v-else class="empty-storyboard"><Video :size="30" /><strong>No starting frame</strong><span>Generate or upload an image in Shot plan before creating this clip.</span></div>
-              <div v-if="store.processingClipId === selectedShot.id" class="render-overlay">
-                <RefreshCw class="spinning" :size="24" />
-                <strong>{{ store.clipJob?.message || 'Generating video' }}</strong>
-                <span>This runs in the dedicated video queue.</span>
-                <button
-                  v-if="store.clipJob && (store.clipJob.status === 'queued' || store.clipJob.status === 'running')"
-                  type="button"
-                  class="overlay-cancel"
-                  :disabled="store.isCancellingJob(store.clipJob.id)"
-                  @click="store.cancelJob(store.clipJob.id)"
-                >
-                  <X :size="14" />{{ store.isCancellingJob(store.clipJob.id) ? 'Cancelling…' : 'Cancel' }}
-                </button>
-              </div>
-            </div>
-            <p v-if="store.error" class="form-error clip-error">{{ store.error }}</p>
-            <div class="storyboard-actions">
+              <button class="secondary-button" type="button" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
               <button
                 class="primary-button"
-                :disabled="store.processingClipId === selectedShot.id || !selectedAspectImage || !store.videoProvider?.configured || !store.videoProvider?.available"
-                :title="!store.videoProvider?.configured || !store.videoProvider?.available ? (store.videoProvider?.detail || 'Configure MOVIE_RUNWAY_API_KEY') : store.videoProvider?.detail"
-                @click="generateShotClip"
+                type="button"
+                :disabled="!isScriptApproved || store.creatingDraft"
+                :title="store.draftJob?.message || 'Generate missing images, clips, dialogue, and a preview'"
+                @click="store.createDraft()"
               >
-                <RefreshCw v-if="selectedAspectClip" :size="15" /><Sparkles v-else :size="15" />
-                {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
+                <Sparkles :size="15" />
+                {{ store.creatingDraft ? (store.draftJob?.message || 'Creating draft…') : 'Create draft video' }}
               </button>
-              <p v-if="!store.videoProvider?.configured || !store.videoProvider?.available" class="form-error clip-error">
-                {{ store.videoProvider?.detail || 'Video provider is not ready. Set MOVIE_RUNWAY_API_KEY or upload a clip.' }}
-              </p>
-              <button v-if="!selectedAspectImage" class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="generateVariantFrame"><Image :size="15" />Generate {{ mediaAspect }} frame</button>
-              <button class="secondary-button" :disabled="store.processingClipId === selectedShot.id" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
-              <button v-if="selectedAspectClip" class="secondary-button" @click="openTrimEditor"><Scissors :size="15" />Trim</button>
-              <button v-if="selectedAspectClip" class="icon-danger-button" title="Delete video" aria-label="Delete shot video" @click="deleteShotClipCandidate = true"><Trash2 :size="16" /></button>
-              <input ref="clipUploadInput" class="visually-hidden" type="file" accept="video/mp4,video/webm,video/quicktime,.mov" @change="handleClipUpload" />
             </div>
+          </header>
+
+          <div v-if="store.creatingDraft || store.draftJob" class="produce-draft-banner" :class="store.draftJob?.status">
+            <RefreshCw v-if="store.creatingDraft || store.draftJob?.status === 'running' || store.draftJob?.status === 'queued'" class="spinning" :size="16" />
+            <Check v-else-if="store.draftJob?.status === 'completed'" :size="16" />
+            <CircleAlert v-else :size="16" />
+            <div>
+              <strong>{{ store.draftJob?.message || 'Preparing draft…' }}</strong>
+              <span>{{ mediaReadyCount }}/{{ allShots.length }} shots have media · {{ clipCount }} clips ready</span>
+              <div v-if="scenes.length" class="produce-scene-progress">
+                <button
+                  v-for="(scene, sceneIndex) in scenes"
+                  :key="scene.id"
+                  type="button"
+                  class="produce-scene-pill"
+                  :class="sceneDraftStatus(scene)"
+                  :title="`${scene.title}: ${sceneClipReadyCount(scene)}/${scene.shots.length} clips`"
+                  @click="activeShotId = scene.shots[0]?.id || activeShotId"
+                >{{ sceneIndex + 1 }}</button>
+              </div>
+            </div>
+            <button
+              v-if="store.draftAttention.length"
+              type="button"
+              class="secondary-button"
+              :disabled="store.creatingDraft"
+              @click="store.createDraft({ retry_failed_only: true })"
+            >Retry failed</button>
           </div>
 
-          <form class="shot-fields clip-fields" @submit.prevent="saveShot">
-            <label>Video prompt<textarea v-model="shotDraft.video_prompt" rows="6" placeholder="Describe subject motion, camera motion, expressions, environment, and continuity." required></textarea></label>
-            <label>Title-card text (optional)<textarea v-model="shotDraft.title_card_text" rows="2" placeholder="Rendered over black during the final two seconds."></textarea></label>
-            <div class="shot-field-row">
-              <label>Duration (seconds)<input type="number" min="1" max="30" step="0.5" :value="shotDraft.duration_ms / 1000" @input="setShotDuration" /></label>
-              <label>Starting frame<input :value="selectedAspectImage ? `${mediaAspect} image ready` : `Missing ${mediaAspect} image`" disabled /></label>
+          <section class="produce-cast-strip">
+            <header>
+              <div>
+                <span class="section-label">Cast</span>
+                <strong>One face library for the whole film</strong>
+              </div>
+              <div class="cast-header-actions">
+                <button
+                  class="secondary-button"
+                  type="button"
+                  :disabled="castingBusy || !castCharacters.some((character) => !character.references.length) || !imageGenerationAvailable"
+                  @click="generateMissingCastFaces"
+                >
+                  <Sparkles :size="15" />Generate missing faces
+                </button>
+                <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">Sync from script</button>
+                <form class="cast-add" @submit.prevent="addCastCharacter">
+                  <input v-model="newCharacterName" type="text" maxlength="120" placeholder="Add character" :disabled="castingBusy" />
+                  <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
+                </form>
+              </div>
+            </header>
+            <div v-if="!castCharacters.length" class="cast-empty">Sync cast from the script, then generate faces once. Shots inherit tags automatically.</div>
+            <div v-else class="produce-cast-row">
+              <article v-for="character in castCharacters" :key="character.id" class="produce-cast-card">
+                <div class="produce-cast-face">
+                  <img v-if="character.references[0]" :src="character.references[0].url" :alt="character.name" />
+                  <span v-else>{{ character.name.slice(0, 1) }}</span>
+                </div>
+                <strong>{{ character.name }}</strong>
+                <small>{{ character.references.length ? `${character.references.length} ref${character.references.length === 1 ? '' : 's'}` : 'needs face' }}</small>
+                <button type="button" class="ghost-link" :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable" @click="generateCastFace(character)">
+                  {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add face' : 'Generate' }}
+                </button>
+              </article>
             </div>
-            <footer>
-              <span>{{ selectedAspectClip ? `${selectedAspectClip.provider} · ${selectedAspectClip.mime_type}` : 'MP4, WebM, or MOV · 250 MB maximum' }}</span>
-              <button class="secondary-button"><Save :size="15" />Save prompt</button>
-            </footer>
-          </form>
+            <input ref="castRefInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleCastReferenceUpload" />
+          </section>
+
+          <div v-if="scenes.length" class="produce-groups">
+            <article v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="produce-group">
+              <header class="produce-group-head">
+                <div>
+                  <span class="eyebrow">Shot Group {{ sceneIndex + 1 }}</span>
+                  <h3>{{ scene.title }}</h3>
+                  <p class="produce-group-sub">{{ scene.location }}{{ scene.time_of_day ? ` · ${scene.time_of_day}` : '' }}</p>
+                </div>
+                <div class="produce-group-meta">
+                  <span>Duration: {{ sceneDurationLabel(scene) }}</span>
+                  <span>{{ sceneClipReadyCount(scene) }}/{{ scene.shots.length }} clips · {{ sceneReadyCount(scene) }}/{{ scene.shots.length }} ready</span>
+                  <span class="produce-scene-status" :class="sceneDraftStatus(scene)">{{ sceneDraftStatus(scene) === 'ready' ? 'Draft ready' : sceneDraftStatus(scene) === 'in_progress' ? 'Drafting…' : 'Not started' }}</span>
+                  <span v-if="continuityFilledCount(scene)" class="continuity-pill">{{ continuityFilledCount(scene) }} continuity notes</span>
+                  <button
+                    type="button"
+                    class="secondary-button"
+                    :disabled="!scene.shots[0]"
+                    @click="scene.shots[0] && openProduceDetail(scene.shots[0].id)"
+                  >Edit shot</button>
+                </div>
+              </header>
+
+              <section class="produce-continuity">
+                <header>
+                  <div>
+                    <span class="section-label">Continuity</span>
+                    <strong>Keep this scene visually consistent</strong>
+                  </div>
+                  <button
+                    type="button"
+                    class="secondary-button"
+                    :disabled="isContinuitySaving(scene.id)"
+                    @click="saveContinuity(scene)"
+                  >
+                    {{ isContinuitySaving(scene.id) ? 'Saving…' : 'Save notes' }}
+                  </button>
+                </header>
+                <div class="continuity-grid">
+                  <label>Set / location<textarea v-model="continuityDraft(scene).set_notes" rows="2" placeholder="Environment, architecture, weather…" @blur="saveContinuity(scene)"></textarea></label>
+                  <label>Lighting<textarea v-model="continuityDraft(scene).lighting_notes" rows="2" placeholder="Key light, time of day mood…" @blur="saveContinuity(scene)"></textarea></label>
+                  <label>Wardrobe<textarea v-model="continuityDraft(scene).wardrobe_notes" rows="2" placeholder="Outfits that must match across shots…" @blur="saveContinuity(scene)"></textarea></label>
+                  <label>Props<textarea v-model="continuityDraft(scene).props_notes" rows="2" placeholder="Important objects that recur…" @blur="saveContinuity(scene)"></textarea></label>
+                </div>
+                <p class="continuity-hint">These notes are appended automatically when Cutline generates frames and clips for this scene.</p>
+              </section>
+
+              <div class="produce-group-body">
+                <div class="produce-script">
+                  <button
+                    v-for="(shot, shotIndex) in scene.shots"
+                    :key="shot.id"
+                    type="button"
+                    class="produce-shot-row"
+                    :class="{ active: selectedShot?.id === shot.id, open: isProduceShotExpanded(shot.id) }"
+                    @click="toggleProduceShot(shot.id)"
+                  >
+                    <span class="produce-shot-toggle">
+                      <ChevronDown v-if="isProduceShotExpanded(shot.id)" :size="16" />
+                      <ChevronRight v-else :size="16" />
+                      <strong>Shot {{ shotIndex + 1 }}</strong>
+                      <small>{{ shotTime(shot) }} · {{ shot.framing || 'Medium' }}</small>
+                      <Check v-if="shotMedia(shot, 'clip')" class="shot-ready-icon" :size="14" />
+                      <Image v-else-if="shotMedia(shot, 'image')" class="shot-ready-icon muted" :size="14" />
+                      <RefreshCw v-else-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="14" />
+                    </span>
+                    <div v-if="isProduceShotExpanded(shot.id)" class="produce-shot-copy" @click.stop>
+                      <p>{{ shot.action || 'No visual action yet.' }}</p>
+                      <div v-for="line in shot.dialogue" :key="`${shot.id}-${line.character}-${line.text}`" class="dialogue-block compact">
+                        <strong>{{ line.character }}</strong>
+                        <p>{{ line.text }}</p>
+                      </div>
+                      <p v-if="shot.sound" class="screenplay-sound"><strong>Sound</strong>{{ shot.sound }}</p>
+                      <button type="button" class="ghost-link" @click="openProduceDetail(shot.id, { editPrompts: true })">Adjust prompts & regenerate →</button>
+                    </div>
+                  </button>
+                </div>
+
+                <div class="produce-preview">
+                  <div class="produce-preview-frame" :class="{ portrait: mediaAspect === '9:16' }">
+                    <video
+                      v-if="scenePreviewClip(scene)"
+                      :key="scenePreviewClip(scene)!.url"
+                      :src="scenePreviewClip(scene)!.url"
+                      controls
+                      playsinline
+                      preload="metadata"
+                    ></video>
+                    <img
+                      v-else-if="scenePreviewImage(scene)"
+                      :src="scenePreviewImage(scene)!.url"
+                      :alt="scene.title"
+                    />
+                    <div v-else class="empty-storyboard">
+                      <Clapperboard :size="28" />
+                      <strong>Waiting for draft</strong>
+                      <span>Create draft video to generate this scene’s frames and clips.</span>
+                    </div>
+                  </div>
+                  <p class="produce-preview-blurb">{{ produceSceneBlurb(scene) }}</p>
+                  <div class="produce-preview-actions">
+                    <button
+                      type="button"
+                      class="primary-button"
+                      :disabled="!scenePreviewShot(scene) || store.isProcessingShot(scenePreviewShot(scene)!.id) || !imageGenerationAvailable"
+                      @click="selectShot(scenePreviewShot(scene)!.id); generateShotImage()"
+                    >
+                      <Sparkles :size="15" />
+                      {{ scenePreviewImage(scene) ? 'Regenerate frame' : 'Generate frame' }}
+                    </button>
+                    <button type="button" class="secondary-button" :disabled="!scene.shots[0]" @click="scene.shots[0] && openProduceDetail(scene.shots[0].id)">Open shot</button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div v-else class="empty-shot-plan"><ListChecks :size="28" /><strong>No scenes yet</strong><span>Approve a script to unlock Produce.</span></div>
         </section>
 
-        <div v-else class="empty-shot-plan"><Video :size="28" /><strong>No shots were created</strong><span>Approve a script with shots before creating clips.</span></div>
+        <footer v-if="!produceDetailOpen" class="produce-dock">
+          <div>
+            <strong>{{ allShots.length }} shots</strong>
+            <span>{{ mediaReadyCount }} with media · {{ clipCount }} with video</span>
+          </div>
+          <div class="produce-dock-actions">
+            <button type="button" class="secondary-button" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
+            <button type="button" class="secondary-button" :disabled="!isScriptApproved" @click="router.push(stageRoute('final-cut'))"><Film :size="15" /> Assemble</button>
+            <button
+              type="button"
+              class="primary-button"
+              :disabled="!isScriptApproved || store.creatingDraft"
+              @click="store.createDraft()"
+            >
+              <Sparkles :size="15" />
+              {{ store.creatingDraft ? 'Creating draft…' : 'Create draft video' }}
+            </button>
+          </div>
+        </footer>
+
+        <div v-if="produceDetailOpen" class="shot-plan-workspace produce-detail">
+          <aside class="shot-browser">
+            <div class="shot-browser-heading">
+              <button type="button" class="ghost-link back-to-story" @click="closeProduceDetail"><ChevronRight class="back-chevron" :size="16" /> Back to story</button>
+              <div><span class="section-label">Shot list</span><strong>{{ allShots.length }} planned shots</strong></div>
+              <span>{{ allShots.filter((shot) => shot.image).length }}/{{ allShots.length }} ready</span>
+            </div>
+            <div class="shot-list">
+              <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
+                <header><strong>{{ String(sceneIndex + 1).padStart(2, '0') }} {{ scene.title }}</strong><span>{{ shotCountLabel(scene.shots.length) }}</span></header>
+                <button
+                  v-for="shot in scene.shots"
+                  :key="shot.id"
+                  class="shot-list-item"
+                  :class="{ active: selectedShot?.id === shot.id }"
+                  @click="selectShot(shot.id)"
+                >
+                  <span class="shot-list-thumb">
+                    <img v-if="shot.image" :src="shot.image.url" alt="" />
+                    <Image v-else :size="18" />
+                  </span>
+                  <span>
+                    <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
+                    <small>{{ shot.framing }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</small>
+                    <small v-if="store.isProcessingShot(shot.id)" class="shot-job-copy">{{ imageJobForShot(shot.id)?.message || 'Starting image generation' }}</small>
+                  </span>
+                  <RefreshCw v-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="15" />
+                  <Check v-else-if="shot.image" class="shot-ready-icon" :size="15" />
+                </button>
+              </section>
+            </div>
+          </aside>
+
+          <section v-if="selectedShot" class="shot-editor">
+            <header class="shot-editor-header">
+              <div><span class="eyebrow">{{ selectedShotLabel }}</span><h2>{{ selectedShotScene?.title }}</h2></div>
+              <div class="media-variant-switch" role="group" aria-label="Storyboard image aspect ratio">
+                <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
+                <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
+              </div>
+              <span class="image-source" :class="{ ready: selectedAspectImage }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : `No ${mediaAspect} image` }}</span>
+            </header>
+
+            <div class="storyboard-area">
+              <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
+                <video v-if="selectedAspectClip" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
+                <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
+                <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} media yet</strong><span>Generate a frame, then a clip — or run Create draft from the story view.</span></div>
+                <div v-if="store.isProcessingShot(selectedShot.id) || store.processingClipId === selectedShot.id" class="render-overlay">
+                  <RefreshCw class="spinning" :size="24" />
+                  <strong>{{ store.processingClipId === selectedShot.id ? (store.clipJob?.message || 'Generating video') : (selectedImageJob?.message || 'Rendering storyboard') }}</strong>
+                </div>
+              </div>
+
+              <div v-if="castCharacters.length" class="cast-generate-chips">
+                <span class="section-label">Use face refs</span>
+                <div class="cast-chip-row">
+                  <button
+                    v-for="character in castCharacters"
+                    :key="character.id"
+                    type="button"
+                    class="cast-chip"
+                    :class="{ active: selectedCharacterIds.includes(character.id), warn: !character.references.length }"
+                    :disabled="store.isProcessingShot(selectedShot.id)"
+                    @click="toggleCharacterForGeneration(character.id)"
+                  >
+                    {{ character.name }}
+                    <small v-if="!character.references.length">no ref</small>
+                  </button>
+                </div>
+              </div>
+
+              <div class="storyboard-actions">
+                <button class="primary-button" :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable" @click="beginRegenerateImage">
+                  <RefreshCw v-if="selectedAspectImage" :size="15" /><Sparkles v-else :size="15" />
+                  {{ selectedAspectImage ? `Regenerate ${mediaAspect} image` : `Generate ${mediaAspect} image` }}
+                </button>
+                <button
+                  class="primary-button"
+                  :disabled="store.processingClipId === selectedShot.id || !selectedAspectImage || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  @click="beginRegenerateClip"
+                >
+                  <Video :size="15" />
+                  {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
+                </button>
+                <button class="secondary-button" type="button" @click="showPromptEditor = !showPromptEditor">
+                  {{ showPromptEditor ? 'Hide prompts' : 'Adjust prompts' }}
+                </button>
+                <button class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="chooseUpload"><Upload :size="15" />Upload image</button>
+                <button class="secondary-button" :disabled="store.processingClipId === selectedShot.id" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
+                <button v-if="selectedAspectImage" class="icon-danger-button" :title="`Delete ${mediaAspect} image`" :aria-label="`Delete ${mediaAspect} shot image`" @click="deleteShotImageCandidate = true"><Trash2 :size="16" /></button>
+                <button v-if="selectedAspectClip" class="icon-danger-button" title="Delete video" aria-label="Delete shot video" @click="deleteShotClipCandidate = true"><Trash2 :size="16" /></button>
+                <input ref="uploadInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleUpload" />
+                <input ref="clipUploadInput" class="visually-hidden" type="file" accept="video/mp4,video/webm,video/quicktime,.mov" @change="handleClipUpload" />
+              </div>
+            </div>
+
+            <section v-if="selectedShot.dialogue.length" class="narration-section">
+              <div class="narration-heading">
+                <div><span class="section-label">VibeVoice narration</span><small>Generate this shot's dialogue audio without rerunning the draft.</small></div>
+                <button class="secondary-button" type="button" :disabled="store.processingAudioId === selectedShot.id" @click="generateShotAudio">
+                  <RefreshCw v-if="selectedAudioUrl" :size="15" /><Sparkles v-else :size="15" />
+                  {{ store.processingAudioId === selectedShot.id ? 'Generating…' : selectedAudioUrl ? 'Regenerate narration' : 'Generate narration' }}
+                </button>
+              </div>
+              <audio v-if="selectedAudioUrl" :key="selectedAudioUrl" :src="selectedAudioUrl" controls preload="metadata"></audio>
+            </section>
+
+            <form class="shot-fields" @submit.prevent="saveShot">
+              <div class="shot-field-row">
+                <label>Framing<input v-model="shotDraft.framing" list="framing-options" /><datalist id="framing-options"><option value="Wide" /><option value="Medium" /><option value="Close-up" /><option value="Extreme close-up" /><option value="Over-the-shoulder" /><option value="Insert" /></datalist></label>
+                <label>Duration (seconds)<input type="number" min="1" max="30" step="0.5" :value="shotDraft.duration_ms / 1000" @input="setShotDuration" /></label>
+              </div>
+              <p class="shot-action-blurb">{{ selectedShot.action || 'No action line on this shot.' }}</p>
+              <div v-if="!showPromptEditor" class="prompt-collapsed">
+                <div>
+                  <strong>Prompts stay out of the way</strong>
+                  <span>Cutline uses the saved image/video prompts plus scene continuity. Open them only when you need a regenerate tweak.</span>
+                </div>
+                <button type="button" class="secondary-button" @click="showPromptEditor = true">Adjust prompts</button>
+              </div>
+              <template v-else>
+                <div class="combined-prompt-heading">
+                  <div><strong>Google Flow video prompt</strong><span>Copy-ready prompt combining this shot, cast, and scene continuity.</span></div>
+                  <button class="secondary-button" type="button" @click="copyShotVideoPrompt"><Check v-if="copiedShotPrompt" :size="14" /><Copy v-else :size="14" />{{ copiedShotPrompt ? 'Copied' : 'Copy prompt' }}</button>
+                </div>
+                <textarea class="combined-prompt" :value="selectedShotVideoPrompt" rows="13" readonly aria-label="Copy-ready Google Flow video prompt"></textarea>
+                <label>Image prompt<textarea v-model="shotDraft.image_prompt" rows="5" required></textarea></label>
+                <label>Video prompt<textarea v-model="shotDraft.video_prompt" rows="3"></textarea></label>
+                <label>Title-card text (optional)<textarea v-model="shotDraft.title_card_text" rows="2" placeholder="Rendered over black during the final two seconds."></textarea></label>
+              </template>
+              <footer>
+                <span>{{ selectedAspectClip ? 'Clip ready' : selectedAspectImage ? `${selectedAspectImage.provider || 'image'} · ${mediaAspect}` : imageGenerationAvailable ? `${imageProviderOrder} · ${mediaAspect}` : 'Upload available' }}</span>
+                <button class="secondary-button"><Save :size="15" />Save shot</button>
+              </footer>
+            </form>
+          </section>
+
+          <div v-else class="empty-shot-plan"><ListChecks :size="28" /><strong>No shots were created</strong><span>Return to script review and add shot prompts before continuing.</span></div>
+        </div>
       </div>
 
       <TimelineEditor v-else-if="activeStage === 'final-cut' && store.currentProject" :project="store.currentProject" :shots="allShots" @variant-change="setFinalCutVariant" />
 
       <section v-else class="stage-placeholder">
-        <Image v-if="activeStage === 'storyboards'" :size="30" />
-        <Film v-else :size="30" />
+        <Film :size="30" />
         <strong>{{ stageTitle }}</strong>
-        <span>{{ activeStage === 'storyboards' ? 'No storyboard sequence yet.' : 'No assembled cut yet.' }}</span>
+        <span>No assembled cut yet.</span>
       </section>
     </section>
   </main>
@@ -1562,3 +1831,326 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 </template>
+
+<style scoped>
+/* CUTLINE MODERN STUDIO */
+.studio-layout { background: var(--soft); color: var(--ink); }
+.panel-heading {
+  min-height: 48px;
+  padding: 0 16px;
+  border-color: var(--line) !important;
+  background: rgba(20,24,22,.86) !important;
+  backdrop-filter: blur(16px);
+}
+.panel-heading h2,
+.panel-heading h3 { color: #f4f6f5; letter-spacing: -.02em; }
+.panel-heading small,
+.panel-heading p { color: var(--muted); }
+.preview-stage {
+  border-radius: 14px !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  background: #080a09 !important;
+  box-shadow: 0 18px 50px rgba(0,0,0,.32), inset 0 0 0 1px rgba(255,255,255,.018);
+  overflow: hidden;
+}
+.preview-stage img,
+.preview-stage video { border-radius: 12px; }
+.media-variant-switch,
+.variant-toggle {
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255,255,255,.035);
+}
+.media-variant-switch button,
+.variant-toggle button {
+  min-height: 29px;
+  border: 0 !important;
+  border-radius: 7px !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+}
+.media-variant-switch button:hover,
+.variant-toggle button:hover { color: #fff !important; background: rgba(255,255,255,.045) !important; }
+.media-variant-switch button.active,
+.variant-toggle button.active {
+  color: #fff !important;
+  background: #2a302d !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 1px 2px rgba(0,0,0,.25) !important;
+}
+.review-badge {
+  padding: 5px 9px;
+  background: rgba(73,169,120,.1) !important;
+  border: 1px solid rgba(73,169,120,.24) !important;
+  color: #7fd1a5 !important;
+  font-size: 11px;
+  font-weight: 650;
+}
+.produce-scene-pill {
+  min-height: 30px;
+  padding: 0 10px;
+  background: rgba(232,93,74,.09) !important;
+  border: 1px solid rgba(232,93,74,.22) !important;
+  color: #ff9c90 !important;
+}
+.shot-card,
+.scene-card,
+.asset-card,
+.character-card,
+.suggestion-card,
+.provider-card {
+  border-radius: 12px !important;
+  border-color: var(--line) !important;
+  background: rgba(255,255,255,.025) !important;
+  box-shadow: none !important;
+}
+.shot-card:hover,
+.scene-card:hover,
+.asset-card:hover,
+.character-card:hover,
+.suggestion-card:hover {
+  border-color: var(--line-strong) !important;
+  background: rgba(255,255,255,.045) !important;
+}
+.shot-card.active,
+.scene-card.active { border-color: rgba(232,93,74,.45) !important; box-shadow: 0 0 0 1px rgba(232,93,74,.14) !important; }
+textarea,
+input,
+select {
+  background: #101412 !important;
+  border-color: var(--line) !important;
+  color: #eff2f0 !important;
+}
+textarea::placeholder,
+input::placeholder { color: #68716c; }
+.confirm-modal { background: rgba(0,0,0,.58) !important; backdrop-filter: blur(5px); }
+.job-cancel-button { border-radius: 8px !important; }
+.status-dot { background: var(--success); }
+.status-dot.muted { background: #59605c; }
+</style>
+
+
+<style scoped>
+/* Final Studio workspace polish: preserve all behavior, modernize hierarchy. */
+.studio-layout {
+  background: var(--workspace-bg);
+  color: var(--text-primary);
+}
+
+.project-rail {
+  border-right: 1px solid var(--line-subtle);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.018), transparent 28%),
+    #0b0e11;
+  box-shadow: none;
+}
+
+.project-header {
+  min-height: 56px;
+  border-bottom: 1px solid var(--line-subtle);
+  background: rgba(11, 14, 17, .88);
+  backdrop-filter: blur(18px);
+}
+
+.project-select,
+.project-menu-trigger,
+.project-item {
+  border-color: transparent;
+  border-radius: 9px;
+}
+
+.project-select:hover,
+.project-menu-trigger:hover,
+.project-item:hover {
+  background: rgba(255,255,255,.045);
+  border-color: var(--line-subtle);
+}
+
+.project-item.active {
+  background: rgba(255,255,255,.075);
+  border-color: var(--line-default);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.project-thumb {
+  border: 1px solid var(--line-subtle);
+  background: linear-gradient(145deg, #20252c, #12161b);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+}
+
+.project-copy strong {
+  color: var(--text-primary);
+  font-weight: 630;
+  letter-spacing: -.01em;
+}
+
+.project-copy small,
+.save-state,
+.provider-state,
+.breadcrumb {
+  color: var(--text-tertiary);
+}
+
+.workspace {
+  background:
+    radial-gradient(circle at 58% -10%, rgba(235,101,84,.055), transparent 30%),
+    var(--workspace-bg);
+}
+
+.stage-list {
+  gap: 4px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-subtle);
+  background: rgba(10, 12, 15, .9);
+  backdrop-filter: blur(18px);
+}
+
+.stage {
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0 11px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stage:hover {
+  color: var(--text-secondary);
+  background: rgba(255,255,255,.035);
+}
+
+.stage.active {
+  color: var(--text-primary);
+  border-color: var(--line-default);
+  background: rgba(255,255,255,.06);
+  box-shadow: 0 1px 0 rgba(255,255,255,.025) inset;
+}
+
+.stage.complete::after {
+  background: #5fc98a;
+  box-shadow: 0 0 0 3px rgba(95,201,138,.09);
+}
+
+.header-actions {
+  gap: 7px;
+}
+
+.provider-panel,
+.scene-card,
+.shot-card,
+.asset-card,
+.character-card,
+.suggestion-card,
+.provider-card {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.012));
+  box-shadow: none;
+}
+
+.scene-card:hover,
+.shot-card:hover,
+.asset-card:hover,
+.character-card:hover,
+.suggestion-card:hover,
+.provider-card:hover {
+  border-color: var(--line-default);
+  background: linear-gradient(180deg, rgba(255,255,255,.043), rgba(255,255,255,.018));
+  transform: translateY(-1px);
+}
+
+.scene-card.active,
+.shot-card.active {
+  border-color: rgba(235,101,84,.5);
+  background: linear-gradient(180deg, rgba(235,101,84,.105), rgba(235,101,84,.045));
+  box-shadow: 0 0 0 1px rgba(235,101,84,.07) inset;
+}
+
+.panel-heading {
+  margin-bottom: 12px;
+}
+
+.panel-heading h2,
+.panel-heading h3,
+.provider-title {
+  color: var(--text-primary);
+  letter-spacing: -.018em;
+}
+
+.panel-heading p,
+.provider-panel p,
+.scene-card p,
+.shot-card p {
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.preview-stage {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 50% 8%, rgba(255,255,255,.055), transparent 34%),
+    #060708;
+  box-shadow: var(--shadow-panel), inset 0 1px 0 rgba(255,255,255,.035);
+  overflow: hidden;
+}
+
+.media-variant-switch,
+.variant-toggle {
+  border-color: var(--line-subtle);
+  background: rgba(0,0,0,.28);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+.review-badge,
+.produce-scene-pill {
+  border: 1px solid var(--line-default);
+  border-radius: 999px;
+  background: rgba(255,255,255,.045);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+.error-banner {
+  border: 1px solid rgba(238,92,92,.3);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: #ffb7b7;
+}
+
+.confirm-modal {
+  border: 1px solid var(--line-default);
+  border-radius: 16px;
+  background: rgba(18,21,26,.98);
+  box-shadow: var(--shadow-float);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 3px rgba(87,196,132,.08);
+}
+
+.status-dot.muted {
+  box-shadow: none;
+}
+
+@media (max-width: 1100px) {
+  .project-rail {
+    width: 210px;
+  }
+
+  .stage-list {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .stage-list::-webkit-scrollbar {
+    display: none;
+  }
+}
+</style>

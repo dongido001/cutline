@@ -305,6 +305,19 @@ export const api = {
       missing_clips: string[]
       missing_audio: string[]
       can_start: boolean
+      shot_count: number
+      scene_count: number
+      scenes: Array<{
+        id: string
+        title: string
+        order_index: number
+        shot_count: number
+        images_ready: number
+        clips_ready: number
+        audio_ready: number
+        audio_needed: number
+        status: 'pending' | 'in_progress' | 'ready'
+      }>
       video_provider: ProviderStatus
       vibevoice: { configured: boolean; available: boolean; detail: string }
     }>(`/api/projects/${projectId}/draft/readiness`),
@@ -320,6 +333,8 @@ export const api = {
     id: string,
     input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
   ) => request<Scene>(`/api/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  generateShotAudio: (shotId: string) =>
+    request<Shot>(`/api/shots/${shotId}/audio/generate`, { method: 'POST' }),
   selectTake: (shotId: string, takeId: string) =>
     request<Shot>(`/api/shots/${shotId}/takes/select`, {
       method: 'POST',

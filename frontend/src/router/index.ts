@@ -15,7 +15,22 @@ const router = createRouter({
       name: 'project-stage',
       component: () => import('../views/StudioView.vue'),
       beforeEnter: (to) => {
-        if (typeof to.params.stage === 'string' && stages.has(to.params.stage)) return true
+        const stage = to.params.stage
+        if (typeof stage !== 'string') {
+          return { name: 'project-stage', params: { projectId: to.params.projectId, stage: 'script' } }
+        }
+        // Storyboards + clips collapse into Produce (shots)
+        if (stage === 'storyboards' || stage === 'clips') {
+          return {
+            name: 'project-stage',
+            params: {
+              projectId: to.params.projectId,
+              stage: 'shots',
+              ...(typeof to.params.shotId === 'string' ? { shotId: to.params.shotId } : {}),
+            },
+          }
+        }
+        if (stages.has(stage)) return true
         return {
           name: 'project-stage',
           params: { projectId: to.params.projectId, stage: 'script' },

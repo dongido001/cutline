@@ -272,6 +272,7 @@ def _request_provider_image(
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
     references: Sequence[FaceReferenceImage] | None = None,
+    conversation_url: str | None = None,
 ) -> tuple[bytes, str, dict]:
     references = list(references or [])
     size = "1344x768" if aspect_ratio == "16:9" else "768x1344"
@@ -292,6 +293,8 @@ def _request_provider_image(
     payload: dict = {"model": model, "prompt": prompt, "size": size, "n": 1, "response_format": "b64_json"}
     if references and provider == "chatgpt_web":
         payload["reference_images"] = _reference_payload(references)
+    if provider == "chatgpt_web" and conversation_url:
+        payload["conversation_url"] = conversation_url
     if provider == "chatgpt_web":
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
@@ -346,6 +349,8 @@ def generate_storyboard_image(
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
     references: Sequence[FaceReferenceImage] | None = None,
+    conversation_url: str | None = None,
+    remember: dict | None = None,
 ) -> tuple[str, str, str]:
     references = list(references or [])
     prompt = prepare_image_prompt(prompt, aspect_ratio)
@@ -377,7 +382,11 @@ def generate_storyboard_image(
                 aspect_ratio,
                 progress,
                 references=references,
+                conversation_url=conversation_url if provider == "chatgpt_web" else None,
             )
+            url = metadata.get("conversation_url")
+            if remember is not None and url:
+                remember["url"] = str(url)
             if progress:
                 progress({"provider": provider, "phase": "saving", **metadata})
             extension, mime_type = _image_format(image)

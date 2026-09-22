@@ -34,6 +34,8 @@ def test_project_readiness_reports_script_gate(tmp_path, monkeypatch) -> None:
     session.commit()
     readiness = project_readiness(project, session)
     assert readiness["can_start"] is False
+    assert readiness["scenes"] == []
+    assert readiness["scene_count"] == 0
     assert any(item["code"] == "script" for item in readiness["attention"])
     assert any(item["code"] == "video_provider" for item in readiness["attention"])
     session.close()
