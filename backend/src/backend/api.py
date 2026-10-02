@@ -2132,8 +2132,19 @@ def select_shot_take(
         invalidate_final_cut(project, db)
 
     db.commit()
-    db.refresh(shot)
-    return shot
+    db.expire_all()
+    fresh_shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.image),
+            selectinload(Shot.clip),
+            selectinload(Shot.media_variants),
+            selectinload(Shot.scene).selectinload(Scene.script_version).selectinload(ScriptVersion.project),
+        )
+    )
+    return fresh_shot or shot
 
 
 @app.get("/api/publish/providers")

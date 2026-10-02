@@ -103,6 +103,13 @@ async function handleSelectTake(take: ShotTake) {
   if (take.selected || selectingTakeId.value) return
   selectingTakeId.value = take.id
   try {
+    if (props.shot.takes) {
+      for (const t of props.shot.takes) {
+        if (t.media_type === take.media_type && t.aspect_ratio === take.aspect_ratio) {
+          t.selected = (t.id === take.id)
+        }
+      }
+    }
     await store.selectShotTake(props.shot.id, take.id)
   } catch (err) {
     console.error('Failed to select take:', err)
