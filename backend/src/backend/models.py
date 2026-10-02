@@ -124,6 +124,7 @@ class Shot(Base):
     selected_audio_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
     dialogue_audio_filename: Mapped[str | None] = mapped_column(String(240), nullable=True)
     dialogue_audio_mime: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    conversation_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     scene: Mapped[Scene] = relationship(back_populates="shots")
     image: Mapped["ShotImage | None"] = relationship(

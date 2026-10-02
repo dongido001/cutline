@@ -19,6 +19,7 @@ SHOT_COLUMNS = {
     "selected_audio_take_id": "VARCHAR",
     "dialogue_audio_filename": "VARCHAR(240)",
     "dialogue_audio_mime": "VARCHAR(80)",
+    "conversation_url": "TEXT",
 }
 SCENE_COLUMNS = {
     "set_notes": "TEXT NOT NULL DEFAULT ''",

@@ -17,6 +17,7 @@ import {
   Film,
   Image,
   ListChecks,
+  MessageSquare,
   MessageSquareText,
   Mic,
   MoreHorizontal,
@@ -303,6 +304,30 @@ const selectedAspectClip = computed(() => {
     ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? shot.clip : null)
 })
 const selectedShotScene = computed(() => scenes.value.find((scene) => scene.shots.some((shot) => shot.id === selectedShot.value?.id)))
+const selectedShotConversationUrl = computed(() => {
+  const shot = selectedShot.value
+  if (!shot) return null
+
+  if (shot.conversation_url) return shot.conversation_url
+
+  const matchingTakes = shot.takes?.filter((take) => take.media_type === "image" && take.aspect_ratio === mediaAspect.value) || []
+  const activeTake = matchingTakes.find((take) => take.id === shot.selected_image_take_id)
+    || matchingTakes[matchingTakes.length - 1]
+    || shot.takes?.find((take) => take.id === shot.selected_image_take_id)
+  const takeUrl = activeTake?.conversation_url || (activeTake?.settings as Record<string, unknown> | undefined)?.conversation_url as string | undefined
+  if (takeUrl) return takeUrl
+
+  const job = store.currentProject?.jobs?.find((j) =>
+    j.conversation_url &&
+    j.attempts?.some((att) => (att as Record<string, unknown>).shot_id === shot.id)
+  )
+  if (job?.conversation_url) return job.conversation_url
+
+  const inFlightJob = store.imageJobs[shot.id]
+  if (inFlightJob?.conversation_url) return inFlightJob.conversation_url
+
+  return null
+})
 const selectedAudioTake = computed(() => selectedShot.value?.takes?.find((take) => take.id === selectedShot.value?.selected_audio_take_id) ?? null)
 const selectedAudioUrl = computed(() => selectedAudioTake.value?.url ?? (selectedShot.value?.dialogue_audio_filename ? `/media/${encodeURIComponent(selectedShot.value.dialogue_audio_filename)}` : null))
 const previewShot = computed(() => allShots.value[previewShotIndex.value])
@@ -1810,6 +1835,18 @@ function formatRenderedAt(value: string) {
                   <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
                 </div>
                 <span class="image-source" :class="{ ready: selectedAspectImage || selectedAspectReference }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : selectedAspectReference ? 'continuity frame' : `No ${mediaAspect} image` }}</span>
+                <a
+                  v-if="selectedShotConversationUrl"
+                  :href="selectedShotConversationUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="chat-session-badge"
+                  title="Open AI chat session in ChatGPT"
+                >
+                  <MessageSquare :size="12" />
+                  <span>Chat session</span>
+                  <ExternalLink :size="10" />
+                </a>
                 <button
                   v-if="selectedShotScene"
                   type="button"
@@ -1876,6 +1913,18 @@ function formatRenderedAt(value: string) {
                   <Video :size="15" />
                   {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
                 </button>
+                <a
+                  v-if="selectedShotConversationUrl"
+                  :href="selectedShotConversationUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="secondary-button chat-session-btn"
+                  title="Open the AI chat session that created this shot in ChatGPT"
+                >
+                  <MessageSquare :size="14" />
+                  <span>Chat session</span>
+                  <ExternalLink :size="12" />
+                </a>
                 <button
                   v-if="selectedShot.dialogue?.length"
                   class="secondary-button lipsync-toolbar-button"
@@ -1962,6 +2011,17 @@ function formatRenderedAt(value: string) {
                 <button type="button" class="secondary-button" @click="showPromptEditor = true">Adjust prompts</button>
               </div>
               <template v-else>
+                <div v-if="selectedShotConversationUrl" class="chat-session-callout">
+                  <div class="chat-session-callout-header">
+                    <MessageSquare :size="15" />
+                    <strong>AI Chat Session Active</strong>
+                  </div>
+                  <p>This shot was generated in a dedicated provider conversation. You can review prompt variations or chat directly:</p>
+                  <a :href="selectedShotConversationUrl" target="_blank" rel="noopener noreferrer" class="chat-session-callout-link">
+                    <span>{{ selectedShotConversationUrl }}</span>
+                    <ExternalLink :size="13" />
+                  </a>
+                </div>
                 <div class="combined-prompt-heading">
                   <div><strong>Google Flow video prompt</strong><span>Copy-ready prompt combining this shot, cast, and scene continuity.</span></div>
                   <button class="secondary-button" type="button" @click="copyShotVideoPrompt"><Check v-if="copiedShotPrompt" :size="14" /><Copy v-else :size="14" />{{ copiedShotPrompt ? 'Copied' : 'Copy prompt' }}</button>
@@ -2450,6 +2510,72 @@ input::placeholder { color: #68716c; }
   color: #fff;
 }
 
+
+.chat-session-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.chat-session-badge:hover {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+}
+
+.chat-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+}
+
+.chat-session-callout {
+  padding: 12px 14px;
+  background: rgba(24, 26, 25, 0.8);
+  border: 1px solid var(--line-default);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-session-callout-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.chat-session-callout p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.chat-session-callout-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #38bdf8;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.chat-session-callout-link:hover {
+  text-decoration: underline;
+}
 </style>
 
 

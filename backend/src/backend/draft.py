@@ -278,6 +278,7 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                     job.provider_phase = str(update["phase"])
                 if update.get("conversation_url"):
                     job.conversation_url = str(update["conversation_url"])
+                    shot.conversation_url = str(update["conversation_url"])
                 db.commit()
 
             filename, mime_type, provider = generate_storyboard_image(

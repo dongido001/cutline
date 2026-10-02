@@ -112,6 +112,7 @@ class ShotTakeRead(BaseModel):
     prompt: str
     settings: dict[str, Any] = {}
     selected: bool
+    conversation_url: str | None = None
     created_at: datetime
 
 
@@ -161,6 +162,7 @@ class ShotRead(BaseModel):
     takes: list[ShotTakeRead] = []
     continuity_frames: list[ShotContinuityFrameRead] = []
     image_references: list[ShotImageReferenceRead] = []
+    conversation_url: str | None = None
 
 
 class ShotCreate(BaseModel):

@@ -472,6 +472,7 @@ def _generate_shot_image(
                 job.message = str(update.get("message") or messages.get(phase, "Rendering storyboard frame"))
                 if update.get("conversation_url"):
                     job.conversation_url = str(update["conversation_url"])
+                    shot.conversation_url = str(update["conversation_url"])
                 attempts = deepcopy(job.attempts or [])
                 meta = [
                     item
@@ -551,7 +552,11 @@ def _generate_shot_image(
                 source="generated",
                 provider=provider,
                 prompt=prompt,
-                settings={"continuity_snapshot": snapshot, **({"image_reference": image_reference} if image_reference else {})},
+                settings={
+                    "continuity_snapshot": snapshot,
+                    **({"image_reference": image_reference} if image_reference else {}),
+                    **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
+                },
             )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1

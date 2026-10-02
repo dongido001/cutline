@@ -87,6 +87,7 @@ export interface Shot {
   image: ShotImage | null
   clip: ShotClip | null
   media_variants: ShotMediaVariant[]
+  conversation_url?: string | null
   takes?: ShotTake[]
 }
 
@@ -101,6 +102,7 @@ export interface ShotTake {
   prompt: string
   settings: Record<string, unknown> & { image_reference?: ShotImageReference }
   selected: boolean
+  conversation_url?: string | null
   created_at: string
 }
 
