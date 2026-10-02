@@ -763,9 +763,18 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 ),
                 None,
             )
+            image_ref = next(
+                (
+                    ref
+                    for ref in shot.image_references
+                    if ref.aspect_ratio == target_aspect
+                ),
+                None,
+            )
             source_image = (
                 continuity_frame
                 or (shot.image if target_aspect == project.aspect_ratio and shot.image else image_variant or shot.image)
+                or image_ref
             )
             if not source_image:
                 raise RuntimeError("Generate or upload a shot image first")

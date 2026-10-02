@@ -291,6 +291,11 @@ const selectedAspectImage = computed(() => {
   return shot.media_variants.find((item) => item.media_type === 'image' && item.aspect_ratio === mediaAspect.value)
     ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? shot.image : null)
 })
+const selectedAspectReference = computed(() => {
+  const shot = selectedShot.value
+  if (!shot) return null
+  return shot.image_references?.find((item) => item.aspect_ratio === mediaAspect.value) ?? null
+})
 const selectedAspectClip = computed(() => {
   const shot = selectedShot.value
   if (!shot) return null
@@ -1783,7 +1788,7 @@ function formatRenderedAt(value: string) {
                   <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
                   <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
                 </div>
-                <span class="image-source" :class="{ ready: selectedAspectImage }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : `No ${mediaAspect} image` }}</span>
+                <span class="image-source" :class="{ ready: selectedAspectImage || selectedAspectReference }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : selectedAspectReference ? 'continuity frame' : `No ${mediaAspect} image` }}</span>
                 <button
                   v-if="selectedShotScene"
                   type="button"
@@ -1811,6 +1816,7 @@ function formatRenderedAt(value: string) {
               <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
                 <video v-if="selectedAspectClip" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
                 <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
+                <img v-else-if="selectedAspectReference" :src="selectedAspectReference.url" :alt="`${mediaAspect} reference frame for ${selectedShotLabel}`" />
                 <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} media yet</strong><span>Generate a frame, then a clip — or run Create draft from the story view.</span></div>
                 <div v-if="store.isProcessingShot(selectedShot.id) || store.processingClipId === selectedShot.id" class="render-overlay">
                   <RefreshCw class="spinning" :size="24" />
@@ -1843,7 +1849,7 @@ function formatRenderedAt(value: string) {
                 </button>
                 <button
                   class="primary-button"
-                  :disabled="store.processingClipId === selectedShot.id || !selectedAspectImage || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  :disabled="store.processingClipId === selectedShot.id || (!selectedAspectImage && !selectedAspectReference) || !store.videoProvider?.configured || !store.videoProvider?.available"
                   @click="beginRegenerateClip"
                 >
                   <Video :size="15" />
