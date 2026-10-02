@@ -524,6 +524,27 @@ function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
     ?? null
 }
 
+function shotThumbUrl(shot: Shot): string | null {
+  const image = shotMedia(shot, 'image')
+  if (image?.url) return image.url
+  const ref = shot.image_references?.find((item) => item.aspect_ratio === mediaAspect.value)
+    ?? shot.image_references?.[0]
+  if (ref?.url) return ref.url
+  const cont = shot.continuity_frames?.find((item) => item.aspect_ratio === mediaAspect.value)
+    ?? shot.continuity_frames?.[0]
+  if (cont?.url) return cont.url
+  return null
+}
+
+function shotHasMedia(shot: Shot): boolean {
+  return Boolean(
+    shotMedia(shot, 'clip') ||
+    shotMedia(shot, 'image') ||
+    shot.image_references?.length ||
+    shot.continuity_frames?.length
+  )
+}
+
 function sceneReadyCount(scene: Scene) {
   return scene.shots.filter((shot) => shotMedia(shot, 'clip') || shotMedia(shot, 'image')).length
 }
@@ -1728,7 +1749,7 @@ function formatRenderedAt(value: string) {
             <div class="shot-browser-heading">
               <button type="button" class="ghost-link back-to-story" @click="closeProduceDetail"><ChevronRight class="back-chevron" :size="16" /> Back to story</button>
               <div><span class="section-label">Shot list</span><strong>{{ allShots.length }} planned shots</strong></div>
-              <span>{{ allShots.filter((shot) => shot.image).length }}/{{ allShots.length }} ready</span>
+              <span>{{ allShots.filter((shot) => shotHasMedia(shot)).length }}/{{ allShots.length }} ready</span>
             </div>
             <div class="shot-list">
               <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
@@ -1755,7 +1776,7 @@ function formatRenderedAt(value: string) {
                   @click="selectShot(shot.id)"
                 >
                   <span class="shot-list-thumb">
-                    <img v-if="shot.image" :src="shot.image.url" alt="" />
+                    <img v-if="shotThumbUrl(shot)" :src="shotThumbUrl(shot)!" alt="" />
                     <Image v-else :size="18" />
                   </span>
                   <span>
@@ -1764,7 +1785,7 @@ function formatRenderedAt(value: string) {
                     <small v-if="store.isProcessingShot(shot.id)" class="shot-job-copy">{{ imageJobForShot(shot.id)?.message || 'Starting image generation' }}</small>
                   </span>
                   <RefreshCw v-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="15" />
-                  <Check v-else-if="shot.image" class="shot-ready-icon" :size="15" />
+                  <Check v-else-if="shotHasMedia(shot)" class="shot-ready-icon" :size="15" />
                 </button>
                 <button
                   type="button"

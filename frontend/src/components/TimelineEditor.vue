@@ -1146,7 +1146,7 @@ onBeforeUnmount(() => {
             <div v-for="shot in availableShots" :key="shot.id" class="add-shot-row">
               <div class="add-shot-thumb">
                 <video v-if="shot.clip" :src="shot.clip.url" muted preload="metadata"></video>
-                <img v-else-if="shot.image" :src="shot.image.url" alt="" />
+                <img v-else-if="shot.image || shot.image_references?.[0]" :src="(shot.image || shot.image_references?.[0])?.url" alt="" />
                 <Film v-else :size="18" />
               </div>
               <div class="add-shot-info">
