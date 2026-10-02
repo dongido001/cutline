@@ -62,8 +62,8 @@ async function remove() {
 <template>
   <section class="image-reference-panel" aria-label="Image reference">
     <div>
-      <strong>Image reference</strong>
-      <p>Visual continuity · Keep identity, wardrobe, setting, and lighting while following this shot's framing and action.</p>
+      <strong>Visual & Video Frame Reference</strong>
+      <p>Visual continuity · Grab a frame from an earlier video clip or select a still image to preserve identity, wardrobe, setting, and lighting.</p>
     </div>
     <div v-if="active" class="reference-preview">
       <img :src="active.url" alt="Selected image reference" />
