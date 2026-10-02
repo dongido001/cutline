@@ -41,6 +41,7 @@ import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
 import ImageReferencePanel from '@/components/ImageReferencePanel.vue'
+import ShotTakesPanel from '@/components/ShotTakesPanel.vue'
 
 interface DisplaySuggestion {
   id: string | number
@@ -317,14 +318,11 @@ const selectedShotConversationUrl = computed(() => {
   const takeUrl = activeTake?.conversation_url || (activeTake?.settings as Record<string, unknown> | undefined)?.conversation_url as string | undefined
   if (takeUrl) return takeUrl
 
-  const job = store.currentProject?.jobs?.find((j) =>
-    j.conversation_url &&
-    j.attempts?.some((att) => (att as Record<string, unknown>).shot_id === shot.id)
-  )
-  if (job?.conversation_url) return job.conversation_url
-
   const inFlightJob = store.imageJobs[shot.id]
   if (inFlightJob?.conversation_url) return inFlightJob.conversation_url
+
+  const clipJob = store.clipJobs[shot.id]
+  if (clipJob?.conversation_url) return clipJob.conversation_url
 
   return null
 })
@@ -1989,6 +1987,12 @@ function formatRenderedAt(value: string) {
               </div>
               <audio v-if="selectedAudioUrl" :key="selectedAudioUrl" :src="selectedAudioUrl" controls preload="metadata"></audio>
             </section>
+
+            <ShotTakesPanel
+              v-if="selectedShot"
+              :shot="selectedShot"
+              :aspect="mediaAspect"
+            />
 
             <ImageReferencePanel
               v-if="selectedShot"

@@ -700,6 +700,25 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  async function selectShotTake(shotId: string, takeId: string) {
+    if (!currentProject.value) return
+    error.value = ""
+    try {
+      const updatedShot = await api.selectTake(shotId, takeId)
+      const scenes = currentProject.value.current_version?.scenes || []
+      for (const scene of scenes) {
+        const idx = scene.shots.findIndex((s) => s.id === shotId)
+        if (idx !== -1) {
+          scene.shots[idx] = updatedShot
+          break
+        }
+      }
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : "Could not select take"
+      throw cause
+    }
+  }
+
   async function generateShotClip(id: string, aspectRatio?: AspectRatio) {
     if (!currentProject.value) return
     error.value = ''
@@ -900,6 +919,7 @@ export const useStudioStore = defineStore('studio', () => {
     lipsyncJobs,
     isProcessingLipsync,
     lipsyncShot,
+    selectShotTake,
     generateShotClip,
     uploadShotClip,
     deleteShotClip,

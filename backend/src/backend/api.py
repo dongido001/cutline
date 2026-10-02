@@ -2036,20 +2036,44 @@ def select_shot_take(
         select_take(db, shot, payload.take_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    # Mirror selected take into legacy current media slots for edit compatibility.
+    # Mirror selected take into legacy current media slots and variants for edit compatibility.
     take = next(item for item in shot.takes if item.id == payload.take_id)
     project = shot.scene.script_version.project
-    if take.media_type == "image" and take.aspect_ratio == project.aspect_ratio:
-        if shot.image:
-            shot.image.filename = take.filename
-            shot.image.mime_type = take.mime_type
-            shot.image.provider = take.provider
-            shot.image.prompt = take.prompt
-            shot.image.source = take.source
+    use_legacy = take.aspect_ratio == project.aspect_ratio
+
+    if take.media_type == "image":
+        if use_legacy:
+            if shot.image:
+                shot.image.filename = take.filename
+                shot.image.mime_type = take.mime_type
+                shot.image.provider = take.provider
+                shot.image.prompt = take.prompt
+                shot.image.source = take.source
+            else:
+                db.add(
+                    ShotImage(
+                        shot_id=shot.id,
+                        filename=take.filename,
+                        mime_type=take.mime_type,
+                        source=take.source,
+                        provider=take.provider,
+                        prompt=take.prompt,
+                    )
+                )
+        variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == take.aspect_ratio), None)
+        if variant:
+            variant.filename = take.filename
+            variant.mime_type = take.mime_type
+            variant.provider = take.provider
+            variant.prompt = take.prompt
+            variant.source = take.source
+            variant.created_at = now()
         else:
             db.add(
-                ShotImage(
+                ShotMediaVariant(
                     shot_id=shot.id,
+                    media_type="image",
+                    aspect_ratio=take.aspect_ratio,
                     filename=take.filename,
                     mime_type=take.mime_type,
                     source=take.source,
@@ -2057,17 +2081,43 @@ def select_shot_take(
                     prompt=take.prompt,
                 )
             )
-    if take.media_type == "clip" and take.aspect_ratio == project.aspect_ratio:
-        if shot.clip:
-            shot.clip.filename = take.filename
-            shot.clip.mime_type = take.mime_type
-            shot.clip.provider = take.provider
-            shot.clip.prompt = take.prompt
-            shot.clip.source = take.source
+        conv_url = getattr(take, "conversation_url", None) or (take.settings or {}).get("conversation_url")
+        if conv_url:
+            shot.conversation_url = conv_url
+
+    elif take.media_type == "clip":
+        if use_legacy:
+            if shot.clip:
+                shot.clip.filename = take.filename
+                shot.clip.mime_type = take.mime_type
+                shot.clip.provider = take.provider
+                shot.clip.prompt = take.prompt
+                shot.clip.source = take.source
+            else:
+                db.add(
+                    ShotClip(
+                        shot_id=shot.id,
+                        filename=take.filename,
+                        mime_type=take.mime_type,
+                        source=take.source,
+                        provider=take.provider,
+                        prompt=take.prompt,
+                    )
+                )
+        variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == take.aspect_ratio), None)
+        if variant:
+            variant.filename = take.filename
+            variant.mime_type = take.mime_type
+            variant.provider = take.provider
+            variant.prompt = take.prompt
+            variant.source = take.source
+            variant.created_at = now()
         else:
             db.add(
-                ShotClip(
+                ShotMediaVariant(
                     shot_id=shot.id,
+                    media_type="clip",
+                    aspect_ratio=take.aspect_ratio,
                     filename=take.filename,
                     mime_type=take.mime_type,
                     source=take.source,
@@ -2075,6 +2125,12 @@ def select_shot_take(
                     prompt=take.prompt,
                 )
             )
+        conv_url = getattr(take, "conversation_url", None) or (take.settings or {}).get("conversation_url")
+        if conv_url:
+            shot.conversation_url = conv_url
+        from .final_cut import invalidate_final_cut
+        invalidate_final_cut(project, db)
+
     db.commit()
     db.refresh(shot)
     return shot
