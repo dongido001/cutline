@@ -1440,7 +1440,15 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
         ),
         None,
     )
-    if not continuity_frame and not shot.image and not image_variant:
+    image_ref = next(
+        (
+            ref
+            for ref in shot.image_references
+            if ref.aspect_ratio == target_aspect
+        ),
+        None,
+    )
+    if not continuity_frame and not shot.image and not image_variant and not image_ref:
         raise HTTPException(
             status_code=409, detail="Generate or upload a shot image first"
         )

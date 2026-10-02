@@ -797,7 +797,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 (image_take.settings or {}).get("continuity_snapshot")
                 if image_take else None
             )
-            if not snapshot and not continuity_frame and source_image.source == "generated":
+            if not snapshot and not continuity_frame and getattr(source_image, "source", None) == "generated":
                 candidate = shot.continuity_snapshot
                 if candidate and candidate.get("aspect_ratio") == target_aspect:
                     snapshot = candidate
@@ -807,7 +807,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 video_continuity_prompt(snapshot, base_prompt, target_aspect),
                 shot.sound,
             )
-            if continuity_frame:
+            if continuity_frame or image_ref:
                 effective_prompt = "\n\n".join(
                     part
                     for part in (
