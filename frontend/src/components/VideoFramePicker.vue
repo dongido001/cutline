@@ -18,6 +18,13 @@ function seek(event: Event) {
   seeking.value = true
   video.value.currentTime = Number((event.target as HTMLInputElement).value) / 1000
 }
+function jumpTo(fraction: number) {
+  if (!video.value || !duration.value) return
+  seeking.value = true
+  // For the last frame, offset by 0.06s to guarantee the video decoder renders the final valid frame
+  const target = fraction === 1 ? Math.max(0, duration.value - 0.06) : duration.value * fraction
+  video.value.currentTime = target
+}
 async function capture() {
   const player = video.value
   if (!player || player.seeking || player.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
@@ -51,10 +58,18 @@ async function capture() {
       @loadedmetadata="duration = Number.isFinite(video?.duration) ? video!.duration : 0"
       @seeking="seeking = true" @seeked="seeking = false; sync()" @timeupdate="sync"
       @error="captureError = 'This video could not be loaded. Choose another source.'"></video>
-    <label class="frame-time">Selected time: {{ time.toFixed(3) }} s
+    <div class="frame-scrubber-controls">
+      <div class="frame-time-row">
+        <span class="frame-time-display">Time: <strong>{{ time.toFixed(3) }} s</strong> / {{ duration.toFixed(2) }} s</span>
+        <div class="frame-jump-buttons">
+          <button type="button" class="quick-jump-btn" :disabled="!duration || busy || capturing" @click="jumpTo(0)">First frame</button>
+          <button type="button" class="quick-jump-btn" :disabled="!duration || busy || capturing" @click="jumpTo(0.5)">Mid frame</button>
+          <button type="button" class="quick-jump-btn highlight" :disabled="!duration || busy || capturing" @click="jumpTo(1)">⏭ Last frame (End)</button>
+        </div>
+      </div>
       <input aria-label="Video frame time" type="range" min="0" :max="Math.max(0, Math.floor(duration * 1000) - 1)" step="1"
         :value="Math.round(time * 1000)" :disabled="!duration || busy || capturing" @input="seek" />
-    </label>
+    </div>
     <p v-if="error || captureError" role="alert">{{ error || captureError }}</p>
     <footer>
       <button class="secondary-button" :disabled="busy || capturing" @click="emit('close')">Cancel</button>
@@ -65,8 +80,14 @@ async function capture() {
 
 <style scoped>
 .frame-video { width: 100%; max-height: 55vh; background: #000; border-radius: 10px; }
-.frame-time { display: grid; gap: 8px; margin: 16px 0; font-size: 13px; }
-.frame-time input { width: 100%; }
+.frame-scrubber-controls { display: grid; gap: 10px; margin: 16px 0; }
+.frame-time-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+.frame-jump-buttons { display: flex; gap: 6px; }
+.quick-jump-btn { padding: 4px 10px; border: 1px solid var(--line-default, #383e3a); border-radius: 6px; background: var(--surface-2, #1f2421); color: var(--text-secondary, #ccc); font-size: 11px; cursor: pointer; }
+.quick-jump-btn:hover:not(:disabled) { border-color: var(--line-emphasis, #555); color: #fff; background: var(--surface-3, #2a302c); }
+.quick-jump-btn.highlight { border-color: #3b82f6; color: #60a5fa; background: rgba(59, 130, 246, 0.1); }
+.quick-jump-btn.highlight:hover:not(:disabled) { background: rgba(59, 130, 246, 0.2); }
+.frame-scrubber-controls input[type=range] { width: 100%; cursor: pointer; }
 footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 [role=alert] { color: var(--status-danger, #ef8585); }
 </style>
