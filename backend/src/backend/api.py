@@ -986,7 +986,15 @@ def queue_shot_image(
                 detail="Selected image reference is no longer available for this aspect ratio",
             )
     else:
-        image_reference = None
+        active_ref = next(
+            (ref for ref in shot.image_references if ref.aspect_ratio == target_aspect),
+            None,
+        )
+        if active_ref:
+            image_reference = reference_snapshot(shot, target_aspect, active_ref.id)
+            image_reference_id = active_ref.id
+        else:
+            image_reference = None
     try:
         snapshot = get_or_create_shot_snapshot(
             db, project, shot, target_aspect,

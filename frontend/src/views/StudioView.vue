@@ -873,7 +873,7 @@ async function generateShotImage() {
   if (!selectedShot.value) return
   try {
     await saveShot()
-    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value)
+    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value, false, selectedAspectReference.value?.id)
   } catch {
     // The store exposes the provider or validation error in the workspace.
   }
@@ -1262,7 +1262,7 @@ async function generateVariantFrame() {
   if (!selectedShot.value) return
   try {
     await saveShot()
-    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value)
+    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value, true, selectedAspectReference.value?.id)
   } catch {
     // The store exposes the provider error in the workspace.
   }
