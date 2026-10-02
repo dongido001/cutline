@@ -37,10 +37,10 @@ def format_dialogue_script(dialogue: list[dict[str, Any]], speaker_map: dict[str
     for item in dialogue:
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text") or "").strip()
+        text = str(item.get("text") or item.get("line") or item.get("dialogue") or "").strip()
         if not text:
             continue
-        character = str(item.get("character") or "Speaker").strip()
+        character = str(item.get("character") or item.get("speaker") or "Speaker").strip()
         key = character.upper()
         if key not in speaker_ids:
             speaker_ids[key] = len(speaker_ids) + 1
@@ -93,16 +93,26 @@ def synthesize_dialogue(
     speaker_names: list[str] = []
     seen: set[str] = set()
     for item in dialogue:
-        if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+        if not isinstance(item, dict):
             continue
-        character = str(item.get("character") or "Speaker").strip()
+        text = str(item.get("text") or item.get("line") or item.get("dialogue") or "").strip()
+        if not text:
+            continue
+        character = str(item.get("character") or item.get("speaker") or "Speaker").strip()
         key = character.upper()
         if key in seen:
             continue
         seen.add(key)
-        # Prefer matching voice preset stems; fall back to Andrew/Ava style names.
-        match = next((path.stem for path in presets if character.lower() in path.stem.lower()), None)
-        speaker_names.append(match or (presets[len(speaker_names) % len(presets)].stem if presets else character))
+        # 1. Use explicit assigned voice from speaker_map if provided
+        assigned = speaker_map.get(key) or speaker_map.get(character) if speaker_map else None
+        if assigned:
+            # Strip file extension if passed
+            assigned_stem = Path(assigned).stem
+            speaker_names.append(assigned_stem)
+        else:
+            # Prefer matching voice preset stems; fall back to Andrew/Ava style names.
+            match = next((path.stem for path in presets if character.lower() in path.stem.lower()), None)
+            speaker_names.append(match or (presets[len(speaker_names) % len(presets)].stem if presets else character))
         if len(speaker_names) >= 4:
             break
     if not speaker_names:

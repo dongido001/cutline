@@ -19,3 +19,5 @@ bridges/.playwright/
 bridges/chatgpt-profile/
 bridges/chatgpt-web-provider/
 bridges/gemini-web-to-api/
+*.db
+*.sqlite*

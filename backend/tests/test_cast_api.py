@@ -95,6 +95,14 @@ def test_generate_requires_reference_images_for_selected_cast(tmp_path, monkeypa
             json={"name": "MARA"},
         ).json()
 
+        shot.character_ids = [character["id"]]
+        session.commit()
+        detail = client.get(f"/api/projects/{project.id}")
+        status = detail.json()["current_version"]["scenes"][0]["shots"][0]["continuity"]
+        assert status["characters"] == [{
+            "character_id": character["id"], "name": "MARA", "has_reference": False, "reference_ids": [],
+        }]
+        assert "MARA" in status["missing_character_references"]
         missing = client.post(
             f"/api/shots/{shot.id}/image/generate",
             json={"character_ids": [character["id"]]},
@@ -122,6 +130,15 @@ def test_generate_requires_reference_images_for_selected_cast(tmp_path, monkeypa
         )
         assert queued.status_code == 202
         assert calls["character_ids"] == [character["id"]]
+        session.expire_all()
+        shot.character_ids = [character["id"]]
+        session.commit()
+        automatic = client.post(f"/api/shots/{shot.id}/image/generate", json={})
+        assert automatic.status_code == 202
+        assert calls["character_ids"] == [character["id"]]
+        session.expire_all()
+        assert shot.continuity_snapshot["character_ids"] == [character["id"]]
+        assert shot.continuity_snapshot["characters"][0]["reference_ids"]
     finally:
         app.dependency_overrides.clear()
         session.close()

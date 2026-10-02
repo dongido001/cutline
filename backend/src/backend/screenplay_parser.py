@@ -17,13 +17,13 @@ TIME_RANGE = re.compile(
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?)"
 )
 CHARACTER_SECTION = re.compile(
-    r"(?im)^(?:Character consistency|MAIN CHARACTERS|Characters)\s*:?\s*$"
+    r"(?im)^(?:#{1,6}\s*)?(?:Character consistency|MAIN CHARACTERS|Characters)\s*:?\s*$"
 )
 CHARACTER_SECTION_STOP = re.compile(
-    r"(?im)^(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+)\b"
+    r"(?im)^(?:#{1,6}\s*)?(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+|SCENE|OPENING|---)\b"
 )
 CHARACTER_LINE = re.compile(
-    r"^(?P<name>[A-Z][A-Z0-9' .\-]{0,80}?)"
+    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-]{0,80}?)(?:\*\*)?"
     r"(?:\s*\((?P<role>[^)]+)\))?"
     r"\s*[—–\-:]\s*(?P<notes>.+)$"
 )
@@ -356,14 +356,13 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         group_title = source_scene.pop("_group_title")
         group_location = (source_scene.get("location") or "Unspecified").strip()
         group_time = (source_scene.get("time_of_day") or "Unspecified").strip()
-        group_key = (group_title.strip().lower(), group_location.lower(), group_time.lower())
+        group_key = (group_title.strip().lower(), group_location.lower())
         previous_key = None
         if grouped_scenes:
             previous = grouped_scenes[-1]
             previous_key = (
                 previous["title"].strip().lower(),
                 (previous.get("location") or "Unspecified").strip().lower(),
-                (previous.get("time_of_day") or "Unspecified").strip().lower(),
             )
         if not grouped_scenes or previous_key != group_key:
             grouped_scenes.append(

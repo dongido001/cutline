@@ -35,6 +35,31 @@ describe('buildShotVideoPrompt', () => {
     expect(prompt).toContain('no subtitles, captions, text, logos, watermark')
   })
 
+  it('uses the persisted snapshot instead of silently adopting later scene edits', () => {
+    const saved = {
+      ...shot,
+      continuity_snapshot: {
+        version: 1,
+        character_ids: ['mara'],
+        characters: [{ id: 'mara', name: 'Mara', reference_ids: ['ref-1'] }],
+        scene: {
+          title: 'INT. OLD KITCHEN', location: 'Old kitchen', time_of_day: 'NIGHT',
+          set_notes: 'Rainy window', lighting_notes: 'Blue practical',
+          wardrobe_notes: 'Green cardigan', props_notes: 'Red mug',
+        },
+        framing: 'Close-up', action: 'Mara waits.', video_prompt: 'Slow push-in.',
+        aspect_ratio: '16:9', image_prompt_base: 'Original frame prompt',
+        effective_image_prompt: 'Original frame prompt with saved continuity',
+      },
+    } as Shot
+    const changedScene = { ...scene, location: 'Different location', wardrobe_notes: 'Black coat' }
+    const prompt = buildShotVideoPrompt(saved, changedScene, [character], '9:16')
+    expect(prompt).toContain('Old kitchen; NIGHT')
+    expect(prompt).toContain('Original frame prompt with saved continuity')
+    expect(prompt).toContain('Wardrobe continuity: Green cardigan')
+    expect(prompt).not.toContain('Different location')
+  })
+
   it('states when a shot has no spoken dialogue', () => {
     const prompt = buildShotVideoPrompt({ ...shot, dialogue: [] } as Shot, scene, [], '9:16')
     expect(prompt).toContain('Spoken dialogue: No spoken dialogue in this shot.')

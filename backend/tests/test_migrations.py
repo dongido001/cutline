@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from backend.migrations import migrate_schema
 
@@ -24,6 +24,21 @@ def test_adds_and_backfills_shot_columns(tmp_path) -> None:
     ]
 
 
+def test_migration_creates_persistent_oauth_state_table(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'oauth.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE projects (id TEXT PRIMARY KEY)"))
+        connection.execute(text("CREATE TABLE scenes (id TEXT PRIMARY KEY, title TEXT, start_ms INTEGER, action TEXT, dialogue JSON)"))
+        connection.execute(text("CREATE TABLE shots (id TEXT PRIMARY KEY, scene_id TEXT, order_index INTEGER, duration_ms INTEGER)"))
+
+    migrate_schema(engine)
+
+    inspector = inspect(engine)
+    assert "oauth_states" in inspector.get_table_names()
+    columns = {column["name"] for column in inspector.get_columns("oauth_states")}
+    assert columns == {"state", "platform", "expires_at", "created_at"}
+
+
 def test_additive_shot_column_does_not_rewrite_existing_metadata(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'additive.db'}")
     with engine.begin() as connection:
@@ -47,7 +62,7 @@ def test_additive_shot_column_does_not_rewrite_existing_metadata(tmp_path) -> No
     with engine.connect() as connection:
         row = connection.execute(
             text(
-                "SELECT title, start_ms, end_ms, action, sound, title_card_text FROM shots"
+                "SELECT title, start_ms, end_ms, action, sound, title_card_text, continuity_snapshot FROM shots"
             )
         ).one()
-    assert row == ("Original title", 2000, 6000, "Original action", "Rain", "")
+    assert row == ("Original title", 2000, 6000, "Original action", "Rain", "", None)

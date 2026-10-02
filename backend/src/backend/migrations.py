@@ -13,6 +13,7 @@ SHOT_COLUMNS = {
     "sound": "TEXT NOT NULL DEFAULT ''",
     "title_card_text": "TEXT NOT NULL DEFAULT ''",
     "character_ids": "JSON NOT NULL DEFAULT '[]'",
+    "continuity_snapshot": "JSON",
     "selected_image_take_id": "VARCHAR",
     "selected_clip_take_id": "VARCHAR",
     "selected_audio_take_id": "VARCHAR",
@@ -42,6 +43,11 @@ JOB_COLUMNS = {
     "conversation_url": "TEXT",
     "attempts": "JSON NOT NULL DEFAULT '[]'",
 }
+CHARACTER_COLUMNS = {
+    "voice_provider": "VARCHAR(40) NOT NULL DEFAULT 'vibevoice'",
+    "voice_id": "VARCHAR(120)",
+    "voice_settings": "JSON NOT NULL DEFAULT '{}'",
+}
 PROJECT_COLUMNS = {
     "image_conversation_url": "TEXT",
 }
@@ -58,6 +64,55 @@ def _ensure_columns(engine: Engine, table: str, columns: dict[str, str]) -> None
     with engine.begin() as connection:
         for name in missing:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {columns[name]}"))
+
+
+
+def _ensure_oauth_states(engine: Engine) -> None:
+    if "oauth_states" in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE oauth_states (
+                state VARCHAR(120) PRIMARY KEY,
+                platform VARCHAR(32) NOT NULL,
+                expires_at DATETIME NOT NULL,
+                created_at DATETIME
+            )
+        """))
+        connection.execute(text("CREATE INDEX ix_oauth_states_platform ON oauth_states (platform)"))
+        connection.execute(text("CREATE INDEX ix_oauth_states_expires_at ON oauth_states (expires_at)"))
+
+
+def _ensure_publish_records(engine: Engine) -> None:
+    if "publish_records" in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE publish_records (
+                id VARCHAR PRIMARY KEY,
+                project_id VARCHAR NOT NULL,
+                job_id VARCHAR,
+                scope VARCHAR(16) NOT NULL,
+                variant VARCHAR(16) NOT NULL DEFAULT 'landscape',
+                platforms JSON NOT NULL DEFAULT '[]',
+                title VARCHAR(180) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                tags JSON NOT NULL DEFAULT '[]',
+                privacy JSON NOT NULL DEFAULT '{}',
+                selected_asset_ids JSON NOT NULL DEFAULT '[]',
+                scheduled_at VARCHAR(40),
+                made_for_kids BOOLEAN NOT NULL DEFAULT 0,
+                options JSON NOT NULL DEFAULT '{}',
+                status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                results JSON NOT NULL DEFAULT '[]',
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
+            )
+        """))
+        connection.execute(text("CREATE INDEX ix_publish_records_project_id ON publish_records (project_id)"))
+        connection.execute(text("CREATE INDEX ix_publish_records_job_id ON publish_records (job_id)"))
 
 
 def migrate_schema(engine: Engine) -> None:
@@ -143,6 +198,19 @@ def migrate_schema(engine: Engine) -> None:
                         text(f"ALTER TABLE project_timelines ADD COLUMN {name} {definition}")
                     )
 
+    if "characters" in inspect(engine).get_table_names():
+        character_existing = {
+            column["name"] for column in inspect(engine).get_columns("characters")
+        }
+        with engine.begin() as connection:
+            for name, definition in CHARACTER_COLUMNS.items():
+                if name not in character_existing:
+                    connection.execute(
+                        text(f"ALTER TABLE characters ADD COLUMN {name} {definition}")
+                    )
+
+    _ensure_publish_records(engine)
+    _ensure_oauth_states(engine)
     _group_legacy_structured_shots(engine)
 
 

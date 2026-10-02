@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = BACKEND_ROOT.parent
+PROJECTS_ROOT = REPO_ROOT.parent
 
 
 class Settings(BaseSettings):
@@ -24,12 +26,18 @@ class Settings(BaseSettings):
     gemini_web_base_url: str = "http://127.0.0.1:4981/openai/v1"
     gemini_web_model: str = "gemini-advanced"
     image_providers: str = "chatgpt_web,gemini_web"
-    image_provider_timeout_seconds: int = 180
+    image_provider: str | None = None  # Backward-compatible alias for MOVIE_IMAGE_PROVIDER
+    image_provider_timeout_seconds: int = 240
     gemini_web_image_model: str = "gemini-3-pro-image-preview-11-2025"
     chatgpt_web_base_url: str = "http://127.0.0.1:8791/v1"
     chatgpt_web_model: str = "chatgpt-5.6-sol-high-web"
     chatgpt_web_api_key: str = ""
     video_provider: str = "runway"
+    flowkit_base_url: str = "http://127.0.0.1:8100/api/flow"
+    flowkit_project_id: str = ""
+    flowkit_root: Path = PROJECTS_ROOT / "flowkit"
+    flowkit_timeout_seconds: int = 900
+    flowkit_model_family: str = "veo"
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_workflow_path: Path = BACKEND_ROOT / "data" / "comfyui_i2v_workflow.json"
     comfyui_timeout_seconds: int = 1800
@@ -42,15 +50,32 @@ class Settings(BaseSettings):
     runway_timeout_seconds: int = 900
     # Cap Runway clip length at 5s (vs 10) to control cost on long films.
     runway_max_duration: int = 5
-    vibevoice_root: Path = Path("/Users/gideon/Projects/VibeVoice")
+    vibevoice_root: Path = PROJECTS_ROOT / "VibeVoice"
     vibevoice_model: str = "microsoft/VibeVoice-1.5B"
-    vibevoice_python: str = "python"
+    vibevoice_python: str = str(PROJECTS_ROOT / "VibeVoice" / ".venv" / "bin" / "python") if (PROJECTS_ROOT / "VibeVoice" / ".venv" / "bin" / "python").is_file() else "python"
     vibevoice_mode: str = "subprocess"
     vibevoice_timeout_seconds: int = 600
+    elevenlabs_api_key: str = ""
+    elevenlabs_model: str = "eleven_multilingual_v2"
+    openai_api_key: str = ""
     export_width_landscape: int = 1920
     export_height_landscape: int = 1080
     export_width_shorts: int = 1080
     export_height_shorts: int = 1920
+    publish_mode: str = "mock"
+    youtube_access_token: str = ""
+    youtube_channel_id: str = ""
+    facebook_page_access_token: str = ""
+    facebook_page_id: str = ""
+    # OAuth app credentials for in-app connect flow
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    facebook_app_id: str = ""
+    facebook_app_secret: str = ""
+    # OAuth callback and opener origins
+    public_base_url: str = "http://127.0.0.1:8000"
+    frontend_origin: str = "http://127.0.0.1:5173"
+    oauth_state_ttl_seconds: int = 600
 
     @property
     def database_url(self) -> str:
@@ -79,7 +104,8 @@ class Settings(BaseSettings):
     @property
     def image_provider_order(self) -> list[str]:
         supported = {"chatgpt_web", "gemini_web"}
-        providers = [item.strip() for item in self.image_providers.split(",") if item.strip()]
+        raw = self.image_provider if (self.image_provider and self.image_provider.strip()) else self.image_providers
+        providers = [item.strip() for item in raw.split(",") if item.strip()]
         return [item for item in providers if item in supported]
 
     @property

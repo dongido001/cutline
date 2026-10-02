@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Bot, Clapperboard, Command, Film, MessageSquareText, RefreshCw, Search, Settings, X } from '@lucide/vue'
+import { Activity, Bot, Clapperboard, Command, Film, MessageSquareText, Moon, RefreshCw, Search, Settings, Sun } from '@lucide/vue'
+import { UiBadge, UiButton, UiCard, UiDialog, UiIconButton, UiInput, UiTooltip } from '@/components/ui'
 import { useStudioStore } from '@/stores/studio'
+import { initTheme, setTheme, type ThemeMode } from '@/lib/theme'
+import { api } from '@/lib/api'
 
 const router = useRouter()
 const store = useStudioStore()
@@ -10,14 +13,31 @@ const showCommands = ref(false)
 const showSettings = ref(false)
 const commandQuery = ref('')
 const refreshing = ref(false)
+const theme = ref<ThemeMode>(initTheme())
+const activeQueueJobs = ref(0)
+let queuePollTimer: number | undefined
+
+function chooseTheme(next: ThemeMode) {
+  theme.value = next
+  setTheme(next)
+}
+
+interface CommandItem {
+  label: string
+  to?: string
+  stage?: string
+  icon: any
+}
 
 const commands = computed(() => {
   const project = store.currentProject
-  if (!project) return []
-  const items = [
-    { label: 'Script', stage: 'script', icon: MessageSquareText },
-    { label: 'Produce', stage: 'shots', icon: Clapperboard },
-    { label: 'Assemble', stage: 'final-cut', icon: Film },
+  const items: CommandItem[] = [
+    { label: 'Background Queues & Tasks', to: '/queues', icon: Activity },
+    ...(project ? [
+      { label: 'Script', stage: 'script', icon: MessageSquareText },
+      { label: 'Produce', stage: 'shots', icon: Clapperboard },
+      { label: 'Assemble', stage: 'final-cut', icon: Film },
+    ] : []),
   ]
   const query = commandQuery.value.trim().toLowerCase()
   return query ? items.filter((item) => item.label.toLowerCase().includes(query)) : items
@@ -34,11 +54,15 @@ function openSettings() {
   showSettings.value = true
 }
 
-async function runCommand(stage: string) {
-  const project = store.currentProject
-  if (!project) return
+async function runCommand(item: CommandItem) {
   showCommands.value = false
-  await router.push({ name: 'project-stage', params: { projectId: project.id, stage } })
+  if (item.to) {
+    await router.push(item.to)
+    return
+  }
+  const project = store.currentProject
+  if (!project || !item.stage) return
+  await router.push({ name: 'project-stage', params: { projectId: project.id, stage: item.stage } })
 }
 
 async function refreshProviders() {
@@ -47,6 +71,15 @@ async function refreshProviders() {
     await store.initialize(store.currentProject?.id)
   } finally {
     refreshing.value = false
+  }
+}
+
+async function checkQueueStats() {
+  try {
+    const status = await api.systemQueues()
+    activeQueueJobs.value = status.active_jobs
+  } catch {
+    // ignore background errors
   }
 }
 
@@ -60,8 +93,20 @@ function handleKeyboard(event: KeyboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', handleKeyboard))
-onUnmounted(() => window.removeEventListener('keydown', handleKeyboard))
+onMounted(() => {
+  window.addEventListener('keydown', handleKeyboard)
+  void checkQueueStats()
+  queuePollTimer = window.setInterval(() => {
+    void checkQueueStats()
+  }, 8000)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeyboard)
+  if (queuePollTimer !== undefined) {
+    window.clearInterval(queuePollTimer)
+  }
+})
 </script>
 
 <template>
@@ -72,38 +117,115 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard))
         <span>Cutline</span>
       </RouterLink>
       <div class="topbar-meta">
-        <span class="local-state"><span class="status-dot"></span> Local workspace</span>
-        <button class="icon-button" title="Command menu (⌘K)" aria-label="Open command menu" :aria-expanded="showCommands" @click="openCommands"><Command :size="17" /></button>
-        <button class="icon-button" title="Settings" aria-label="Open settings" :aria-expanded="showSettings" @click="openSettings"><Settings :size="17" /></button>
+        <RouterLink
+          to="/queues"
+          class="topbar-nav-button"
+          :class="{ active: router.currentRoute.value.path === '/queues' }"
+          title="Manage background task queues & bridges"
+        >
+          <Activity :size="14" />
+          <span>Queues</span>
+          <span v-if="activeQueueJobs > 0" class="topbar-queue-badge">{{ activeQueueJobs }}</span>
+        </RouterLink>
+
+        <UiBadge tone="success"><span class="status-dot"></span> Local workspace</UiBadge>
+        <UiTooltip text="Command menu (⌘K)">
+          <UiIconButton label="Open command menu" :active="showCommands" :aria-expanded="showCommands" @click="openCommands"><Command :size="17" /></UiIconButton>
+        </UiTooltip>
+        <UiTooltip text="Settings">
+          <UiIconButton label="Open settings" :active="showSettings" :aria-expanded="showSettings" @click="openSettings"><Settings :size="17" /></UiIconButton>
+        </UiTooltip>
       </div>
     </header>
     <RouterView />
 
     <div v-if="showCommands" class="utility-backdrop" @click.self="showCommands = false">
       <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-title">
-        <header><Search :size="17" /><input v-model="commandQuery" autofocus placeholder="Go to a project stage" aria-label="Search commands" /><kbd>ESC</kbd></header>
-        <div class="command-heading"><span id="command-title">{{ store.currentProject?.title || 'No project selected' }}</span><small>Navigation</small></div>
-        <button v-for="item in commands" :key="item.stage" @click="runCommand(item.stage)"><component :is="item.icon" :size="16" /><span>{{ item.label }}</span><kbd>↵</kbd></button>
-        <p v-if="store.currentProject && !commands.length">No matching command</p>
-        <p v-else-if="!store.currentProject">Open a project to use quick navigation.</p>
+        <header><Search :size="17" /><UiInput v-model="commandQuery" autofocus placeholder="Jump to page or project stage..." aria-label="Search commands" class="command-input" /><kbd>ESC</kbd></header>
+        <div class="command-heading"><span id="command-title">{{ store.currentProject?.title || 'Global & Navigation' }}</span><small>Quick Navigation</small></div>
+        <button v-for="item in commands" :key="item.label" @click="runCommand(item)"><component :is="item.icon" :size="16" /><span>{{ item.label }}</span><kbd>↵</kbd></button>
+        <p v-if="!commands.length">No matching command</p>
       </section>
     </div>
 
-    <div v-if="showSettings" class="utility-backdrop settings-backdrop" @click.self="showSettings = false">
-      <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <header><div><span>Local workspace</span><h2 id="settings-title">Provider settings</h2></div><button class="mini-icon" aria-label="Close settings" @click="showSettings = false"><X :size="17" /></button></header>
-        <div class="settings-section-heading"><span>Text providers</span><button :disabled="refreshing" @click="refreshProviders"><RefreshCw :class="{ spin: refreshing }" :size="14" />Refresh</button></div>
-        <div class="provider-settings-list">
-          <article v-for="provider in store.providers" :key="provider.id"><span class="provider-status-dot" :class="{ ready: provider.available }"></span><div><strong>{{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><em>{{ provider.available ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</em></article>
-        </div>
-        <div class="settings-section-heading"><span>Image providers</span></div>
-        <div class="provider-settings-list">
-          <article v-for="provider in store.imageProviders" :key="`image-${provider.id}`"><span class="provider-status-dot" :class="{ ready: provider.verified, connected: provider.connected }"></span><div><strong>{{ provider.priority }}. {{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><em>{{ provider.verified ? 'Verified' : provider.connected ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</em></article>
-        </div>
-        <div class="settings-section-heading"><span>Video provider</span></div>
-        <article v-if="store.videoProvider" class="video-provider-setting"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ store.videoProvider.detail }}</small></div><em>{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</em></article>
-        <p v-else class="settings-empty">Video provider status is unavailable.</p>
-      </section>
-    </div>
+    <UiDialog v-model:open="showSettings" title="Provider settings" description="Local workspace connections used by Cutline generation workflows." width-class="max-w-2xl">
+      <div class="settings-section-heading"><span>Appearance</span></div>
+      <div class="theme-toggle" role="group" aria-label="Color theme">
+        <button type="button" :class="{ active: theme === 'dark' }" :aria-pressed="theme === 'dark'" @click="chooseTheme('dark')">
+          <Moon :size="14" /> Dark
+        </button>
+        <button type="button" :class="{ active: theme === 'light' }" :aria-pressed="theme === 'light'" @click="chooseTheme('light')">
+          <Sun :size="14" /> Light
+        </button>
+      </div>
+      <div class="settings-section-heading"><span>Text providers</span><UiButton size="sm" variant="ghost" :disabled="refreshing" @click="refreshProviders"><RefreshCw :class="{ spin: refreshing }" :size="14" />Refresh</UiButton></div>
+      <div class="provider-settings-list">
+        <UiCard v-for="provider in store.providers" :key="provider.id" class="provider-setting-card"><span class="provider-status-dot" :class="{ ready: provider.available }"></span><div><strong>{{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><UiBadge :tone="provider.available ? 'success' : provider.configured ? 'danger' : 'neutral'">{{ provider.available ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+      </div>
+      <div class="settings-section-heading"><span>Image providers</span></div>
+      <div class="provider-settings-list">
+        <UiCard v-for="provider in store.imageProviders" :key="`image-${provider.id}`" class="provider-setting-card"><span class="provider-status-dot" :class="{ ready: provider.verified, connected: provider.connected }"></span><div><strong>{{ provider.priority }}. {{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><UiBadge :tone="provider.verified ? 'success' : provider.connected ? 'accent' : provider.configured ? 'danger' : 'neutral'">{{ provider.verified ? 'Verified' : provider.connected ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+      </div>
+      <div class="settings-section-heading"><span>Video provider</span></div>
+      <UiCard v-if="store.videoProvider" class="video-provider-setting provider-setting-card"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ store.videoProvider.detail }}</small></div><UiBadge :tone="store.videoProvider.available ? 'success' : store.videoProvider.configured ? 'danger' : 'neutral'">{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+      <p v-else class="settings-empty">Video provider status is unavailable.</p>
+    </UiDialog>
   </div>
 </template>
+
+<style scoped>
+.topbar-nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: #cbd1ce;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--workspace-border, rgba(255, 255, 255, 0.09));
+  text-decoration: none;
+  transition: all 0.16s ease;
+}
+
+.topbar-nav-button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.topbar-nav-button.active {
+  color: #ffffff;
+  background: rgba(99, 102, 241, 0.14);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.topbar-queue-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 9999px;
+  background: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.6);
+  animation: pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.85;
+  }
+}
+</style>

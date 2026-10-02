@@ -13,10 +13,12 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FileText,
   Film,
   Image,
   ListChecks,
   MessageSquareText,
+  Mic,
   MoreHorizontal,
   Pause,
   Play,
@@ -37,6 +39,7 @@ import type { AspectRatio, Character, OutputVariant, ProjectInput, ProjectSummar
 import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
+import ImageReferencePanel from '@/components/ImageReferencePanel.vue'
 
 interface DisplaySuggestion {
   id: string | number
@@ -85,6 +88,9 @@ const deletingProject = ref(false)
 const deleteShotImageCandidate = ref(false)
 const deleteShotClipCandidate = ref(false)
 const deleteFinalCutCandidate = ref(false)
+const deleteShotCandidate = ref<Shot | null>(null)
+const deletingShot = ref(false)
+const addingShotSceneId = ref<string | null>(null)
 const uploadInput = ref<HTMLInputElement | null>(null)
 const castRefInput = ref<HTMLInputElement | null>(null)
 const castRefTargetId = ref<string | null>(null)
@@ -273,6 +279,12 @@ const stageTitle = computed(() => stageTitles[activeStage.value])
 const currentProgressStep = computed(() => stageSteps[activeStage.value])
 const allShots = computed(() => scenes.value.flatMap((scene) => scene.shots))
 const selectedShot = computed(() => allShots.value.find((shot) => shot.id === activeShotId.value) ?? allShots.value[0])
+const previousShotId = computed(() => {
+  if (!selectedShot.value) return undefined
+  const shots = allShots.value
+  const idx = shots.findIndex((s) => s.id === selectedShot.value!.id)
+  return idx > 0 ? shots[idx - 1]?.id : undefined
+})
 const selectedAspectImage = computed(() => {
   const shot = selectedShot.value
   if (!shot) return null
@@ -407,8 +419,13 @@ watch(() => route.query.scene, (sceneId) => {
 watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage]) => {
   const requestedShot = typeof shotId === 'string' ? shots.find((shot) => shot.id === shotId) : undefined
   activeShotId.value = requestedShot?.id ?? shots[0]?.id ?? null
-  if ((stage === 'shots' || stage === 'clips') && activeShotId.value && shotId !== activeShotId.value && store.currentProject) {
-    void router.replace(projectRoute(store.currentProject.id, stage, activeShotId.value))
+  if (typeof shotId === 'string' && shotId) {
+    produceDetailOpen.value = true
+    if (requestedShot?.id !== shotId && activeShotId.value && store.currentProject) {
+      void router.replace(projectRoute(store.currentProject.id, stage, activeShotId.value))
+    }
+  } else {
+    produceDetailOpen.value = false
   }
 }, { immediate: true })
 watch(selectedShot, (shot, previous) => {
@@ -570,6 +587,10 @@ function openProduceDetail(shotId: string, opts?: { editPrompts?: boolean }) {
 function closeProduceDetail() {
   produceDetailOpen.value = false
   showPromptEditor.value = false
+  const projectId = store.currentProject?.id ?? (route.params.projectId as string)
+  if (projectId) {
+    void router.push(projectRoute(projectId, 'shots'))
+  }
 }
 
 function ensureFirstShotsExpanded() {
@@ -981,6 +1002,104 @@ async function copyScriptGuide() {
   }, 1800)
 }
 
+const createFileInput = ref<HTMLInputElement | null>(null)
+const continueFileInput = ref<HTMLInputElement | null>(null)
+const isDraggingCreate = ref(false)
+const isDraggingContinuation = ref(false)
+const createFileName = ref('')
+const continuationFileName = ref('')
+
+function openScreenplayFilePicker(target: 'create' | 'continue') {
+  if (target === 'create') {
+    createFileInput.value?.click()
+  } else {
+    continueFileInput.value?.click()
+  }
+}
+
+async function readFileAsText(file: File): Promise<string> {
+  if (typeof file.text === 'function') {
+    return await file.text()
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsText(file)
+  })
+}
+
+function extractScreenplayTitle(text: string): string {
+  const firstLines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  for (const line of firstLines) {
+    if (/^(Genre|Duration|Format|Aspect ratio|Character consistency|Location|SHOT\s+\d+)/i.test(line)) {
+      continue
+    }
+    const cleaned = line.replace(/^[#\s*\["]+|[#\s*\]"]+$/g, '').trim()
+    if (cleaned && cleaned.length <= 80) {
+      return cleaned
+    }
+  }
+  return ''
+}
+
+async function processScreenplayFile(file: File, target: 'create' | 'continue') {
+  if (!file) return
+  try {
+    const content = await readFileAsText(file)
+    if (target === 'create') {
+      form.script = content
+      createFileName.value = file.name
+      if (!form.title.trim() || form.title === 'Untitled short') {
+        const titleFromScript = extractScreenplayTitle(content)
+        if (titleFromScript) {
+          form.title = titleFromScript
+        } else {
+          const base = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ')
+          form.title = base.charAt(0).toUpperCase() + base.slice(1)
+        }
+      }
+    } else {
+      continuationForm.script = content
+      continuationFileName.value = file.name
+    }
+  } catch (err) {
+    console.error('Failed to read screenplay file:', err)
+  }
+}
+
+function handleScreenplayFileSelected(event: Event, target: 'create' | 'continue') {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) {
+    void processScreenplayFile(file, target)
+  }
+  input.value = ''
+}
+
+function handleScreenplayDrop(event: DragEvent, target: 'create' | 'continue') {
+  if (target === 'create') {
+    isDraggingCreate.value = false
+  } else {
+    isDraggingContinuation.value = false
+  }
+  const file = event.dataTransfer?.files?.[0]
+  if (file) {
+    void processScreenplayFile(file, target)
+  }
+}
+
+function clearLoadedFile(target: 'create' | 'continue') {
+  if (target === 'create') {
+    createFileName.value = ''
+    form.script = ''
+  } else {
+    continuationFileName.value = ''
+    continuationForm.script = ''
+  }
+}
+
+
 async function handleUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -991,6 +1110,60 @@ async function handleUpload(event: Event) {
     // The store exposes the upload error in the workspace.
   } finally {
     input.value = ''
+  }
+}
+
+async function handleAddShot(sceneId: string, insertAfterShotId?: string) {
+  if (addingShotSceneId.value) return
+  addingShotSceneId.value = sceneId
+  try {
+    const scene = scenes.value.find((s) => s.id === sceneId)
+    const existingCount = scene?.shots?.length ?? 0
+    const newTitle = `Shot ${existingCount + 1}`
+    const created = await store.createShot(sceneId, {
+      title: newTitle,
+      framing: 'Medium',
+      duration_ms: 5000,
+      insert_after_shot_id: insertAfterShotId,
+    })
+    if (created) {
+      activeShotId.value = created.id
+      if (!expandedProduceShotIds.value.includes(created.id)) {
+        expandedProduceShotIds.value = [...expandedProduceShotIds.value, created.id]
+      }
+      openProduceDetail(created.id, { editPrompts: true })
+    }
+  } catch {
+    // store exposes error in state
+  } finally {
+    addingShotSceneId.value = null
+  }
+}
+
+async function confirmDeleteShot() {
+  const shotToDelete = deleteShotCandidate.value || selectedShot.value
+  if (!shotToDelete) return
+  deletingShot.value = true
+  try {
+    const currentList = allShots.value
+    const currentIndex = currentList.findIndex((s) => s.id === shotToDelete.id)
+    let fallbackShotId: string | null = null
+    if (currentIndex > 0) {
+      fallbackShotId = currentList[currentIndex - 1]?.id ?? null
+    } else if (currentIndex < currentList.length - 1) {
+      fallbackShotId = currentList[currentIndex + 1]?.id ?? null
+    }
+
+    await store.deleteShot(shotToDelete.id)
+    deleteShotCandidate.value = null
+    if (fallbackShotId) {
+      activeShotId.value = fallbackShotId
+      selectShot(fallbackShotId)
+    }
+  } catch {
+    // store exposes error
+  } finally {
+    deletingShot.value = false
   }
 }
 
@@ -1038,6 +1211,15 @@ async function confirmDeleteShotClip() {
     deleteShotClipCandidate.value = false
   } catch {
     // The store exposes the deletion error in the workspace.
+  }
+}
+
+async function generateShotLipsync() {
+  if (!selectedShot.value) return
+  try {
+    await store.lipsyncShot(selectedShot.value.id, mediaAspect.value)
+  } catch {
+    // store exposes error
   }
 }
 
@@ -1463,6 +1645,15 @@ function formatRenderedAt(value: string) {
                       <button type="button" class="ghost-link" @click="openProduceDetail(shot.id, { editPrompts: true })">Adjust prompts & regenerate →</button>
                     </div>
                   </button>
+                  <button
+                    type="button"
+                    class="add-shot-row-button"
+                    :disabled="addingShotSceneId === scene.id"
+                    @click="handleAddShot(scene.id)"
+                  >
+                    <Plus :size="14" />
+                    <span>{{ addingShotSceneId === scene.id ? 'Adding shot…' : 'Add shot' }}</span>
+                  </button>
                 </div>
 
                 <div class="produce-preview">
@@ -1536,7 +1727,21 @@ function formatRenderedAt(value: string) {
             </div>
             <div class="shot-list">
               <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
-                <header><strong>{{ String(sceneIndex + 1).padStart(2, '0') }} {{ scene.title }}</strong><span>{{ shotCountLabel(scene.shots.length) }}</span></header>
+                <header>
+                  <strong>{{ String(sceneIndex + 1).padStart(2, '0') }} {{ scene.title }}</strong>
+                  <div class="shot-scene-header-meta">
+                    <span>{{ shotCountLabel(scene.shots.length) }}</span>
+                    <button
+                      type="button"
+                      class="mini-add-shot-button"
+                      title="Add shot to scene"
+                      :disabled="addingShotSceneId === scene.id"
+                      @click.stop="handleAddShot(scene.id)"
+                    >
+                      <Plus :size="13" />
+                    </button>
+                  </div>
+                </header>
                 <button
                   v-for="shot in scene.shots"
                   :key="shot.id"
@@ -1556,6 +1761,16 @@ function formatRenderedAt(value: string) {
                   <RefreshCw v-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="15" />
                   <Check v-else-if="shot.image" class="shot-ready-icon" :size="15" />
                 </button>
+                <button
+                  type="button"
+                  class="sidebar-add-shot-btn"
+                  title="Add shot to this scene"
+                  :disabled="addingShotSceneId === scene.id"
+                  @click="handleAddShot(scene.id)"
+                >
+                  <Plus :size="13" />
+                  <span>{{ addingShotSceneId === scene.id ? 'Adding…' : 'Add shot' }}</span>
+                </button>
               </section>
             </div>
           </aside>
@@ -1563,11 +1778,33 @@ function formatRenderedAt(value: string) {
           <section v-if="selectedShot" class="shot-editor">
             <header class="shot-editor-header">
               <div><span class="eyebrow">{{ selectedShotLabel }}</span><h2>{{ selectedShotScene?.title }}</h2></div>
-              <div class="media-variant-switch" role="group" aria-label="Storyboard image aspect ratio">
-                <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
-                <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
+              <div class="shot-header-right-group">
+                <div class="media-variant-switch" role="group" aria-label="Storyboard image aspect ratio">
+                  <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
+                  <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
+                </div>
+                <span class="image-source" :class="{ ready: selectedAspectImage }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : `No ${mediaAspect} image` }}</span>
+                <button
+                  v-if="selectedShotScene"
+                  type="button"
+                  class="add-shot-header-btn"
+                  title="Add a new shot directly after this shot"
+                  :disabled="addingShotSceneId === selectedShotScene.id"
+                  @click="handleAddShot(selectedShotScene.id, selectedShot.id)"
+                >
+                  <Plus :size="14" />
+                  <span>{{ addingShotSceneId === selectedShotScene.id ? 'Adding…' : '+ Add shot' }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="delete-shot-header-btn"
+                  title="Delete shot"
+                  @click="deleteShotCandidate = selectedShot"
+                >
+                  <Trash2 :size="14" />
+                  <span>Delete shot</span>
+                </button>
               </div>
-              <span class="image-source" :class="{ ready: selectedAspectImage }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : `No ${mediaAspect} image` }}</span>
             </header>
 
             <div class="storyboard-area">
@@ -1612,13 +1849,42 @@ function formatRenderedAt(value: string) {
                   <Video :size="15" />
                   {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
                 </button>
+                <button
+                  v-if="selectedShot.dialogue?.length"
+                  class="secondary-button lipsync-toolbar-button"
+                  :disabled="store.isProcessingLipsync(selectedShot.id) || (!selectedAspectImage && !selectedAspectClip)"
+                  title="Synchronize character lips and facial performance with dialogue audio"
+                  @click="generateShotLipsync"
+                >
+                  <RefreshCw v-if="store.isProcessingLipsync(selectedShot.id)" class="spinning" :size="14" />
+                  <Mic v-else :size="14" />
+                  {{ store.isProcessingLipsync(selectedShot.id) ? 'Lip-syncing…' : 'Lip-sync' }}
+                </button>
                 <button class="secondary-button" type="button" @click="showPromptEditor = !showPromptEditor">
                   {{ showPromptEditor ? 'Hide prompts' : 'Adjust prompts' }}
                 </button>
                 <button class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="chooseUpload"><Upload :size="15" />Upload image</button>
                 <button class="secondary-button" :disabled="store.processingClipId === selectedShot.id" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
-                <button v-if="selectedAspectImage" class="icon-danger-button" :title="`Delete ${mediaAspect} image`" :aria-label="`Delete ${mediaAspect} shot image`" @click="deleteShotImageCandidate = true"><Trash2 :size="16" /></button>
-                <button v-if="selectedAspectClip" class="icon-danger-button" title="Delete video" aria-label="Delete shot video" @click="deleteShotClipCandidate = true"><Trash2 :size="16" /></button>
+                <button
+                  v-if="selectedAspectImage"
+                  class="secondary-button destructive-action-button"
+                  :title="`Delete ${mediaAspect} image`"
+                  :aria-label="`Delete ${mediaAspect} shot image`"
+                  @click="deleteShotImageCandidate = true"
+                >
+                  <Trash2 :size="15" />
+                  Delete {{ mediaAspect }} image
+                </button>
+                <button
+                  v-if="selectedAspectClip"
+                  class="secondary-button destructive-action-button"
+                  title="Delete video"
+                  aria-label="Delete shot video"
+                  @click="deleteShotClipCandidate = true"
+                >
+                  <Trash2 :size="15" />
+                  Delete video
+                </button>
                 <input ref="uploadInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleUpload" />
                 <input ref="clipUploadInput" class="visually-hidden" type="file" accept="video/mp4,video/webm,video/quicktime,.mov" @change="handleClipUpload" />
               </div>
@@ -1626,14 +1892,34 @@ function formatRenderedAt(value: string) {
 
             <section v-if="selectedShot.dialogue.length" class="narration-section">
               <div class="narration-heading">
-                <div><span class="section-label">VibeVoice narration</span><small>Generate this shot's dialogue audio without rerunning the draft.</small></div>
-                <button class="secondary-button" type="button" :disabled="store.processingAudioId === selectedShot.id" @click="generateShotAudio">
-                  <RefreshCw v-if="selectedAudioUrl" :size="15" /><Sparkles v-else :size="15" />
-                  {{ store.processingAudioId === selectedShot.id ? 'Generating…' : selectedAudioUrl ? 'Regenerate narration' : 'Generate narration' }}
-                </button>
+                <div><span class="section-label">Dialogue & Voice</span><small>Generate character voice and synchronize mouth movements.</small></div>
+                <div class="narration-actions">
+                  <button class="secondary-button" type="button" :disabled="store.processingAudioId === selectedShot.id" @click="generateShotAudio">
+                    <RefreshCw v-if="selectedAudioUrl" :size="15" /><Sparkles v-else :size="15" />
+                    {{ store.processingAudioId === selectedShot.id ? 'Generating…' : selectedAudioUrl ? 'Regenerate voice' : 'Generate voice' }}
+                  </button>
+                  <button
+                    class="primary-button lipsync-button"
+                    type="button"
+                    :disabled="store.isProcessingLipsync(selectedShot.id) || (!selectedAspectImage && !selectedAspectClip)"
+                    title="Synchronize character facial performance and lips with the dialogue audio track"
+                    @click="generateShotLipsync"
+                  >
+                    <RefreshCw v-if="store.isProcessingLipsync(selectedShot.id)" class="spinning" :size="15" />
+                    <Mic v-else :size="15" />
+                    <span>{{ store.isProcessingLipsync(selectedShot.id) ? (store.lipsyncJobs[selectedShot.id]?.message || 'Lip-syncing…') : 'Lip-Sync Dialogue' }}</span>
+                  </button>
+                </div>
               </div>
               <audio v-if="selectedAudioUrl" :key="selectedAudioUrl" :src="selectedAudioUrl" controls preload="metadata"></audio>
             </section>
+
+            <ImageReferencePanel
+              v-if="selectedShot"
+              :shot="selectedShot"
+              :aspect="mediaAspect"
+              :previous-shot-id="previousShotId"
+            />
 
             <form class="shot-fields" @submit.prevent="saveShot">
               <div class="shot-field-row">
@@ -1689,8 +1975,55 @@ function formatRenderedAt(value: string) {
       </div>
       <label>Text provider<select v-model="form.text_provider"><option v-for="provider in store.providers" :key="provider.id" :value="provider.id" :disabled="!provider.available">{{ provider.label }} · {{ provider.model }}{{ provider.available ? '' : ' (offline)' }}</option><option v-if="!store.providers.length" value="mock">Prototype parser</option></select></label>
       <div class="screenplay-input">
-        <div class="field-heading"><label for="screenplay-source">Screenplay</label><button type="button" @click="showScriptGuide = true"><BookOpen :size="13" />Format guide</button></div>
-        <textarea id="screenplay-source" v-model="form.script" rows="13" required spellcheck="false"></textarea>
+        <div class="field-heading">
+          <label for="screenplay-source">Screenplay</label>
+          <div class="field-actions">
+            <button type="button" class="field-action-button" @click="openScreenplayFilePicker('create')">
+              <Upload :size="13" />
+              <span>Import file</span>
+            </button>
+            <button type="button" class="field-action-button" @click="showScriptGuide = true">
+              <BookOpen :size="13" />
+              <span>Format guide</span>
+            </button>
+          </div>
+        </div>
+        <div
+          class="screenplay-dropzone"
+          :class="{ 'is-dragging': isDraggingCreate }"
+          @dragover.prevent="isDraggingCreate = true"
+          @dragleave.prevent="isDraggingCreate = false"
+          @drop.prevent="handleScreenplayDrop($event, 'create')"
+        >
+          <textarea
+            id="screenplay-source"
+            v-model="form.script"
+            rows="13"
+            required
+            spellcheck="false"
+            placeholder="Type, paste, or drop a screenplay file (.txt, .md, .fountain)..."
+          ></textarea>
+          <div v-if="createFileName" class="loaded-file-bar">
+            <div class="loaded-file-info">
+              <FileText :size="13" />
+              <span>Loaded: <strong>{{ createFileName }}</strong></span>
+            </div>
+            <button type="button" class="loaded-file-clear" title="Clear file" @click="clearLoadedFile('create')">
+              <X :size="13" />
+            </button>
+          </div>
+          <div v-if="isDraggingCreate" class="dropzone-overlay">
+            <Upload :size="24" />
+            <span>Drop screenplay file here (.txt, .md, .fountain)</span>
+          </div>
+        </div>
+        <input
+          ref="createFileInput"
+          type="file"
+          accept=".txt,.md,.markdown,.fountain,.screenplay,text/plain,text/markdown"
+          style="display: none"
+          @change="handleScreenplayFileSelected($event, 'create')"
+        />
       </div>
         <div
           v-if="store.currentJob && store.busy"
@@ -1721,7 +2054,7 @@ function formatRenderedAt(value: string) {
         <p>Traditional screenplays are supported, but this format preserves every supplied shot and timecode before AI review.</p>
         <div><strong>Recognized fields</strong><code>SHOT N - TITLE</code><code>Scene:</code><code>Location:</code><code>Time:</code><code>Framing:</code><code>Action:</code><code>Dialogue:</code><code>Sound:</code><code>Image prompt:</code><code>Video prompt:</code></div>
       </div>
-      <div class="guide-prompt-heading"><div><span class="section-label">Reusable prompt</span><strong>Give this to your script generator</strong></div><button class="secondary-button" @click="copyScriptGuide"><Check v-if="scriptGuideCopied" :size="14" /><Copy v-else :size="14" />{{ scriptGuideCopied ? 'Copied' : 'Copy prompt' }}</button></div>
+      <div class="guide-prompt-heading"><div><span class="section-label">Reusable prompt</span><strong>Give this to your script generator</strong></div><button class="secondary-button guide-copy-button" :class="{ copied: scriptGuideCopied }" type="button" @click="copyScriptGuide"><Check v-if="scriptGuideCopied" :size="14" /><Copy v-else :size="14" /><span>{{ scriptGuideCopied ? 'Copied' : 'Copy prompt' }}</span></button></div>
       <pre>{{ SCRIPT_GENERATION_PROMPT }}</pre>
     </section>
   </div>
@@ -1732,8 +2065,55 @@ function formatRenderedAt(value: string) {
       <div class="continuation-summary"><span>Current cut</span><strong>{{ projectDuration }}</strong><span>Text provider</span><strong>{{ activeProvider?.label || store.currentProject?.text_provider }}</strong></div>
       <label>Planning target for this section<input v-model.number="continuationForm.target_duration_seconds" type="number" min="5" max="1800" step="5" required /><small>This guides scene timing but does not cap the finished movie.</small></label>
       <div class="screenplay-input">
-        <div class="field-heading"><label for="continuation-source">New screenplay section</label><button type="button" @click="showScriptGuide = true"><BookOpen :size="13" />Format guide</button></div>
-        <textarea id="continuation-source" v-model="continuationForm.script" rows="13" required spellcheck="false" placeholder="Paste only the new scenes or shots that continue the story."></textarea>
+        <div class="field-heading">
+          <label for="continuation-source">New screenplay section</label>
+          <div class="field-actions">
+            <button type="button" class="field-action-button" @click="openScreenplayFilePicker('continue')">
+              <Upload :size="13" />
+              <span>Import file</span>
+            </button>
+            <button type="button" class="field-action-button" @click="showScriptGuide = true">
+              <BookOpen :size="13" />
+              <span>Format guide</span>
+            </button>
+          </div>
+        </div>
+        <div
+          class="screenplay-dropzone"
+          :class="{ 'is-dragging': isDraggingContinuation }"
+          @dragover.prevent="isDraggingContinuation = true"
+          @dragleave.prevent="isDraggingContinuation = false"
+          @drop.prevent="handleScreenplayDrop($event, 'continue')"
+        >
+          <textarea
+            id="continuation-source"
+            v-model="continuationForm.script"
+            rows="13"
+            required
+            spellcheck="false"
+            placeholder="Paste or drop new scenes or shots that continue the story (.txt, .md, .fountain)..."
+          ></textarea>
+          <div v-if="continuationFileName" class="loaded-file-bar">
+            <div class="loaded-file-info">
+              <FileText :size="13" />
+              <span>Loaded: <strong>{{ continuationFileName }}</strong></span>
+            </div>
+            <button type="button" class="loaded-file-clear" title="Clear file" @click="clearLoadedFile('continue')">
+              <X :size="13" />
+            </button>
+          </div>
+          <div v-if="isDraggingContinuation" class="dropzone-overlay">
+            <Upload :size="24" />
+            <span>Drop screenplay file here (.txt, .md, .fountain)</span>
+          </div>
+        </div>
+        <input
+          ref="continueFileInput"
+          type="file"
+          accept=".txt,.md,.markdown,.fountain,.screenplay,text/plain,text/markdown"
+          style="display: none"
+          @change="handleScreenplayFileSelected($event, 'continue')"
+        />
       </div>
       <div v-if="store.currentJob && store.continuingScript" class="job-progress" :class="{ indeterminate: store.currentJob.status === 'running' && store.currentJob.progress < 0.5 }">
         <span :style="{ width: `${store.currentJob.progress * 100}%` }"></span>
@@ -1803,6 +2183,21 @@ function formatRenderedAt(value: string) {
       <footer>
         <button class="secondary-button" :disabled="deletingProject" @click="deleteCandidate = null">Cancel</button>
         <button class="danger-button" :disabled="deletingProject" @click="confirmDeleteProject"><Trash2 :size="15" />{{ deletingProject ? 'Deleting...' : 'Delete project' }}</button>
+      </footer>
+    </section>
+  </div>
+
+  <div v-if="deleteShotCandidate" class="modal-backdrop" @click.self="deleteShotCandidate = null">
+    <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-shot-modal-title">
+      <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteShotCandidate = null"><X :size="17" /></button></header>
+      <div>
+        <h2 id="delete-shot-modal-title">Delete {{ deleteShotCandidate.title || 'this shot' }}?</h2>
+        <p>This permanently removes this shot and all its generated storyboard images, video clips, and takes.</p>
+      </div>
+      <p v-if="store.error" class="form-error">{{ store.error }}</p>
+      <footer>
+        <button class="secondary-button" :disabled="deletingShot" @click="deleteShotCandidate = null">Cancel</button>
+        <button class="danger-button" :disabled="deletingShot" @click="confirmDeleteShot"><Trash2 :size="15" />{{ deletingShot ? 'Deleting…' : 'Delete shot' }}</button>
       </footer>
     </section>
   </div>
@@ -1929,6 +2324,105 @@ input::placeholder { color: #68716c; }
 .job-cancel-button { border-radius: 8px !important; }
 .status-dot { background: var(--success); }
 .status-dot.muted { background: #59605c; }
+
+.field-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field-action-button {
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--accent, #49a978);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.field-action-button:hover {
+  color: #7fd1a5;
+  opacity: 0.9;
+}
+
+.screenplay-dropzone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.screenplay-dropzone.is-dragging {
+  border-radius: 8px;
+  outline: 2px dashed var(--accent, #49a978);
+  outline-offset: -2px;
+}
+
+.dropzone-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(11, 14, 17, 0.92);
+  backdrop-filter: blur(4px);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #7fd1a5;
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.loaded-file-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+}
+
+.loaded-file-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e2e8f0;
+}
+
+.loaded-file-info strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.loaded-file-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #94a3b8);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.loaded-file-clear:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
 </style>
 
 

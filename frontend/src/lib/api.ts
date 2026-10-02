@@ -12,6 +12,51 @@ export interface ImageProviderStatus extends ProviderStatus {
   image_generation: boolean
   connected: boolean
   verified: boolean
+  supports_image_references?: boolean
+}
+
+export interface ShotContinuityCharacter {
+  character_id: string
+  name: string
+  has_reference: boolean
+  reference_ids: string[]
+}
+
+export interface ShotContinuityStatus {
+  snapshot: ContinuitySnapshot | null
+  characters: ShotContinuityCharacter[]
+  missing_character_references: string[]
+  missing_fields: string[]
+  ready: boolean
+}
+
+export interface ContinuitySnapshot {
+  version: number
+  character_ids: string[]
+  characters: Array<{ id: string; name: string; reference_ids: string[] }>
+  scene: {
+    title: string
+    action?: string
+    location: string
+    time_of_day: string
+    set_notes: string
+    lighting_notes: string
+    wardrobe_notes: string
+    props_notes: string
+  }
+  framing: string
+  action: string
+  video_prompt: string
+  aspect_ratio: AspectRatio
+  image_prompt_base: string
+  effective_image_prompt: string
+}
+
+export interface DialogueLine {
+  character: string
+  text: string
+  speaker?: string
+  line?: string
 }
 
 export interface Shot {
@@ -21,7 +66,7 @@ export interface Shot {
   start_ms: number | null
   end_ms: number | null
   action: string
-  dialogue: Array<{ character: string; text: string }>
+  dialogue: DialogueLine[]
   sound: string
   duration_ms: number
   framing: string
@@ -29,12 +74,16 @@ export interface Shot {
   video_prompt: string
   title_card_text: string
   character_ids: string[]
+  continuity_snapshot?: ContinuitySnapshot | null
+  continuity?: ShotContinuityStatus
   status: string
   selected_image_take_id?: string | null
   selected_clip_take_id?: string | null
   selected_audio_take_id?: string | null
   dialogue_audio_filename?: string | null
   dialogue_audio_mime?: string | null
+  continuity_frames?: ShotContinuityFrame[]
+  image_references?: ShotImageReference[]
   image: ShotImage | null
   clip: ShotClip | null
   media_variants: ShotMediaVariant[]
@@ -50,7 +99,7 @@ export interface ShotTake {
   source: string
   provider: string
   prompt: string
-  settings: Record<string, unknown>
+  settings: Record<string, unknown> & { image_reference?: ShotImageReference }
   selected: boolean
   created_at: string
 }
@@ -67,9 +116,69 @@ export interface ShotImage {
 
 export type ShotClip = ShotImage
 
+export interface ShotContinuityFrame {
+  id: string
+  aspect_ratio: AspectRatio
+  url: string
+  mime_type: string
+  source_shot_id: string
+  source_shot_title: string
+  source_time_ms: number
+  created_at: string
+}
+
+export interface ImageReferenceSource {
+  source_shot_id: string
+  source_shot_title: string
+  source_media_id: string
+  source_media_kind: string
+  source_media_type: 'image' | 'clip'
+  source_aspect_ratio: AspectRatio
+  url: string
+  mime_type: string
+}
+
+export interface ImageReferenceSourceShot {
+  id: string
+  title: string
+  media: ImageReferenceSource[]
+}
+
+export interface ShotImageReference extends ImageReferenceSource {
+  id: string
+  aspect_ratio: AspectRatio
+  filename: string
+  source_time_ms: number | null
+  mode: 'visual_continuity'
+  created_at: string
+}
+
 export interface ShotMediaVariant extends ShotImage {
   media_type: 'image' | 'clip'
   aspect_ratio: '16:9' | '9:16'
+}
+
+export interface LipSyncStatus {
+  id: string
+  label: string
+  configured: boolean
+  available: boolean
+  detail: string
+  available_providers: string[]
+}
+
+export interface ShotCreate {
+  title?: string
+  action?: string
+  dialogue?: Array<{ character: string; text: string; speaker?: string; line?: string }>
+  sound?: string
+  duration_ms?: number
+  framing?: string
+  image_prompt?: string
+  video_prompt?: string
+  title_card_text?: string
+  character_ids?: string[]
+  insert_after_shot_id?: string
 }
 
 export interface ShotUpdate {
@@ -79,6 +188,10 @@ export interface ShotUpdate {
   video_prompt: string
   title_card_text: string
   character_ids?: string[]
+  dialogue?: Array<{ character: string; text: string; speaker?: string; line?: string }>
+  title?: string
+  action?: string
+  sound?: string
 }
 
 export interface Scene {
@@ -90,7 +203,7 @@ export interface Scene {
   start_ms: number | null
   end_ms: number | null
   action: string
-  dialogue: Array<{ character: string; text: string }>
+  dialogue: DialogueLine[]
   set_notes?: string
   lighting_notes?: string
   wardrobe_notes?: string
@@ -135,6 +248,7 @@ export interface ProjectDetail extends ProjectSummary {
   final_cut: ProjectFinalCut | null
   variant_exports: ProjectVariantExport[]
   characters: Character[]
+  publishes: PublishRecord[]
 }
 
 export interface CharacterReference {
@@ -144,10 +258,39 @@ export interface CharacterReference {
   created_at: string
 }
 
+export interface VoicePreset {
+  id: string
+  provider: string
+  name: string
+  gender: 'female' | 'male' | 'neutral'
+  language: string
+  description: string
+  preview_url: string | null
+}
+
+export interface VoiceProviderInfo {
+  id: string
+  label: string
+  configured: boolean
+  available: boolean
+  detail: string
+  voices: VoicePreset[]
+}
+
+export interface VoiceAuditionResponse {
+  url: string
+  provider: string
+  voice_id: string
+  duration_ms: number
+}
+
 export interface Character {
   id: string
   name: string
   notes: string
+  voice_provider?: string
+  voice_id?: string | null
+  voice_settings?: Record<string, any>
   created_at: string
   references: CharacterReference[]
 }
@@ -162,6 +305,86 @@ export interface ProjectFinalCut {
   clip_count: number
   fallback_count: number
   created_at: string
+}
+
+
+export interface PublishProviderStatus {
+  id: 'youtube' | 'facebook'
+  label: string
+  configured: boolean
+  available: boolean
+  connected: boolean
+  account_name: string | null
+  detail: string
+  privacy_options: string[]
+}
+
+export interface SocialAuthStatus {
+  platform: 'youtube' | 'facebook'
+  connected: boolean
+  account_id: string | null
+  account_name: string | null
+  account_picture: string | null
+  expires_at: string | null
+  is_expired: boolean
+}
+
+export interface PublishAsset {
+  id: string
+  scope: 'final' | 'scene' | 'shot'
+  label: string
+  source_ref: string | null
+  variant: OutputVariant
+  aspect_ratio: AspectRatio
+  duration_ms: number
+  ready: boolean
+  missing_count: number
+  url: string | null
+}
+
+export interface PublishPlan {
+  variant: OutputVariant
+  aspect_ratio: AspectRatio
+  providers: PublishProviderStatus[]
+  final: PublishAsset[]
+  scenes: PublishAsset[]
+  shots: PublishAsset[]
+}
+
+export interface PublishRecord {
+  id: string
+  project_id: string
+  job_id: string | null
+  scope: 'final' | 'scenes' | 'shots'
+  variant: OutputVariant
+  platforms: Array<'youtube' | 'facebook'>
+  title: string
+  description: string
+  tags: string[]
+  privacy: Record<string, string>
+  selected_asset_ids: string[]
+  scheduled_at: string | null
+  made_for_kids: boolean
+  options: Record<string, unknown>
+  status: string
+  results: Array<Record<string, unknown>>
+  created_at: string
+  updated_at: string
+}
+
+export interface PublishCreate {
+  platforms: Array<'youtube' | 'facebook'>
+  scope: 'final' | 'scenes' | 'shots'
+  variant: OutputVariant
+  title: string
+  description: string
+  tags: string[]
+  privacy: Record<'youtube' | 'facebook', string>
+  selected_asset_ids: string[]
+  scheduled_at?: string | null
+  schedule_interval_hours?: number | null
+  made_for_kids: boolean
+  platform_options?: Record<string, Record<string, unknown>>
 }
 
 export interface ProjectVariantExport extends ProjectFinalCut {
@@ -197,6 +420,7 @@ export interface TimelinePrimaryItem {
   source_in_ms: number
   source_out_ms: number | null
   text: string
+  mute_audio?: boolean
   variant: Partial<Record<OutputVariant, TimelineGeometry>>
 }
 
@@ -254,10 +478,55 @@ export interface Job {
   provider: string | null
   provider_phase: 'submitting' | 'generating' | 'downloading' | 'saving' | 'completed' | 'failed' | 'cancelled' | null
   conversation_url: string | null
-  attempts: Array<Record<string, unknown>>
+  attempts: Array<Record<string, any>>
   queue_position: number | null
   created_at?: string
   updated_at?: string
+}
+
+export interface QueueJobItem extends Job {
+  project_title?: string
+  elapsed_seconds?: number
+}
+
+export interface QueueStat {
+  id: string
+  name: string
+  pending: number
+  scheduled: number
+  status: string
+}
+
+export interface BridgeStatus {
+  id: string
+  name: string
+  url: string
+  available: boolean
+  detail: string
+}
+
+export interface SystemService {
+  id: string
+  name: string
+  description: string
+  category: string
+  port: number | null
+  status: 'running' | 'stopped' | 'warning'
+  pid: number | null
+  all_pids: number[]
+  url: string | null
+  warning: string | null
+  details: Record<string, any>
+  log_path: string
+}
+
+export interface QueueSystemStatus {
+  queues: QueueStat[]
+  active_jobs: number
+  failed_jobs: number
+  completed_jobs: number
+  total_jobs: number
+  bridges: BridgeStatus[]
 }
 
 export interface ProjectInput {
@@ -333,6 +602,11 @@ export const api = {
     id: string,
     input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
   ) => request<Scene>(`/api/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  lipsyncShot: (shotId: string, aspectRatio?: AspectRatio) =>
+    request<Job>(`/api/shots/${shotId}/lipsync${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, {
+      method: 'POST',
+    }),
+  lipsyncStatus: () => request<LipSyncStatus>('/api/system/lipsync/status'),
   generateShotAudio: (shotId: string) =>
     request<Shot>(`/api/shots/${shotId}/audio/generate`, { method: 'POST' }),
   selectTake: (shotId: string, takeId: string) =>
@@ -351,19 +625,67 @@ export const api = {
   projectJobs: (projectId: string, active = true) =>
     request<Job[]>(`/api/projects/${projectId}/jobs?active=${active ? 'true' : 'false'}`),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
+  allJobs: (params?: { status?: string; kind?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.status) query.set('status', params.status)
+    if (params?.kind) query.set('kind', params.kind)
+    if (params?.limit) query.set('limit', String(params.limit))
+    if (params?.offset) query.set('offset', String(params.offset))
+    const qs = query.toString()
+    return request<QueueJobItem[]>(`/api/jobs${qs ? `?${qs}` : ''}`)
+  },
+  systemQueues: () => request<QueueSystemStatus>('/api/system/queues'),
+  retryJob: (id: string) => request<Job>(`/api/jobs/${id}/retry`, { method: 'POST' }),
+  cancelAllJobs: () => request<{ cancelled: number }>('/api/jobs/cancel-all', { method: 'POST' }),
+  cleanupJobs: (statusFilter?: string) =>
+    request<{ deleted: number }>(`/api/jobs/cleanup${statusFilter ? `?status_filter=${statusFilter}` : ''}`, { method: 'DELETE' }),
+  deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
+  flushQueue: (queueName: string) =>
+    request<{ status: string; message: string }>(`/api/system/queues/${queueName}/flush`, { method: 'POST' }),
+  systemServices: () => request<SystemService[]>('/api/system/services'),
+  startService: (id: string) =>
+    request<{ ok: boolean; message?: string }>(`/api/system/services/${id}/start`, { method: 'POST' }),
+  stopService: (id: string) =>
+    request<{ ok: boolean; message?: string }>(`/api/system/services/${id}/stop`, { method: 'POST' }),
+  restartService: (id: string) =>
+    request<{ ok: boolean; message?: string }>(`/api/system/services/${id}/restart`, { method: 'POST' }),
+  serviceLogs: (id: string, lines = 100) =>
+    request<{ id: string; logs: string }>(`/api/system/services/${id}/logs?lines=${lines}`),
+  createShot: (sceneId: string, input?: ShotCreate) =>
+    request<Shot>(`/api/scenes/${sceneId}/shots`, {
+      method: 'POST',
+      body: JSON.stringify(input ?? {}),
+    }),
+  deleteShot: (id: string) =>
+    request<void>(`/api/shots/${id}`, { method: 'DELETE' }),
   updateShot: (id: string, input: ShotUpdate) =>
     request<Shot>(`/api/shots/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
-  generateShotImage: (id: string, aspectRatio?: AspectRatio, characterIds: string[] = []) =>
+  generateShotImage: (
+    id: string,
+    aspectRatio?: AspectRatio,
+    characterIds?: string[],
+    refreshContinuity = false,
+    imageReferenceId?: string | null,
+  ) =>
     request<Job>(`/api/shots/${id}/image/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, {
       method: 'POST',
-      body: JSON.stringify({ character_ids: characterIds }),
+      body: JSON.stringify({
+        character_ids: characterIds,
+        refresh_continuity: refreshContinuity,
+        image_reference_id: imageReferenceId ?? null,
+      }),
     }),
   createCharacter: (projectId: string, input: { name: string; notes?: string }) =>
     request<Character>(`/api/projects/${projectId}/characters`, {
       method: 'POST',
       body: JSON.stringify({ name: input.name, notes: input.notes || '' }),
     }),
-  updateCharacter: (id: string, input: { name?: string; notes?: string }) =>
+  voices: () => request<VoiceProviderInfo[]>('/api/voices'),
+  auditionVoice: (input: { provider: string; voice_id: string; text: string; settings?: Record<string, any> }) =>
+    request<VoiceAuditionResponse>('/api/voices/audition', { method: 'POST', body: JSON.stringify(input) }),
+  uploadCustomVoice: (formData: FormData) =>
+    request<VoicePreset>('/api/voices/custom', { method: 'POST', body: formData }),
+  updateCharacter: (id: string, input: { name?: string; notes?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) =>
     request<Character>(`/api/characters/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteCharacter: (id: string) => request<void>(`/api/characters/${id}`, { method: 'DELETE' }),
   uploadCharacterReference: (id: string, file: File) => {
@@ -387,6 +709,39 @@ export const api = {
   },
   deleteShotImage: (id: string, aspectRatio?: AspectRatio) =>
     request<void>(`/api/shots/${id}/image${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, { method: 'DELETE' }),
+  imageReferenceSources: (id: string) =>
+    request<ImageReferenceSourceShot[]>(`/api/shots/${id}/image-reference/sources`),
+  saveImageReference: (id: string, source: ImageReferenceSource, aspect: AspectRatio, frame?: { file: File; timeMs: number }) => {
+    const body = new FormData()
+    body.append('source_shot_id', source.source_shot_id)
+    body.append('source_media_id', source.source_media_id)
+    body.append('source_media_kind', source.source_media_kind)
+    body.append('aspect_ratio', aspect)
+    body.append('mode', 'visual_continuity')
+    if (frame) {
+      body.append('file', frame.file)
+      body.append('source_time_ms', String(frame.timeMs))
+    }
+    return request<Shot>(`/api/shots/${id}/image-reference`, { method: 'POST', body })
+  },
+  removeImageReference: (id: string, aspect: AspectRatio) =>
+    request<void>(`/api/shots/${id}/image-reference?aspect_ratio=${encodeURIComponent(aspect)}`, { method: 'DELETE' }),
+  saveShotContinuityFrame: (
+    id: string,
+    file: File,
+    sourceShotId: string,
+    sourceTimeMs: number,
+    aspectRatio: AspectRatio,
+  ) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('source_shot_id', sourceShotId)
+    body.append('source_time_ms', String(sourceTimeMs))
+    body.append('aspect_ratio', aspectRatio)
+    return request<Shot>(`/api/shots/${id}/continuity-frame`, { method: 'POST', body })
+  },
+  deleteShotContinuityFrame: (id: string, aspectRatio: AspectRatio) =>
+    request<void>(`/api/shots/${id}/continuity-frame?aspect_ratio=${encodeURIComponent(aspectRatio)}`, { method: 'DELETE' }),
   generateShotClip: (id: string, aspectRatio?: AspectRatio) =>
     request<Job>(`/api/shots/${id}/clip/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, { method: 'POST' }),
   uploadShotClip: (id: string, file: File, aspectRatio?: AspectRatio) => {
@@ -402,15 +757,34 @@ export const api = {
     request<void>(`/api/projects/${id}/final-cut?variant=${variant}`, { method: 'DELETE' }),
   timeline: (id: string, edit: OutputVariant = 'landscape') =>
     request<ProjectTimeline>(`/api/projects/${id}/timeline?edit=${edit}`),
-  saveTimeline: (id: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape') =>
-    request<ProjectTimeline>(`/api/projects/${id}/timeline`, {
+  saveTimeline: (id: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape') => {
+    const sanitizePrimary = (item: TimelinePrimaryItem): TimelinePrimaryItem => ({
+      ...item,
+      duration_ms: Math.round(item.duration_ms),
+      source_in_ms: Math.round(item.source_in_ms || 0),
+      source_out_ms: item.source_out_ms != null ? Math.round(item.source_out_ms) : null,
+      mute_audio: Boolean(item.mute_audio),
+    })
+    const sanitizeOverlay = <T extends { start_ms: number; duration_ms: number }>(overlay: T): T => ({
+      ...overlay,
+      start_ms: Math.round(overlay.start_ms),
+      duration_ms: Math.round(overlay.duration_ms),
+    })
+    const cleanDoc = {
+      ...timeline.document,
+      primary: (timeline.document.primary || []).map(sanitizePrimary),
+      image_overlays: (timeline.document.image_overlays || []).map(sanitizeOverlay),
+      text_overlays: (timeline.document.text_overlays || []).map(sanitizeOverlay),
+    }
+    return request<ProjectTimeline>(`/api/projects/${id}/timeline`, {
       method: 'PUT',
       body: JSON.stringify({
         revision: timeline.revision,
-        document: timeline.document,
+        document: cleanDoc,
         edit: timeline.edit || edit,
       }),
-    }),
+    })
+  },
   resetTimeline: (id: string) => request<ProjectTimeline>(`/api/projects/${id}/timeline/reset`, { method: 'POST' }),
   uploadTimelineAsset: (id: string, file: File, label = file.name) => {
     const body = new FormData()
@@ -419,6 +793,12 @@ export const api = {
     return request<ProjectTimeline>(`/api/projects/${id}/timeline/assets`, { method: 'POST', body })
   },
   deleteTimelineAsset: (id: string, assetId: string) => request<void>(`/api/projects/${id}/timeline/assets/${assetId}`, { method: 'DELETE' }),
+  publishProviders: () => request<PublishProviderStatus[]>('/api/publish/providers'),
+  publishPlan: (id: string, variant: OutputVariant = 'landscape') =>
+    request<PublishPlan>(`/api/projects/${id}/publish/plan?variant=${variant}`),
+  publishes: (id: string) => request<PublishRecord[]>(`/api/projects/${id}/publishes`),
+  publishProject: (id: string, input: PublishCreate) =>
+    request<Job>(`/api/projects/${id}/publish`, { method: 'POST', body: JSON.stringify(input) }),
   decide: (id: string, decision: 'accepted' | 'rejected') =>
     request<Suggestion>(`/api/suggestions/${id}/decision`, {
       method: 'POST',
@@ -429,4 +809,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approved: true }),
     }),
+  // Social OAuth
+  socialAuthStatus: () => request<SocialAuthStatus[]>('/auth/social/status'),
+  socialAuthStart: (platform: 'youtube' | 'facebook') =>
+    request<{ url: string }>(`/auth/${platform}/start`),
+  socialDisconnect: (platform: 'youtube' | 'facebook') =>
+    request<void>(`/auth/${platform}/disconnect`, { method: 'DELETE' }),
 }

@@ -198,3 +198,16 @@ def test_match_character_ids_uses_prompt_mentions() -> None:
     ]
     matched = match_character_ids(characters, [], "A portrait of DANIEL in the driveway.")
     assert matched == ["1"]
+
+
+def test_match_character_ids_recognizes_ensemble_and_troop_aliases() -> None:
+    characters = [
+        Character(id="1", project_id="p", name="WOMEN OF OLOKO", notes=""),
+        Character(id="2", project_id="p", name="BRITISH COLONIAL TROOPS", notes=""),
+    ]
+
+    matched = match_character_ids(
+        characters, [], "A CROWD STANDS FACING COLONIAL SOLDIERS."
+    )
+
+    assert matched == ["1", "2"]

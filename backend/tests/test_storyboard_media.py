@@ -113,22 +113,18 @@ def test_image_generation_passes_references_to_provider(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(media, "_request_provider_image", request)
     refs = [FaceReferenceImage(character_name="MARA", mime_type="image/png", data=b"face")]
-    remember = {}
     filename, mime_type, provider = generate_storyboard_image(
         "MARA smiles",
         "scene",
         "wide",
         "16:9",
         references=refs,
-        conversation_url="https://chatgpt.com/c/old",
-        remember=remember,
     )
 
     assert provider == "chatgpt_web"
     assert mime_type == "image/png"
     assert seen["provider"] == "chatgpt_web"
     assert seen["references"] == refs
-    assert seen["conversation_url"] == "https://chatgpt.com/c/old"
-    assert remember["url"] == "https://chatgpt.com/c/project"
+    assert seen["conversation_url"] is None
     assert "Identity references are attached for: MARA" in seen["prompt"]
     assert (settings.media_dir / filename).is_file()

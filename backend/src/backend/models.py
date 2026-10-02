@@ -48,6 +48,9 @@ class Project(Base):
     characters: Mapped[list["Character"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="Character.name"
     )
+    publish_records: Mapped[list["PublishRecord"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="PublishRecord.created_at.desc()"
+    )
 
 
 class ScriptVersion(Base):
@@ -114,6 +117,7 @@ class Shot(Base):
     video_prompt: Mapped[str] = mapped_column(Text, default="")
     title_card_text: Mapped[str] = mapped_column(Text, default="")
     character_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    continuity_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="planned")
     selected_image_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
     selected_clip_take_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -128,12 +132,24 @@ class Shot(Base):
     clip: Mapped["ShotClip | None"] = relationship(
         back_populates="shot", cascade="all, delete-orphan", uselist=False
     )
+    continuity_frames: Mapped[list["ShotContinuityFrame"]] = relationship(
+        back_populates="shot", cascade="all, delete-orphan"
+    )
+    image_references: Mapped[list["ShotImageReference"]] = relationship(
+        back_populates="shot", cascade="all, delete-orphan"
+    )
     media_variants: Mapped[list["ShotMediaVariant"]] = relationship(
         back_populates="shot", cascade="all, delete-orphan"
     )
     takes: Mapped[list["ShotTake"]] = relationship(
         back_populates="shot", cascade="all, delete-orphan", order_by="ShotTake.created_at"
     )
+
+    @property
+    def continuity(self) -> dict[str, Any]:
+        from .continuity import shot_continuity_status
+
+        return shot_continuity_status(self)
 
 
 class ShotImage(Base):
@@ -172,6 +188,56 @@ class ShotClip(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
     shot: Mapped[Shot] = relationship(back_populates="clip")
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.filename}"
+
+
+class ShotContinuityFrame(Base):
+    __tablename__ = "shot_continuity_frames"
+    __table_args__ = (UniqueConstraint("shot_id", "aspect_ratio"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="CASCADE"), index=True
+    )
+    aspect_ratio: Mapped[str] = mapped_column(String(12))
+    filename: Mapped[str] = mapped_column(String(240))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    source_shot_id: Mapped[str] = mapped_column(String)
+    source_shot_title: Mapped[str] = mapped_column(String(200), default="")
+    source_time_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+    shot: Mapped[Shot] = relationship(back_populates="continuity_frames")
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
+
+
+class ShotImageReference(Base):
+    """Active image guidance; immutable asset copies also belong to jobs and takes."""
+
+    __tablename__ = "shot_image_references"
+    __table_args__ = (UniqueConstraint("shot_id", "aspect_ratio"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    aspect_ratio: Mapped[str] = mapped_column(String(12))
+    filename: Mapped[str] = mapped_column(String(240))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    source_shot_id: Mapped[str] = mapped_column(String)
+    source_shot_title: Mapped[str] = mapped_column(String(200), default="")
+    source_media_id: Mapped[str] = mapped_column(String)
+    source_media_kind: Mapped[str] = mapped_column(String(24))
+    source_media_type: Mapped[str] = mapped_column(String(12))
+    source_aspect_ratio: Mapped[str] = mapped_column(String(12))
+    source_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mode: Mapped[str] = mapped_column(String(40), default="visual_continuity")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    shot: Mapped[Shot] = relationship(back_populates="image_references")
 
     @property
     def url(self) -> str:
@@ -304,6 +370,32 @@ class ProjectVariantExport(Base):
         return f"/media/{self.filename}"
 
 
+class PublishRecord(Base):
+    __tablename__ = "publish_records"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(16))
+    variant: Mapped[str] = mapped_column(String(16), default="landscape")
+    platforms: Mapped[list[str]] = mapped_column(JSON, default=list)
+    title: Mapped[str] = mapped_column(String(180))
+    description: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    privacy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    selected_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    scheduled_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    made_for_kids: Mapped[bool] = mapped_column(Boolean, default=False)
+    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+    project: Mapped[Project] = relationship(back_populates="publish_records")
+    job: Mapped["Job | None"] = relationship()
+
+
 class Character(Base):
     __tablename__ = "characters"
     __table_args__ = (UniqueConstraint("project_id", "name"),)
@@ -312,6 +404,9 @@ class Character(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     notes: Mapped[str] = mapped_column(Text, default="")
+    voice_provider: Mapped[str] = mapped_column(String(40), default="vibevoice")
+    voice_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    voice_settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
     project: Mapped[Project] = relationship(back_populates="characters")
@@ -376,3 +471,45 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
     project: Mapped[Project] = relationship(back_populates="jobs")
+
+
+class OAuthState(Base):
+    """Persistent one-time OAuth state used across restarts and worker processes."""
+
+    __tablename__ = "oauth_states"
+
+    state: Mapped[str] = mapped_column(String(120), primary_key=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SocialToken(Base):
+    """Stores OAuth tokens for social media publishing platforms (YouTube, Facebook)."""
+
+    __tablename__ = "social_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    platform: Mapped[str] = mapped_column(String(32), unique=True, index=True)  # 'youtube' | 'facebook'
+    access_token: Mapped[str] = mapped_column(Text)
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_type: Mapped[str] = mapped_column(String(32), default="Bearer")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Channel / page metadata shown in the UI
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    account_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    account_picture: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Extra raw JSON (e.g. Facebook page_id, scope granted)
+    extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expires_at is None:
+            return False
+        # SQLite returns naive datetimes; normalize before comparison
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= exp

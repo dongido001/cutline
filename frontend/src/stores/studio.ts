@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api, type AspectRatio, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProviderStatus, type ShotUpdate } from '@/lib/api'
+import { api, type AspectRatio, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProviderStatus, type ShotCreate, type ShotUpdate, type VoiceProviderInfo, type VoiceAuditionResponse } from '@/lib/api'
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
@@ -12,6 +12,9 @@ export const useStudioStore = defineStore('studio', () => {
   const imageProviders = ref<ImageProviderStatus[]>([])
   const imageJobs = ref<Record<string, Job>>({})
   const castJobs = ref<Record<string, Job>>({})
+  const clipJobs = ref<Record<string, Job>>({})
+  const processingLipsyncId = ref<string | null>(null)
+  const lipsyncJobs = ref<Record<string, Job>>({})
   const currentJob = ref<Job | null>(null)
   const clipJob = ref<Job | null>(null)
   const jobElapsedSeconds = ref(0)
@@ -21,6 +24,9 @@ export const useStudioStore = defineStore('studio', () => {
   const processingShotIds = ref<string[]>([])
   const processingClipId = ref<string | null>(null)
   const processingAudioId = ref<string | null>(null)
+  const voiceProviders = ref<VoiceProviderInfo[]>([])
+  const auditionAudio = ref<Record<string, string>>({})
+  const auditioningVoiceId = ref<string | null>(null)
   const finalCutJob = ref<Job | null>(null)
   const draftJob = ref<Job | null>(null)
   const draftAttention = ref<Array<{ code: string; message: string; shot_id?: string }>>([])
@@ -60,6 +66,11 @@ export const useStudioStore = defineStore('studio', () => {
 
   function isGeneratingCast(id: string) {
     const job = castJobs.value[id]
+    return Boolean(job && (job.status === 'queued' || job.status === 'running'))
+  }
+
+  function isProcessingClip(id: string) {
+    const job = clipJobs.value[id]
     return Boolean(job && (job.status === 'queued' || job.status === 'running'))
   }
 
@@ -181,14 +192,33 @@ export const useStudioStore = defineStore('studio', () => {
           if (!shotId) continue
           processingClipId.value = shotId
           clipJob.value = job
+          clipJobs.value = { ...clipJobs.value, [shotId]: job }
           void watchJob(job.id, (next) => {
             if (currentProject.value?.id !== projectId) return
             clipJob.value = next
+            clipJobs.value = { ...clipJobs.value, [shotId]: next }
           }).then((finalJob) => {
             if (currentProject.value?.id !== projectId) return
             if (processingClipId.value === shotId) processingClipId.value = null
             if (finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Could not generate video')
+            }
+          })
+          continue
+        }
+        if (job.kind === 'shot_lipsync') {
+          const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
+          if (!shotId) continue
+          processingLipsyncId.value = shotId
+          lipsyncJobs.value = { ...lipsyncJobs.value, [shotId]: job }
+          void watchJob(job.id, (next) => {
+            if (currentProject.value?.id !== projectId) return
+            lipsyncJobs.value = { ...lipsyncJobs.value, [shotId]: next }
+          }).then((finalJob) => {
+            if (currentProject.value?.id !== projectId) return
+            if (processingLipsyncId.value === shotId) processingLipsyncId.value = null
+            if (finalJob?.status === 'failed') {
+              error.value = String(finalJob.error || 'Dialogue lip-sync failed')
             }
           })
           continue
@@ -224,6 +254,8 @@ export const useStudioStore = defineStore('studio', () => {
       if (finalCutJob.value?.id === jobId) finalCutJob.value = job
       const shotId = Object.entries(imageJobs.value).find(([, item]) => item.id === jobId)?.[0]
       if (shotId) imageJobs.value = { ...imageJobs.value, [shotId]: job }
+      const clipShotId = Object.entries(clipJobs.value).find(([, item]) => item.id === jobId)?.[0]
+      if (clipShotId) clipJobs.value = { ...clipJobs.value, [clipShotId]: job }
       const characterId = Object.entries(castJobs.value).find(([, item]) => item.id === jobId)?.[0]
       if (characterId) castJobs.value = { ...castJobs.value, [characterId]: job }
       return job
@@ -254,6 +286,7 @@ export const useStudioStore = defineStore('studio', () => {
     if (options?.resumeJobs) {
       imageJobs.value = {}
       castJobs.value = {}
+      clipJobs.value = {}
       clipJob.value = null
       processingShotIds.value = []
       processingClipId.value = null
@@ -351,6 +384,31 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  async function createShot(sceneId: string, input?: ShotCreate) {
+    if (!currentProject.value) return null
+    error.value = ''
+    try {
+      const created = await api.createShot(sceneId, input)
+      await loadProject(currentProject.value.id)
+      return created
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not create shot'
+      throw cause
+    }
+  }
+
+  async function deleteShot(id: string) {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      await api.deleteShot(id)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not delete shot'
+      throw cause
+    }
+  }
+
   async function updateShot(id: string, input: ShotUpdate) {
     if (!currentProject.value) return
     error.value = ''
@@ -378,12 +436,18 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function generateShotImage(id: string, aspectRatio?: AspectRatio, characterIds: string[] = []) {
+  async function generateShotImage(
+    id: string,
+    aspectRatio?: AspectRatio,
+    characterIds?: string[],
+    refreshContinuity = false,
+    imageReferenceId?: string | null,
+  ) {
     if (!currentProject.value) return
     error.value = ''
     beginShotProcessing(id)
     try {
-      let job = await api.generateShotImage(id, aspectRatio, characterIds)
+      let job = await api.generateShotImage(id, aspectRatio, characterIds, refreshContinuity, imageReferenceId)
       imageJobs.value = { ...imageJobs.value, [id]: withQueueLabel(job) }
       const finalJob = await watchJob(job.id, (next) => {
         imageJobs.value = { ...imageJobs.value, [id]: next }
@@ -438,7 +502,52 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function updateCharacter(id: string, input: { name?: string; notes?: string }) {
+  async function loadVoiceProviders() {
+    try {
+      voiceProviders.value = await api.voices()
+    } catch {
+      // Best-effort load
+    }
+  }
+
+  async function auditionVoice(provider: string, voiceId: string, text: string = 'sample', characterId?: string) {
+    auditioningVoiceId.value = voiceId
+    try {
+      const res = await api.auditionVoice({ provider, voice_id: voiceId, text })
+      if (characterId) {
+        auditionAudio.value = { ...auditionAudio.value, [characterId]: res.url }
+      } else {
+        auditionAudio.value = { ...auditionAudio.value, [voiceId]: res.url }
+      }
+      return res
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Audition failed'
+      throw cause
+    } finally {
+      auditioningVoiceId.value = null
+    }
+  }
+
+  async function uploadCustomVoice(file: File, name: string, gender: string = 'male', language: string = 'en-NG', description: string = '') {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('name', name)
+    fd.append('gender', gender)
+    fd.append('language', language)
+    fd.append('description', description)
+    try {
+      const preset = await api.uploadCustomVoice(fd)
+      await loadVoiceProviders()
+      return preset
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Failed to upload custom voice'
+      throw cause
+    }
+  }
+
+
+
+  async function updateCharacter(id: string, input: { name?: string; notes?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) {
     if (!currentProject.value) return
     error.value = ''
     try {
@@ -534,15 +643,75 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  async function saveShotContinuityFrame(
+    id: string,
+    file: File,
+    sourceShotId: string,
+    sourceTimeMs: number,
+    aspectRatio: AspectRatio,
+  ) {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      await api.saveShotContinuityFrame(id, file, sourceShotId, sourceTimeMs, aspectRatio)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not save continuity frame'
+      throw cause
+    }
+  }
+
+  async function deleteShotContinuityFrame(id: string, aspectRatio: AspectRatio) {
+    if (!currentProject.value) return
+    error.value = ''
+    try {
+      await api.deleteShotContinuityFrame(id, aspectRatio)
+      await loadProject(currentProject.value.id)
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not remove continuity frame'
+      throw cause
+    }
+  }
+
+  function isProcessingLipsync(id: string) {
+    return processingLipsyncId.value === id || lipsyncJobs.value[id]?.status === 'running' || lipsyncJobs.value[id]?.status === 'queued'
+  }
+
+  async function lipsyncShot(id: string, aspectRatio?: AspectRatio) {
+    if (!currentProject.value) return null
+    error.value = ''
+    processingLipsyncId.value = id
+    try {
+      let job = await api.lipsyncShot(id, aspectRatio)
+      const initialJob = withQueueLabel(job)
+      lipsyncJobs.value = { ...lipsyncJobs.value, [id]: initialJob }
+      const finalJob = await watchJob(job.id, (next) => {
+        lipsyncJobs.value = { ...lipsyncJobs.value, [id]: next }
+      })
+      job = finalJob ?? (await api.job(job.id))
+      await loadProject(currentProject.value.id)
+      if (job.status === 'failed') throw new Error(job.error || 'Lip-sync generation failed')
+      return job
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : 'Could not generate lip-sync'
+      throw cause
+    } finally {
+      if (processingLipsyncId.value === id) processingLipsyncId.value = null
+    }
+  }
+
   async function generateShotClip(id: string, aspectRatio?: AspectRatio) {
     if (!currentProject.value) return
     error.value = ''
     processingClipId.value = id
     try {
       let job = await api.generateShotClip(id, aspectRatio)
-      clipJob.value = withQueueLabel(job)
+      const initialJob = withQueueLabel(job)
+      clipJob.value = initialJob
+      clipJobs.value = { ...clipJobs.value, [id]: initialJob }
       const finalJob = await watchJob(job.id, (next) => {
         clipJob.value = next
+        clipJobs.value = { ...clipJobs.value, [id]: next }
       })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
@@ -673,6 +842,7 @@ export const useStudioStore = defineStore('studio', () => {
     imageProviders,
     imageJobs,
     castJobs,
+    clipJobs,
     currentJob,
     clipJob,
     jobElapsedSeconds,
@@ -681,6 +851,7 @@ export const useStudioStore = defineStore('studio', () => {
     continuingScript,
     processingShotIds,
     isProcessingShot,
+    isProcessingClip,
     isGeneratingCast,
     isCancellingJob,
     cancelJob,
@@ -702,12 +873,20 @@ export const useStudioStore = defineStore('studio', () => {
     continueProject,
     decideSuggestion,
     approveScript,
+    createShot,
+    deleteShot,
     updateShot,
     updateScene,
     generateShotImage,
     generateShotAudio,
     createCharacter,
     syncCast,
+    voiceProviders,
+    auditionAudio,
+    auditioningVoiceId,
+    loadVoiceProviders,
+    auditionVoice,
+    uploadCustomVoice,
     updateCharacter,
     deleteCharacter,
     uploadCharacterReference,
@@ -715,6 +894,12 @@ export const useStudioStore = defineStore('studio', () => {
     deleteCharacterReference,
     uploadShotImage,
     deleteShotImage,
+    saveShotContinuityFrame,
+    deleteShotContinuityFrame,
+    processingLipsyncId,
+    lipsyncJobs,
+    isProcessingLipsync,
+    lipsyncShot,
     generateShotClip,
     uploadShotClip,
     deleteShotClip,

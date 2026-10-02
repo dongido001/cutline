@@ -26,7 +26,7 @@ def _dialogue_lines(dialogue: Any) -> list[str]:
     if isinstance(dialogue, list):
         for item in dialogue:
             if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
+                text = str(item.get("text") or item.get("line") or item.get("dialogue") or "").strip()
                 if text:
                     lines.append(text)
             elif isinstance(item, str) and item.strip():

@@ -117,3 +117,73 @@ def test_available_clip_promotes_existing_storyboard_timeline_block(tmp_path) ->
     assert item["source"]["kind"] == "shot_clip"
     assert item["source_out_ms"] == 2000
     session.close()
+
+
+def test_timeline_accepts_float_millisecond_values_and_coerces_to_int(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'timeline_floats.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Timeline float test", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. ROOM - DAY")
+    shot = Shot(
+        scene=scene,
+        order_index=0,
+        title="Test shot",
+        duration_ms=2000,
+        image_prompt="A room",
+        video_prompt="Push in",
+    )
+    session.add(project)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        response = client.get(f"/api/projects/{project.id}/timeline")
+        assert response.status_code == 200
+        timeline = response.json()
+        original = timeline["document"]["primary"][0]
+        # Simulate fractional split milliseconds from floating point playhead
+        first = {**original, "duration_ms": 800.4, "source_out_ms": 800.4}
+        second = {
+            **original,
+            "id": "split-b",
+            "label": "Test shot B",
+            "source_in_ms": 800.4,
+            "duration_ms": 1199.6,
+            "source_out_ms": 2000.0,
+        }
+        timeline["document"]["primary"] = [first, second]
+        timeline["document"]["text_overlays"] = [
+            {
+                "id": "text-1",
+                "text": "Lower third",
+                "start_ms": 900.2,
+                "duration_ms": 500.8,
+                "presentation": "overlay",
+                "size": "medium",
+                "color": "white",
+                "background": "shadow",
+                "variant": {},
+            }
+        ]
+        saved = client.put(
+            f"/api/projects/{project.id}/timeline",
+            json={"revision": timeline["revision"], "document": timeline["document"]},
+        )
+        assert saved.status_code == 200, saved.text
+        doc = saved.json()["document"]
+        assert doc["primary"][0]["duration_ms"] == 800
+        assert doc["primary"][0]["source_out_ms"] == 800
+        assert doc["primary"][1]["source_in_ms"] == 800
+        assert doc["primary"][1]["duration_ms"] == 1200
+        assert doc["text_overlays"][0]["start_ms"] == 900
+        assert doc["text_overlays"][0]["duration_ms"] == 501
+    finally:
+        app.dependency_overrides.clear()
+        session.close()

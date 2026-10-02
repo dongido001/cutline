@@ -62,8 +62,8 @@ def _normalize_dialogue(value: Any) -> list[dict[str, str]]:
     dialogue: list[dict[str, str]] = []
     for line in lines:
         if isinstance(line, dict):
-            character = str(line.get("character", "Unknown")).strip() or "Unknown"
-            text = str(line.get("text", "")).strip()
+            character = str(line.get("character") or line.get("speaker") or "Unknown").strip() or "Unknown"
+            text = str(line.get("text") or line.get("line") or line.get("dialogue") or "").strip()
         elif isinstance(line, str):
             character, separator, text = line.partition(":")
             if not separator:
@@ -226,7 +226,7 @@ def _timecode_to_ms(value: str) -> int:
 
 class MockScriptProvider(ScriptProvider):
     heading_pattern = re.compile(
-        r"^(?:\[(?P<start>\d{1,2}:\d{2})\s*[-–]\s*(?P<end>\d{1,2}:\d{2})\]\s*)?(?P<title>(?:INT\.|EXT\.|INT/EXT\.).+)$",
+        r"^(?:\[(?P<start>\d{1,2}:\d{2})\s*[-–]\s*(?P<end>\d{1,2}:\d{2})\]\s*)?(?P<title>(?:INT\.|EXT\.|INT/EXT\.|##\s+(?:SCENE|OPENING|FINAL|[A-Z0-9]).*|SCENE\s+\d+).*)$",
         re.I,
     )
 
@@ -237,13 +237,18 @@ class MockScriptProvider(ScriptProvider):
 
         for raw_line in lines:
             line = raw_line.strip()
-            if not line:
+            if not line or line.startswith("---") or line.startswith("# "):
                 continue
+            if "MAIN CHARACTERS" in line.upper() or re.match(r"^\*\*[A-Z ]+\*\*\s*[—–\-]", line):
+                continue
+            if line.startswith("**FINAL MESSAGE"):
+                continue
+
             heading = self.heading_pattern.match(line)
             if heading:
                 if current:
                     chunks.append(current)
-                title = heading.group("title")
+                title = heading.group("title").lstrip("#").strip()
                 location, _, time_of_day = title.partition(" - ")
                 current = {
                     "title": title,
@@ -255,22 +260,24 @@ class MockScriptProvider(ScriptProvider):
                     "dialogue": [],
                 }
                 continue
+
             if current is None:
-                current = {
-                    "title": "SCENE 1 - UNSPECIFIED",
-                    "location": "Unspecified",
-                    "time_of_day": "Unspecified",
-                    "start_ms": None,
-                    "end_ms": None,
-                    "action_lines": [],
-                    "dialogue": [],
-                }
-            if line.isupper() and len(line) <= 40:
-                current["pending_character"] = line
+                continue
+
+            # Check for character cue (e.g. **AMAKA:** or AMAKA: or AMAKA)
+            cue_cand = line.replace("*", "").strip().rstrip(":")
+            if cue_cand.isupper() and 2 <= len(cue_cand) <= 40 and not cue_cand.startswith("#"):
+                current["pending_character"] = cue_cand
             elif current.get("pending_character"):
-                current["dialogue"].append(
-                    {"character": current.pop("pending_character"), "text": line}
-                )
+                text = line.strip().strip("\"\x27\u201c\u201d")
+                if text:
+                    char = current.pop("pending_character")
+                    current["dialogue"].append({
+                        "character": char,
+                        "speaker": char,
+                        "text": text,
+                        "line": text,
+                    })
             else:
                 current["action_lines"].append(line)
 
@@ -344,6 +351,7 @@ class MockScriptProvider(ScriptProvider):
                             "framing": "Medium" if shot_index == 0 else "Close-up",
                             "image_prompt": f"Cinematic frame, {chunk['title']}. {action or 'Character reaction and visual storytelling.'}",
                             "video_prompt": "Natural character movement, controlled camera motion, preserve identity and continuity.",
+                            "dialogue": chunk["dialogue"] if shot_index == 0 else [],
                         }
                         for shot_index in range(shot_count)
                     ],

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="">
+<html lang="" data-theme="dark">
   <head>
     <meta charset="UTF-8">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
@@ -7,6 +7,16 @@
     <meta name="theme-color" content="#202321" />
     <meta name="description" content="Local-first AI movie production studio" />
     <title>Cutline Studio</title>
+    <script>
+      try {
+        var t = localStorage.getItem('cutline.theme');
+        if (t !== 'light' && t !== 'dark') t = 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+        document.documentElement.style.colorScheme = t;
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute('content', t === 'dark' ? '#202321' : '#f5f6f4');
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="app"></div>

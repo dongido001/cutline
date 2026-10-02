@@ -23,6 +23,29 @@ class FaceReferenceImage:
     character_name: str
     mime_type: str
     data: bytes
+    reference_id: str = ""
+    character_id: str = ""
+
+
+@dataclass(frozen=True)
+class VisualReferenceImage:
+    mime_type: str
+    data: bytes
+    character_name: str = "Visual continuity reference (not a cast portrait)"
+    reference_type: str = "visual_continuity"
+
+
+IMAGE_REFERENCE_PROVIDERS = {"chatgpt_web", "gemini_web"}
+
+
+def prepare_visual_reference_prompt(prompt: str) -> str:
+    return (
+        f"{prompt}\n\nVisual continuity reference: use the attached shot reference for relevant "
+        "identity, wardrobe, location, lighting, and visual continuity. "
+        "The current shot's action, camera angle, framing, and composition remain authoritative. "
+        "Do not duplicate the reference composition or treat it as an exact opening frame. "
+        "When cast portraits are attached, use those for each named character's face."
+    )
 
 
 _ASPECT_INSTRUCTION = re.compile(
@@ -51,7 +74,8 @@ def prepare_image_prompt(prompt: str, aspect_ratio: str) -> str:
     return f"{cleaned}\n\n{geometry}{age_clarity}"
 
 
-def prepare_face_reference_prompt(prompt: str, references: Sequence[FaceReferenceImage]) -> str:
+def prepare_face_reference_prompt(prompt: str, references: Sequence[FaceReferenceImage | VisualReferenceImage]) -> str:
+    references = [ref for ref in references if isinstance(ref, FaceReferenceImage)]
     if not references:
         return prompt
     names: list[str] = []
@@ -148,21 +172,44 @@ def image_provider_statuses() -> list[dict]:
             "detail": detail,
             "priority": priority,
             "image_generation": image_generation,
+            "supports_image_references": provider in IMAGE_REFERENCE_PROVIDERS,
             "connected": connected,
             "verified": verified,
         })
     return statuses
 
 
-def _reference_payload(references: Sequence[FaceReferenceImage]) -> list[dict[str, str]]:
-    return [
-        {
+def _optimize_reference_bytes(data: bytes, mime_type: str, max_dimension: int = 1024) -> tuple[bytes, str]:
+    if not data or len(data) <= 500 * 1024:
+        return data, mime_type
+    try:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(data)) as img:
+            img = img.convert("RGB")
+            img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            out = BytesIO()
+            img.save(out, format="JPEG", quality=85, optimize=True)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        return data, mime_type
+
+
+def _reference_payload(references: Sequence[FaceReferenceImage | VisualReferenceImage]) -> list[dict[str, str]]:
+    payload = []
+    for ref in references:
+        data, mime = _optimize_reference_bytes(ref.data, ref.mime_type)
+        item = {
             "character_name": ref.character_name,
-            "mime_type": ref.mime_type,
-            "b64_json": base64.b64encode(ref.data).decode("ascii"),
+            "mime_type": mime,
+            "b64_json": base64.b64encode(data).decode("ascii"),
         }
-        for ref in references
-    ]
+        if isinstance(ref, VisualReferenceImage):
+            item["reference_type"] = ref.reference_type
+        else:
+            item["reference_type"] = "face_identity"
+        payload.append(item)
+    return payload
 
 
 def _decode_provider_image(payload: dict, provider: str) -> tuple[bytes, dict]:
@@ -191,7 +238,7 @@ def _download_image_bytes(url: str, headers: dict | None = None) -> bytes:
 def _request_gemini_with_references(
     prompt: str,
     aspect_ratio: str,
-    references: Sequence[FaceReferenceImage],
+    references: Sequence[FaceReferenceImage | VisualReferenceImage],
     progress: Callable[[dict], None] | None = None,
 ) -> tuple[bytes, str, dict]:
     base_url = settings.gemini_web_base_url
@@ -208,11 +255,12 @@ def _request_gemini_with_references(
         }
     ]
     for ref in references:
+        data, mime = _optimize_reference_bytes(ref.data, ref.mime_type)
         content.append(
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:{ref.mime_type};base64,{base64.b64encode(ref.data).decode('ascii')}",
+                    "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
                 },
             }
         )
@@ -271,8 +319,7 @@ def _request_provider_image(
     prompt: str,
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
-    references: Sequence[FaceReferenceImage] | None = None,
-    conversation_url: str | None = None,
+    references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
 ) -> tuple[bytes, str, dict]:
     references = list(references or [])
     size = "1344x768" if aspect_ratio == "16:9" else "768x1344"
@@ -293,16 +340,19 @@ def _request_provider_image(
     payload: dict = {"model": model, "prompt": prompt, "size": size, "n": 1, "response_format": "b64_json"}
     if references and provider == "chatgpt_web":
         payload["reference_images"] = _reference_payload(references)
-    if provider == "chatgpt_web" and conversation_url:
-        payload["conversation_url"] = conversation_url
     if provider == "chatgpt_web":
+        # The browser bridge can legitimately take up to 300 seconds to finish
+        # rendering and extracting an image. Do not time out its HTTP request
+        # earlier and silently fall through to another provider while it is still
+        # generating the requested frame.
+        provider_timeout = max(settings.image_provider_timeout_seconds, 330)
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 httpx.post,
                 f"{base_url.rstrip('/')}/images/generations",
                 headers=request_headers,
                 json=payload,
-                timeout=httpx.Timeout(settings.image_provider_timeout_seconds, connect=3),
+                timeout=httpx.Timeout(provider_timeout, connect=3),
             )
             last_phase = None
             while not future.done():
@@ -348,15 +398,18 @@ def generate_storyboard_image(
     framing: str,
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
-    references: Sequence[FaceReferenceImage] | None = None,
-    conversation_url: str | None = None,
-    remember: dict | None = None,
+    references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
 ) -> tuple[str, str, str]:
     references = list(references or [])
     prompt = prepare_image_prompt(prompt, aspect_ratio)
     prompt = prepare_face_reference_prompt(prompt, references)
+    has_visual_reference = any(isinstance(ref, VisualReferenceImage) for ref in references)
+    if has_visual_reference:
+        prompt = prepare_visual_reference_prompt(prompt)
     providers = settings.image_provider_order
     if not providers:
+        if has_visual_reference:
+            raise RuntimeError("No configured provider supports image references")
         return (
             render_storyboard_placeholder(prompt, scene_title, framing, aspect_ratio),
             "image/svg+xml",
@@ -366,6 +419,9 @@ def generate_storyboard_image(
     statuses = {item["id"]: item for item in image_provider_statuses()}
     for index, provider in enumerate(providers):
         status = statuses.get(provider, {})
+        if has_visual_reference and provider not in IMAGE_REFERENCE_PROVIDERS:
+            failures.append(f"{provider}: image references are unsupported")
+            continue
         if not status.get("available"):
             failure = f"{status.get('label', provider)}: offline or missing image capability"
             failures.append(failure)
@@ -382,11 +438,7 @@ def generate_storyboard_image(
                 aspect_ratio,
                 progress,
                 references=references,
-                conversation_url=conversation_url if provider == "chatgpt_web" else None,
             )
-            url = metadata.get("conversation_url")
-            if remember is not None and url:
-                remember["url"] = str(url)
             if progress:
                 progress({"provider": provider, "phase": "saving", **metadata})
             extension, mime_type = _image_format(image)
@@ -425,9 +477,18 @@ def generate_storyboard_image(
     raise RuntimeError("Image generation failed. " + "; ".join(failures) + ". Refresh bridge sessions or upload an image manually.")
 
 
-def delete_media_file(filename: str | None) -> None:
+def delete_media_file(filename: str | None, db: object = None) -> None:
     if not filename:
         return
+    if db is not None:
+        try:
+            from sqlalchemy import select
+            from .models import ShotTake
+            # Never delete files that are referenced in take history
+            if db.scalar(select(ShotTake.id).where(ShotTake.filename == filename).limit(1)) is not None:
+                return
+        except Exception:
+            pass
     path = settings.media_dir / filename
     if path.is_file():
         path.unlink()

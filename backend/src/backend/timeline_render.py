@@ -153,6 +153,16 @@ def _normalize_primary(
     if not media:
         raise RuntimeError(f"{item.label} has no media")
 
+    if media.is_clip:
+        try:
+            actual_dur = probe_duration_ms(media.path) / 1000
+            trim_start = item.source_in_ms / 1000
+            available = max(0.1, actual_dur - trim_start)
+            if duration > available:
+                duration = available
+        except Exception:
+            pass
+
     command = ["ffmpeg", "-y"]
     if media.is_clip:
         command.extend(["-i", str(media.path)])
@@ -167,11 +177,12 @@ def _normalize_primary(
     trim = f"trim=start={trim_start}:duration={duration}," if media.is_clip else f"trim=duration={duration},"
     video = (
         f"[0:v]{trim}setpts=PTS-STARTPTS,{_video_filter(width, height, geometry)},"
-        f"setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={duration},"
+        f"setsar=1,fps=30,"
         f"trim=duration={duration}[v]"
     )
-    has_audio = media.is_clip and _has_audio(media.path)
-    dialogue = media.dialogue_audio if media.dialogue_audio and media.dialogue_audio.is_file() else None
+    mute_audio = getattr(item, "mute_audio", False)
+    has_audio = (not mute_audio) and media.is_clip and _has_audio(media.path)
+    dialogue = media.dialogue_audio if (not mute_audio) and media.dialogue_audio and media.dialogue_audio.is_file() else None
     if has_audio:
         audio = (
             f";[0:a]atrim=start={trim_start}:duration={duration},asetpts=PTS-STARTPTS,"
@@ -292,7 +303,7 @@ def _composite_overlays(
     workspace: Path,
 ) -> None:
     desired_aspect = VARIANTS[variant][0]
-    total_seconds = sum(item.duration_ms for item in document.primary) / 1000
+    total_seconds = probe_duration_ms(base) / 1000
     command = ["ffmpeg", "-y", "-i", str(base)]
     specs: list[tuple[str, object, Path, TimelineVariantGeometry]] = []
     for overlay in document.image_overlays:

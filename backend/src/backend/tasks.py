@@ -1,3 +1,5 @@
+from .image_references import load_visual_reference, queued_reference
+from .media import prepare_visual_reference_prompt
 from copy import deepcopy
 import re
 
@@ -5,18 +7,19 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from .cast import cast_portrait_prompt, load_cast_references, sync_project_cast
+from .cast import cast_portrait_prompt, is_usable_reference_image, load_cast_references, sync_project_cast
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
 from .media import delete_media_file, generate_storyboard_image
-from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
+from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
 from .providers import get_script_provider, normalize_analysis_result
+from .publishing import collect_publish_assets, publish_assets
 from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
 from .screenplay_parser import parse_structured_screenplay
 from .settings import settings
-from .timeline import ensure_timeline, promote_available_clips
+from .timeline import append_missing_shots, ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .schemas import TimelineDocument
 from .video import generate_shot_clip as render_shot_clip
@@ -201,9 +204,9 @@ def _continuation_context(version: ScriptVersion) -> str:
     for scene in version.scenes:
         characters = sorted(
             {
-                str(line.get("character", "")).strip()
+                str(line.get("character") or line.get("speaker") or "").strip()
                 for line in scene.dialogue
-                if isinstance(line, dict) and line.get("character")
+                if isinstance(line, dict) and (line.get("character") or line.get("speaker"))
             }
         )
         lines.append(
@@ -422,15 +425,36 @@ def _generate_shot_image(
 
             project = shot.scene.script_version.project
             target_aspect = aspect_ratio or project.aspect_ratio
-            from .takes import continuity_prompt_suffix, record_take
+            from .continuity import get_or_create_shot_snapshot
+            from .takes import record_take
 
-            prompt = (prompt_override or shot.image_prompt).strip() + continuity_prompt_suffix(shot.scene)
-            references = load_cast_references(
-                db, project.id,
-                shot.character_ids if character_ids is None else character_ids,
+            queued_snapshot = next((
+                item.get("continuity_snapshot")
+                for item in (job.attempts or [])
+                if isinstance(item, dict) and item.get("continuity_snapshot")
+            ), None)
+            snapshot = queued_snapshot or get_or_create_shot_snapshot(
+                db, project, shot, target_aspect,
+                character_ids=character_ids,
+                prompt_override=prompt_override,
             )
-            image_session: dict[str, str] = {}
-
+            shot.continuity_snapshot = snapshot
+            shot.character_ids = list(snapshot.get("character_ids") or [])
+            prompt = snapshot["effective_image_prompt"]
+            image_reference = queued_reference(job, shot)
+            visual_reference = load_visual_reference(image_reference)
+            references = load_cast_references(
+                db, project.id, shot.character_ids,
+                reference_ids=[
+                    reference_id
+                    for character in snapshot.get("characters", [])
+                    for reference_id in character.get("reference_ids", [])
+                ],
+            )
+            if image_reference and visual_reference is None:
+                raise RuntimeError("Selected image reference could not be loaded")
+            if visual_reference is not None:
+                references.append(visual_reference)
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
                 provider = str(update.get("provider") or "")
@@ -460,7 +484,14 @@ def _generate_shot_image(
                     item for item in attempts if isinstance(item, dict) and item.get("provider")
                 ]
                 attempt = next((item for item in provider_attempts if item.get("provider") == provider), None)
-                values = {key: update[key] for key in ("provider", "phase", "error", "failure_category", "conversation_url") if update.get(key)}
+                values = {
+                    key: update[key]
+                    for key in (
+                        "provider", "phase", "error", "failure_category", "conversation_url",
+                        "reference_count", "reference_types",
+                    )
+                    if update.get(key) is not None
+                }
                 if attempt:
                     attempt.update(values)
                 elif provider:
@@ -470,16 +501,14 @@ def _generate_shot_image(
 
             filename, mime_type, provider = generate_storyboard_image(
                 prompt,
-                shot.scene.title,
-                shot.framing,
+                (snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                snapshot.get("framing") or shot.framing,
                 target_aspect,
                 progress=report_progress,
                 references=references,
-                conversation_url=project.image_conversation_url,
-                remember=image_session,
             )
-            if image_session.get("url"):
-                project.image_conversation_url = image_session["url"]
+            if image_reference:
+                prompt = prepare_visual_reference_prompt(prompt)
             generated_filename = filename
             variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio
@@ -522,6 +551,7 @@ def _generate_shot_image(
                 source="generated",
                 provider=provider,
                 prompt=prompt,
+                settings={"continuity_snapshot": snapshot, **({"image_reference": image_reference} if image_reference else {})},
             )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
@@ -534,7 +564,7 @@ def _generate_shot_image(
             db.commit()
             generated_filename = None
             if previous_filename != filename:
-                delete_media_file(previous_filename)
+                delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
         except JobCancelled:
             delete_media_file(generated_filename)
@@ -652,6 +682,8 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
             target_path = settings.media_dir / cast_filename
             shutil.move(str(source_path), str(target_path))
             generated_filename = cast_filename
+            if not is_usable_reference_image(target_path.read_bytes()):
+                raise RuntimeError("Generated face reference is blank or contains no visible pixels")
 
             raise_if_cancelled(db, job_id)
             db.add(
@@ -712,29 +744,75 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             job.status = "running"
             job.progress = 0.1
             provider_name = (settings.video_provider or "runway").strip().lower()
-            job.message = f"Sending shot to {'Runway' if provider_name == 'runway' else 'ComfyUI'}"
+            provider_labels = {
+                "runway": "Runway",
+                "flowkit": "Google Flow",
+                "comfyui": "ComfyUI",
+            }
+            job.message = f"Sending shot to {provider_labels.get(provider_name, provider_name.title())}"
             db.commit()
 
             project = shot.scene.script_version.project
             target_aspect = aspect_ratio or project.aspect_ratio
             image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
-            source_image = shot.image if target_aspect == project.aspect_ratio and shot.image else image_variant or shot.image
+            continuity_frame = next(
+                (
+                    frame
+                    for frame in shot.continuity_frames
+                    if frame.aspect_ratio == target_aspect
+                ),
+                None,
+            )
+            source_image = (
+                continuity_frame
+                or (shot.image if target_aspect == project.aspect_ratio and shot.image else image_variant or shot.image)
+            )
             if not source_image:
                 raise RuntimeError("Generate or upload a shot image first")
             base_prompt = (prompt_override or shot.video_prompt).strip()
             if target_aspect == "9:16" and not prompt_override:
                 base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
-            from .takes import continuity_prompt_suffix, record_take
+            from .continuity import current_shot_snapshot, video_continuity_prompt
+            from .takes import record_take
 
+            matching_image_takes = [
+                take for take in shot.takes
+                if take.media_type == "image" and take.aspect_ratio == target_aspect
+                and take.filename == source_image.filename
+            ]
+            image_take = next(
+                (take for take in matching_image_takes if take.id == shot.selected_image_take_id),
+                max(matching_image_takes, key=lambda take: take.created_at, default=None),
+            )
+            snapshot = (
+                (image_take.settings or {}).get("continuity_snapshot")
+                if image_take else None
+            )
+            if not snapshot and not continuity_frame and source_image.source == "generated":
+                candidate = shot.continuity_snapshot
+                if candidate and candidate.get("aspect_ratio") == target_aspect:
+                    snapshot = candidate
+            if not snapshot:
+                snapshot = current_shot_snapshot(shot, target_aspect)
             effective_prompt = compose_video_prompt(
-                base_prompt + continuity_prompt_suffix(shot.scene),
+                video_continuity_prompt(snapshot, base_prompt, target_aspect),
                 shot.sound,
             )
+            if continuity_frame:
+                effective_prompt = "\n\n".join(
+                    part
+                    for part in (
+                        effective_prompt,
+                        "Continue directly from the selected frame of the previous shot. Preserve its background, set layout, lighting, props, and overall visual composition as the exact opening state.",
+                    )
+                    if part
+                )
             filename, mime_type, provider = render_shot_clip(
                 settings.media_dir / source_image.filename,
                 effective_prompt,
                 shot.duration_ms,
                 target_aspect,
+                scene_id=str(shot.scene.id),
             )
             variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio
@@ -776,6 +854,13 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 source="generated",
                 provider=provider,
                 prompt=effective_prompt,
+                settings={
+                    "continuity_frame": {
+                        "source_shot_id": continuity_frame.source_shot_id,
+                        "source_shot_title": continuity_frame.source_shot_title,
+                        "source_time_ms": continuity_frame.source_time_ms,
+                    }
+                } if continuity_frame else None,
             )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
@@ -786,7 +871,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             job.message = "Shot clip ready"
             db.commit()
             if previous_filename != filename:
-                delete_media_file(previous_filename)
+                delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
         except JobCancelled:
             return
@@ -812,12 +897,75 @@ def compose_video_prompt(prompt: str, sound: str) -> str:
 
 
 @video_huey.task()
+def generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+
+
+@video_huey.task()
 def generate_shot_clip_comfy(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+    """Backward-compatible queue alias for jobs enqueued before the FlowKit routing rename."""
     _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
 
 
 def enqueue_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None):
-    return generate_shot_clip_comfy(shot_id, job_id, aspect_ratio, prompt_override)
+    return generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+
+def _generate_shot_lipsync(shot_id: str, job_id: str, aspect_ratio: str | None = None) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        shot = db.get(Shot, shot_id)
+        if not job or not shot:
+            return
+        if job.status == "cancelled":
+            return
+        try:
+            raise_if_cancelled(db, job_id)
+            job.status = "running"
+            job.progress = 0.1
+            job.message = "Preparing audio and visual references for lip-sync..."
+            db.commit()
+
+            from .lipsync import execute_shot_lipsync
+
+            def progress_cb(pct: float, msg: str):
+                raise_if_cancelled(db, job_id)
+                job.progress = pct
+                job.message = msg
+                db.commit()
+
+            execute_shot_lipsync(
+                shot_id=shot_id,
+                db=db,
+                aspect_ratio=aspect_ratio,
+                progress_callback=progress_cb,
+            )
+
+            raise_if_cancelled(db, job_id)
+            job.status = "completed"
+            job.progress = 1.0
+            job.message = "Dialogue lip-sync completed successfully"
+            db.commit()
+        except JobCancelled:
+            return
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            if preserve_cancelled(job):
+                return
+            job.status = "failed"
+            job.error = str(exc)
+            job.message = f"Lip-sync failed: {exc}"
+            db.commit()
+
+
+@video_huey.task()
+def generate_shot_lipsync_worker(shot_id: str, job_id: str, aspect_ratio: str | None = None) -> None:
+    _generate_shot_lipsync(shot_id, job_id, aspect_ratio)
+
+
+def enqueue_shot_lipsync(shot_id: str, job_id: str, aspect_ratio: str | None = None):
+    return generate_shot_lipsync_worker(shot_id, job_id, aspect_ratio)
+
 
 
 def _render_project_final_cut(project_id: str, job_id: str, variant: str = "landscape") -> None:
@@ -837,6 +985,7 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
 
             timeline = ensure_timeline(project, db)
             promote_available_clips(project, db)
+            append_missing_shots(project, db)
             if variant == "shorts":
                 if not timeline.shorts_document:
                     timeline.shorts_document = deepcopy(timeline.document)
@@ -883,7 +1032,7 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
             job.message = "Final cut ready"
             db.commit()
             if previous_filename != result.filename:
-                delete_media_file(previous_filename)
+                delete_media_file(previous_filename, db=db)
         except JobCancelled:
             return
         except Exception as exc:
@@ -897,6 +1046,84 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
                 job.error = str(exc)
                 db.commit()
             raise
+
+
+def _publish_project(project_id: str, job_id: str, publish_record_id: str) -> None:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        project = db.get(Project, project_id)
+        record = db.get(PublishRecord, publish_record_id)
+        if not job or not project or not record:
+            return
+        if job.status == "cancelled":
+            return
+        try:
+            raise_if_cancelled(db, job_id)
+            job.status = "running"
+            job.progress = 0.05
+            job.message = "Preparing publish assets"
+            record.status = "running"
+            db.commit()
+            payload = (job.attempts or [{}])[0]
+            assets = collect_publish_assets(project, payload, db)
+            job.progress = 0.15
+            job.message = f"Prepared {len(assets)} video{'s' if len(assets) != 1 else ''}"
+            db.commit()
+
+            def report(step: int, total: int, message: str) -> None:
+                raise_if_cancelled(db, job_id)
+                job.progress = 0.15 + (step / max(1, total)) * 0.75
+                job.message = message
+                db.commit()
+
+            results = publish_assets(assets, payload, report, db)
+            record.results = results
+            failed = [item for item in results if item.get("status") == "failed"]
+            if failed:
+                record.status = "failed" if len(failed) == len(results) else "partial"
+                job.status = "failed" if len(failed) == len(results) else "completed"
+                job.error = "; ".join(str(item.get("message")) for item in failed[:3])
+                job.message = "Publish completed with issues" if record.status == "partial" else "Publish failed"
+            else:
+                record.status = "completed"
+                job.status = "completed"
+                job.error = None
+                job.message = "Publish complete"
+            job.progress = 1
+            job.provider_phase = record.status
+            db.commit()
+        except JobCancelled:
+            if record:
+                record.status = "cancelled"
+                db.commit()
+            return
+        except Exception as exc:
+            db.rollback()
+            job = db.get(Job, job_id)
+            record = db.get(PublishRecord, publish_record_id)
+            if preserve_cancelled(job):
+                if record:
+                    record.status = "cancelled"
+                    db.commit()
+                return
+            if job:
+                job.status = "failed"
+                job.message = "Publish failed"
+                job.error = str(exc)
+                job.provider_phase = "failed"
+            if record:
+                record.status = "failed"
+                record.results = [{"status": "failed", "message": str(exc)}]
+            db.commit()
+
+
+@video_huey.task()
+def publish_project_worker(project_id: str, job_id: str, publish_record_id: str) -> None:
+    _publish_project(project_id, job_id, publish_record_id)
+
+
+def enqueue_publish_project(project_id: str, job_id: str, publish_record_id: str):
+    return publish_project_worker(project_id, job_id, publish_record_id)
 
 
 @video_huey.task()

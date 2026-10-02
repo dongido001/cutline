@@ -46,13 +46,15 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The prototype parser is ava
 
 Approving a script opens the shot-plan workspace. Each shot supports prompt and timing edits, queued image generation, regeneration, manual JPG/PNG/WebP upload, and image deletion. Assets are stored locally in `backend/data/media/`.
 
-Image generation uses `MOVIE_IMAGE_PROVIDERS=chatgpt_web,gemini_web`. Each ChatGPT attempt creates a dedicated conversation in the bridge's single browser tab, records its conversation URL, and reports submission, generation, download, and persistence phases. ChatGPT is tried once, followed by one Gemini attempt when its Docker bridge is online. A failed regeneration leaves the existing image intact, and manual upload remains available.
+Image generation uses `MOVIE_IMAGE_PROVIDERS=chatgpt_web,gemini_web`. Each ChatGPT attempt opens a fresh tab and conversation in the persistent signed-in browser context, records its conversation URL on the job, and closes the tab when complete. The bridge waits for generation progress to clear and a new image to remain stable before returning it; uncertain or timed-out results fail without replacing existing media. ChatGPT is tried once, followed by one Gemini attempt when its Docker bridge is online. Manual upload remains available.
 
 The worker runs separate persistent `chatgpt`, `gemini`, `image`, `general`, and `video` lanes. Browser-backed image work is serialized while unrelated analysis and rendering continue independently. Provider settings distinguish a connected browser session from image generation verified by a successful real request.
 
 ## Shot clips and ComfyUI
 
 The Clips workspace stores one local video per shot. MP4, WebM, and MOV files up to 250 MB can be uploaded, replaced, played, or deleted without installing a video model. The project Preview automatically uses a shot video when present and falls back to its storyboard image otherwise.
+
+For shot-to-shot continuity, choose a frame from the immediately previous shot's video in the shot editor. Cutline saves it as a separate starting-frame asset for the selected aspect ratio, without replacing the storyboard image or cast references. Video generation uses that image as the provider's opening frame and asks it to preserve the prior shot's scene; remove or replace the selected frame at any time.
 
 Local generation uses ComfyUI through the dedicated `video` queue. Start ComfyUI on `http://127.0.0.1:8188`, export an image-to-video workflow using **Save (API Format)**, and save it as `backend/data/comfyui_i2v_workflow.json`. See `backend/data/COMFYUI_WORKFLOW.md` for the required input placeholders. The Generate video button stays disabled until both the workflow and ComfyUI server are available.
 

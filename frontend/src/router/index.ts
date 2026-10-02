@@ -11,6 +11,11 @@ const router = createRouter({
       component: () => import('../views/StudioView.vue'),
     },
     {
+      path: '/queues',
+      name: 'queues',
+      component: () => import('../views/QueuesView.vue'),
+    },
+    {
       path: '/projects/:projectId/:stage/:shotId?',
       name: 'project-stage',
       component: () => import('../views/StudioView.vue'),

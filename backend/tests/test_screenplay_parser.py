@@ -87,6 +87,23 @@ def test_groups_consecutive_shots_by_explicit_scene_label() -> None:
     ]
 
 
+def test_time_of_day_does_not_split_an_explicit_scene() -> None:
+    script = SCRIPT.replace(
+        "Time: 00:00-00:06",
+        "Scene: FAMILY HOME\nTime of day: Morning\nTime: 00:00-00:06",
+    ).replace(
+        "Time: 00:06-00:12",
+        "Scene: FAMILY HOME\nTime of day: Evening\nTime: 00:06-00:12",
+    )
+
+    result = parse_structured_screenplay(script)
+
+    assert result is not None
+    assert len(result["scenes"]) == 1
+    assert len(result["scenes"][0]["shots"]) == 2
+    assert result["scenes"][0]["time_of_day"] == "Morning"
+
+
 def test_flags_declared_shot_count_and_timeline_gaps() -> None:
     broken = SCRIPT.replace("Format: 2 shots", "Format: 3 shots").replace(
         "Time: 00:06-00:12", "Time: 00:08-00:14"

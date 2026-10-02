@@ -32,7 +32,7 @@ def revoke_job_task(job: Job) -> None:
     kind = job.kind or ""
     if kind in {"shot_image", "cast_reference"}:
         targets = [image_huey]
-    elif kind == "shot_clip" or kind.startswith("final_cut") or kind == "create_draft":
+    elif kind == "shot_clip" or kind.startswith("final_cut") or kind == "create_draft" or kind == "publish":
         targets = [video_huey]
     elif kind in {"script_analysis", "script_continuation"}:
         targets = [chatgpt_huey, gemini_huey, general_huey]

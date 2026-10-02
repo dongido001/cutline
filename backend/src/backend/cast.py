@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from io import BytesIO
 from typing import Any, Iterable
+
+from PIL import Image, UnidentifiedImageError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -12,6 +15,32 @@ from .media import FaceReferenceImage
 from .settings import settings
 from .models import Character, Project, Scene, ScriptVersion, Shot
 from .screenplay_parser import canonical_character_name, parse_character_consistency
+
+
+CHARACTER_MENTION_ALIASES = {
+    "WOMEN OF OLOKO": (r"\bWOMEN\b", r"\bCROWD\b"),
+    "BRITISH COLONIAL TROOPS": (r"\bCOLONIAL SOLDIERS\b",),
+}
+
+
+def is_usable_reference_image(data: bytes) -> bool:
+    """Return whether image bytes contain visible pixels suitable for a cast reference."""
+    if not data:
+        return False
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            if image.width < 2 or image.height < 2:
+                return False
+            if "A" in image.getbands():
+                alpha = image.getchannel("A")
+                if alpha.getbbox() is None:
+                    return False
+            return True
+    except (UnidentifiedImageError, OSError, ValueError):
+        # Preserve existing support for non-empty legacy/test reference bytes;
+        # the bug we need to reject is a valid image with no visible pixels.
+        return bool(data)
 
 
 def cast_portrait_prompt(character: Character, *, look: str | None = None) -> str:
@@ -65,7 +94,7 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
     for line in dialogue:
         if not isinstance(line, dict):
             continue
-        raw = str(line.get("character") or "").strip()
+        raw = str(line.get("character") or line.get("speaker") or "").strip()
         key = canonical_character_name(raw)
         if key and key not in seen:
             seen.add(key)
@@ -90,7 +119,10 @@ def match_character_ids(
             matched.append(character.id)
             continue
         pattern = rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])"
-        if re.search(pattern, haystack):
+        aliases = CHARACTER_MENTION_ALIASES.get(key, ())
+        if re.search(pattern, haystack) or any(
+            re.search(alias, haystack) for alias in aliases
+        ):
             matched.append(character.id)
     return matched
 
@@ -170,7 +202,8 @@ def sync_project_cast(
 
 
 def load_cast_references(
-    db: Session, project_id: str, character_ids: Iterable[str]
+    db: Session, project_id: str, character_ids: Iterable[str],
+    reference_ids: Iterable[str] | None = None,
 ) -> list[FaceReferenceImage]:
     """Resolve the complete selected cast, without silently dropping identities."""
     selected_ids = list(dict.fromkeys(character_ids))
@@ -184,20 +217,24 @@ def load_cast_references(
     by_id = {character.id: character for character in characters}
     if any(character_id not in by_id for character_id in selected_ids):
         raise RuntimeError("One or more selected cast characters were not found in this project")
+    selected_reference_ids = set(reference_ids) if reference_ids is not None else None
     references: list[FaceReferenceImage] = []
     missing: list[str] = []
     for character_id in selected_ids:
         character = by_id[character_id]
         usable = []
         for ref in character.references:
+            if selected_reference_ids is not None and ref.id not in selected_reference_ids:
+                continue
             path = settings.media_dir / ref.filename
             try:
                 data = path.read_bytes()
             except OSError:
                 continue
-            if data:
+            if is_usable_reference_image(data):
                 usable.append(FaceReferenceImage(
                     character_name=character.name, mime_type=ref.mime_type, data=data,
+                    reference_id=ref.id, character_id=character.id,
                 ))
         if not usable:
             missing.append(character.name)

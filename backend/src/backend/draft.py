@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from .image_references import load_visual_reference, queued_reference
+from .media import prepare_visual_reference_prompt
+
 from copy import deepcopy
 from typing import Any
 
@@ -27,7 +30,7 @@ from .models import (
 from .queue import video_huey
 from .schemas import TimelineDocument
 from .settings import settings
-from .takes import continuity_prompt_suffix, record_take
+from .takes import record_take
 from .timeline import ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .timing import estimate_dialogue_duration_ms
@@ -243,24 +246,50 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
             attention.append(f"{shot.title or shot.id}: missing image prompt")
             completed += 1
             continue
-        prompt = prompt + continuity_prompt_suffix(shot.scene)
+        from .continuity import get_or_create_shot_snapshot
+        try:
+            snapshot = get_or_create_shot_snapshot(db, project, shot, aspect)
+        except RuntimeError as exc:
+            attention.append(f"{shot.title or shot.id}: image failed ({exc})")
+            completed += 1
+            continue
+        prompt = snapshot["effective_image_prompt"]
+        shot.character_ids = list(snapshot.get("character_ids") or [])
         job.message = _format_scene_message(shot, scene_map, "Generating image")
         job.progress = 0.05 + (completed / total) * 0.30
         db.commit()
         try:
-            references = load_cast_references(db, project.id, shot.character_ids or [])
-            remember: dict[str, str] = {}
+            image_reference = queued_reference(job, shot)
+            visual_reference = load_visual_reference(image_reference)
+            references = load_cast_references(
+                db, project.id, shot.character_ids or [],
+                reference_ids=[
+                    reference_id
+                    for character in snapshot.get("characters", [])
+                    for reference_id in character.get("reference_ids", [])
+                ],
+            )
+            if visual_reference:
+                references.append(visual_reference)
+            def report_image_progress(update: dict) -> None:
+                if update.get("provider"):
+                    job.provider = str(update["provider"])
+                if update.get("phase"):
+                    job.provider_phase = str(update["phase"])
+                if update.get("conversation_url"):
+                    job.conversation_url = str(update["conversation_url"])
+                db.commit()
+
             filename, mime_type, provider = generate_storyboard_image(
                 prompt,
                 shot.scene.title,
-                shot.framing,
+                snapshot.get("framing") or shot.framing,
                 aspect,
+                progress=report_image_progress,
                 references=references,
-                conversation_url=project.image_conversation_url,
-                remember=remember,
             )
-            if remember.get("url"):
-                project.image_conversation_url = remember["url"]
+            if image_reference:
+                prompt = prepare_visual_reference_prompt(prompt)
             previous = shot.image.filename if shot.image else None
             invalidate_final_cut(project, db)
             if shot.image:
@@ -291,6 +320,7 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                 source="generated",
                 provider=provider,
                 prompt=prompt,
+                settings={"continuity_snapshot": snapshot, **({"image_reference": image_reference} if image_reference else {})},
             )
             shot.status = "image_ready"
             db.commit()
@@ -320,12 +350,45 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
         raise_if_cancelled(db, job.id)
         if _shot_clip(shot, aspect):
             continue
-        source = _shot_image(shot, aspect)
+        continuity_frame = next(
+            (
+                frame
+                for frame in shot.continuity_frames
+                if frame.aspect_ratio == aspect
+            ),
+            None,
+        )
+        source = continuity_frame or _shot_image(shot, aspect)
         if not source:
             attention.append(f"{shot.title or shot.id}: needs an image before video")
             completed += 1
             continue
-        prompt = ((shot.video_prompt or shot.image_prompt or "").strip() + continuity_prompt_suffix(shot.scene)).strip()
+        from .continuity import current_shot_snapshot, video_continuity_prompt
+        matching_image_takes = [
+            take for take in shot.takes
+            if take.media_type == "image" and take.aspect_ratio == aspect
+            and take.filename == source.filename
+        ] if not continuity_frame else []
+        image_take = next(
+            (take for take in matching_image_takes if take.id == shot.selected_image_take_id),
+            max(matching_image_takes, key=lambda take: take.created_at, default=None),
+        )
+        snapshot = (image_take.settings or {}).get("continuity_snapshot") if image_take else None
+        if not snapshot:
+            candidate = shot.continuity_snapshot
+            snapshot = candidate if candidate and candidate.get("aspect_ratio") == aspect else None
+        snapshot = snapshot or current_shot_snapshot(shot, aspect)
+        base_prompt = (shot.video_prompt or shot.image_prompt or "").strip()
+        prompt = video_continuity_prompt(snapshot, base_prompt, aspect)
+        if continuity_frame:
+            prompt = "\n\n".join(
+                part
+                for part in (
+                    prompt,
+                    "Continue directly from the selected frame of the previous shot. Preserve its background, set layout, lighting, props, and overall visual composition as the exact opening state.",
+                )
+                if part
+            )
         duration_ms = _clip_duration_for_shot(shot)
         if duration_ms != shot.duration_ms:
             shot.duration_ms = duration_ms
@@ -368,6 +431,13 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 source="generated",
                 provider=provider,
                 prompt=prompt,
+                settings={
+                    "continuity_frame": {
+                        "source_shot_id": continuity_frame.source_shot_id,
+                        "source_shot_title": continuity_frame.source_shot_title,
+                        "source_time_ms": continuity_frame.source_time_ms,
+                    }
+                } if continuity_frame else None,
             )
             shot.status = "clip_ready"
             if project.timeline and not promote_available_clips(project, db):
@@ -400,10 +470,8 @@ def _generate_missing_audio(db: Session, project: Project, job: Job, shots: list
         job.progress = 0.70 + (completed / total) * 0.15
         db.commit()
         try:
-            filename, mime_type, provider = synthesize_dialogue(
-                shot.dialogue,
-                duration_hint_ms=_clip_duration_for_shot(shot),
-            )
+            from .voice_service import synthesize_shot_dialogue
+            filename, mime_type, provider = synthesize_shot_dialogue(shot, db)
             record_take(
                 db,
                 shot,

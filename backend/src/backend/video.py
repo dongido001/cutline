@@ -1,3 +1,4 @@
+import base64
 import json
 import mimetypes
 import random
@@ -82,12 +83,169 @@ def comfyui_status() -> tuple[bool, bool, str]:
     return configured, available, detail
 
 
+def flowkit_status() -> tuple[bool, bool, str]:
+    base_url = settings.flowkit_base_url.rstrip("/")
+    configured = bool(base_url)
+    if not configured:
+        return False, False, "FlowKit URL is not configured"
+    try:
+        response = httpx.get(f"{base_url}/status", timeout=2)
+        response.raise_for_status()
+    except Exception as exc:
+        return True, False, f"FlowKit unavailable: {exc}"
+    return True, True, "Ready for Google Flow video generation through FlowKit"
+
+
+def generate_flowkit_clip(
+    image_path: Path,
+    prompt: str,
+    duration_ms: int,
+    aspect_ratio: str,
+    scene_id: str | None = None,
+) -> tuple[str, str, str]:
+    if not scene_id:
+        raise RuntimeError("FlowKit video generation requires a scene_id")
+
+    base_url = settings.flowkit_base_url.rstrip("/")
+    flow_aspect_ratio = (
+        "VIDEO_ASPECT_RATIO_PORTRAIT"
+        if aspect_ratio == "9:16"
+        else "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    )
+    requested_duration_s = max(1, round(duration_ms / 1000))
+    if (settings.flowkit_model_family or "veo").strip().lower() == "omni_flash":
+        duration_s = min((4, 6, 8, 10), key=lambda value: (abs(value - requested_duration_s), value))
+    else:
+        duration_s = requested_duration_s
+    mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
+    image_base64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+
+    with httpx.Client(timeout=settings.flowkit_timeout_seconds) as client:
+        upload = client.post(
+            f"{base_url}/upload-image",
+            json={
+                "image_base64": image_base64,
+                "mime_type": mime_type,
+                "file_name": image_path.name,
+                "project_id": settings.flowkit_project_id,
+            },
+        )
+        upload.raise_for_status()
+        uploaded = upload.json()
+        media_id = uploaded.get("media_id")
+        project_id = uploaded.get("project_id") or settings.flowkit_project_id
+        if not media_id:
+            raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded}")
+
+        payload = {
+            "start_image_media_id": media_id,
+            "prompt": prompt,
+            "project_id": project_id,
+            "scene_id": scene_id,
+            "duration_s": duration_s,
+            "resolution": "720p",
+            "aspect_ratio": flow_aspect_ratio,
+            "model_family": settings.flowkit_model_family,
+        }
+        submit = client.post(f"{base_url}/generate-video", json=payload)
+        try:
+            submit.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"FlowKit video generation failed ({submit.status_code}): {submit.text}"
+            ) from exc
+        submitted = submit.json()
+
+        polling = submitted.get("flowkitPolling") or {}
+        operations = submitted.get("operations") or polling.get("operations") or []
+        workflows = submitted.get("workflows") or polling.get("workflows")
+        project_id = (
+            submitted.get("project_id")
+            or polling.get("project_id")
+            or project_id
+            or settings.flowkit_project_id
+        )
+        if not operations and not workflows:
+            raise RuntimeError(f"FlowKit returned no operation/workflow: {submitted}")
+
+        deadline = time.monotonic() + settings.flowkit_timeout_seconds
+        while time.monotonic() < deadline:
+            status_payload = {
+                "operations": operations,
+                "project_id": project_id,
+                "include_encoded_video": True,
+            }
+            if workflows:
+                status_payload["workflows"] = workflows
+            status = client.post(f"{base_url}/check-status", json=status_payload)
+            status.raise_for_status()
+            body = status.json()
+
+            results = (
+                body.get("results")
+                or body.get("videos")
+                or body.get("workflows")
+                or body.get("operations")
+                or []
+            )
+            if isinstance(results, dict):
+                results = [results]
+            found_video = False
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                media_info = result.get("media") if isinstance(result.get("media"), dict) else {}
+                operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+                metadata = operation.get("metadata") if isinstance(operation.get("metadata"), dict) else {}
+                operation_video = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
+                encoded = (
+                    result.get("encoded_video")
+                    or result.get("video_base64")
+                    or result.get("encodedVideo")
+                    or media_info.get("encoded_video")
+                    or media_info.get("video_base64")
+                    or media_info.get("encodedVideo")
+                )
+                if encoded:
+                    content = base64.b64decode(encoded)
+                    filename = f"clip-{uuid.uuid4()}.mp4"
+                    (settings.media_dir / filename).write_bytes(content)
+                    return filename, "video/mp4", "flowkit"
+                url = (
+                    result.get("video_url")
+                    or result.get("url")
+                    or result.get("media_url")
+                    or media_info.get("video_url")
+                    or media_info.get("url")
+                    or media_info.get("media_url")
+                    or operation_video.get("fifeUrl")
+                    or operation_video.get("videoUrl")
+                    or operation_video.get("url")
+                )
+                if url:
+                    found_video = True
+                    media = client.get(url)
+                    media.raise_for_status()
+                    filename = f"clip-{uuid.uuid4()}.mp4"
+                    (settings.media_dir / filename).write_bytes(media.content)
+                    return filename, media.headers.get("content-type", "video/mp4"), "flowkit"
+
+            if body.get("done") is True and not found_video:
+                raise RuntimeError(f"FlowKit generation completed without video: {body}")
+            time.sleep(2)
+
+    raise TimeoutError("FlowKit video generation timed out")
+
+
 def video_provider_status() -> tuple[str, str, bool, bool, str, str]:
     """Return id, label, configured, available, model, detail."""
     provider = (settings.video_provider or "runway").strip().lower()
     if provider == "comfyui":
         configured, available, detail = comfyui_status()
         return "comfyui", "ComfyUI", configured, available, "workflow", detail
+    if provider == "flowkit":
+        configured, available, detail = flowkit_status()
+        return "flowkit", "Google Flow (FlowKit)", configured, available, settings.flowkit_model_family, detail
     configured, available, detail = runway_status()
     return "runway", "Runway", configured, available, settings.runway_model, detail
 
@@ -97,8 +255,17 @@ def generate_shot_clip(
     prompt: str,
     duration_ms: int,
     aspect_ratio: str,
+    scene_id: str | None = None,
 ) -> tuple[str, str, str]:
     provider = (settings.video_provider or "runway").strip().lower()
+    if provider == "flowkit":
+        return generate_flowkit_clip(
+            image_path,
+            prompt,
+            duration_ms,
+            aspect_ratio,
+            scene_id=scene_id,
+        )
     if provider == "runway":
         return generate_runway_clip(image_path, prompt, duration_ms, aspect_ratio)
     return generate_comfyui_clip(image_path, prompt, duration_ms, aspect_ratio)

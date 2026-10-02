@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend import draft, media, tasks
 from backend.cast import load_cast_references
 from backend.database import Base
-from backend.models import Character, CharacterReference, Job, Project, Scene, ScriptVersion, Shot, ShotImage
+from backend.models import Character, CharacterReference, Job, Project, Scene, ScriptVersion, Shot, ShotContinuityFrame, ShotImage, ShotTake
 from backend.settings import settings
 
 @pytest.fixture
@@ -58,6 +58,14 @@ def test_exact_cast_and_continuity(setup, monkeypatch, path, with_cast):
     assert [(r.character_name, r.data) for r in calls[0][1]] == (
         [('ELIAS', b'ELIAS'), ('MARA', b'MARA')] if with_cast else [])
     assert shot.image.filename == 'generated.png'
+    if with_cast:
+        assert shot.continuity_snapshot['character_ids'] == [elias.id, mara.id]
+        assert {item['name'] for item in shot.continuity_snapshot['characters']} == {'ELIAS', 'MARA'}
+        image_take = next(take for take in shot.takes if take.media_type == 'image')
+        assert image_take.settings['continuity_snapshot'] == shot.continuity_snapshot
+        assert {ref_id for item in shot.continuity_snapshot['characters'] for ref_id in item['reference_ids']} == {
+            character.references[0].id for character in (elias, mara)
+        }
 
 @pytest.mark.parametrize('path', ['draft', 'manual'])
 def test_missing_reference_blocks_generation(setup, monkeypatch, path):
@@ -100,3 +108,154 @@ def test_draft_resume_preserves_images(setup, monkeypatch):
     monkeypatch.setattr(media, 'generate_storyboard_image', unexpected)
     assert draft._generate_missing_images(db, project, job, [shot]) == []
     assert shot.image.filename == 'existing.png'
+
+
+def test_video_worker_uses_approved_image_and_its_saved_snapshot(setup, monkeypatch):
+    db, project, shot, _job, mara, _elias = setup
+    snapshot = {
+        'version': 1, 'character_ids': [mara.id],
+        'characters': [{'id': mara.id, 'name': 'MARA', 'reference_ids': [mara.references[0].id]}],
+        'scene': {'title': 'Kitchen', 'location': 'Kitchen', 'time_of_day': 'Night',
+                  'set_notes': 'Rain window', 'lighting_notes': 'Blue light',
+                  'wardrobe_notes': 'Green coat', 'props_notes': 'Red mug'},
+        'framing': 'Close-up', 'action': 'Mara looks up.', 'video_prompt': 'Slow push-in.',
+        'aspect_ratio': '16:9', 'image_prompt_base': 'MARA in the kitchen',
+        'effective_image_prompt': 'MARA in the kitchen with saved continuity',
+    }
+    image_path = settings.media_dir / 'approved.png'
+    image_path.write_bytes(b'approved frame')
+    shot.image = ShotImage(filename='approved.png', mime_type='image/png', source='generated', provider='test')
+    shot.continuity_snapshot = snapshot
+    shot.scene.wardrobe_notes = 'A changed current wardrobe'
+    shot.takes.append(ShotTake(
+        media_type='image', aspect_ratio='16:9', filename='approved.png', mime_type='image/png',
+        source='generated', provider='test', prompt=snapshot['effective_image_prompt'],
+        settings={'continuity_snapshot': snapshot}, selected=True,
+    ))
+    video_job = Job(project=project, kind='shot_clip', status='queued')
+    db.add(video_job)
+    db.commit()
+    called = {}
+
+    def render(image, prompt, duration, aspect, scene_id=None):
+        called.update(image=image, prompt=prompt, aspect=aspect)
+        (settings.media_dir / 'clip.mp4').write_bytes(b'clip')
+        return 'clip.mp4', 'video/mp4', 'flowkit'
+
+    monkeypatch.setattr(tasks, 'render_shot_clip', render)
+    monkeypatch.setattr(tasks.settings, 'video_provider', 'flowkit')
+    tasks._generate_shot_clip(shot.id, video_job.id)
+    assert called['image'] == image_path
+    assert 'exact opening frame and visual anchor' in called['prompt']
+    assert 'Wardrobe continuity: Green coat.' in called['prompt']
+    assert 'A changed current wardrobe' not in called['prompt']
+
+
+def test_video_worker_prefers_selected_continuity_frame(setup, monkeypatch):
+    db, project, shot, _job, _mara, _elias = setup
+    image_path = settings.media_dir / 'storyboard.png'
+    frame_path = settings.media_dir / 'continuity.png'
+    image_path.write_bytes(b'storyboard image')
+    frame_path.write_bytes(b'previous-shot frame')
+    shot.image = ShotImage(
+        filename='storyboard.png',
+        mime_type='image/png',
+        source='generated',
+        provider='test',
+    )
+    shot.continuity_frames.append(ShotContinuityFrame(
+        aspect_ratio='16:9',
+        filename='continuity.png',
+        mime_type='image/png',
+        source_shot_id='previous-shot',
+        source_shot_title='Doorway',
+        source_time_ms=2400,
+    ))
+    video_job = Job(project=project, kind='shot_clip', status='queued')
+    db.add(video_job)
+    db.commit()
+    called = {}
+
+    def render(image, prompt, duration, aspect, scene_id=None):
+        called.update(image=image, prompt=prompt)
+        (settings.media_dir / 'continuity-clip.mp4').write_bytes(b'clip')
+        return 'continuity-clip.mp4', 'video/mp4', 'flowkit'
+
+    monkeypatch.setattr(tasks, 'render_shot_clip', render)
+    monkeypatch.setattr(tasks.settings, 'video_provider', 'flowkit')
+    tasks._generate_shot_clip(shot.id, video_job.id)
+
+    assert called['image'] == frame_path
+    assert 'Continue directly from the selected frame of the previous shot' in called['prompt']
+    assert 'Preserve its background, set layout, lighting, props' in called['prompt']
+    clip_take = next(take for take in shot.takes if take.media_type == 'clip')
+    assert clip_take.settings['continuity_frame']['source_time_ms'] == 2400
+
+
+def test_draft_clip_uses_the_image_snapshot_for_video_prompt(setup, monkeypatch):
+    db, project, shot, job, mara, _elias = setup
+    snapshot = {
+        'version': 1, 'character_ids': [mara.id],
+        'characters': [{'id': mara.id, 'name': 'MARA', 'reference_ids': [mara.references[0].id]}],
+        'scene': {'title': 'Kitchen', 'location': 'Kitchen', 'time_of_day': 'Night',
+                  'set_notes': 'Rain window', 'lighting_notes': 'Blue light',
+                  'wardrobe_notes': 'Green coat', 'props_notes': 'Red mug'},
+        'framing': 'Close-up', 'action': 'Mara looks up.', 'video_prompt': 'Slow push-in.',
+        'aspect_ratio': '16:9', 'image_prompt_base': 'MARA in the kitchen',
+        'effective_image_prompt': 'MARA in the kitchen with saved continuity',
+    }
+    image_path = settings.media_dir / 'draft-approved.png'
+    image_path.write_bytes(b'approved frame')
+    shot.image = ShotImage(filename='draft-approved.png', mime_type='image/png', source='generated', provider='test')
+    shot.continuity_snapshot = snapshot
+    shot.scene.wardrobe_notes = 'Changed wardrobe'
+    shot.takes.append(ShotTake(
+        media_type='image', aspect_ratio='16:9', filename='draft-approved.png', mime_type='image/png',
+        source='generated', provider='test', prompt=snapshot['effective_image_prompt'],
+        settings={'continuity_snapshot': snapshot}, selected=True,
+    ))
+    db.commit()
+    called = {}
+
+    def render(image, prompt, duration, aspect):
+        called.update(image=image, prompt=prompt)
+        (settings.media_dir / 'draft-clip.mp4').write_bytes(b'clip')
+        return 'draft-clip.mp4', 'video/mp4', 'flowkit'
+
+    monkeypatch.setattr(draft, 'video_provider_status', lambda: ('flowkit', 'FlowKit', True, True, 'veo', 'ready'))
+    monkeypatch.setattr(draft, 'generate_shot_clip', render)
+    assert draft._generate_missing_clips(db, project, job, [shot]) == []
+    assert called['image'] == image_path
+    assert 'exact opening frame and visual anchor' in called['prompt']
+    assert 'Wardrobe continuity: Green coat.' in called['prompt']
+    assert 'Changed wardrobe' not in called['prompt']
+
+
+def test_draft_clip_prefers_selected_continuity_frame(setup, monkeypatch):
+    db, project, shot, job, _mara, _elias = setup
+    frame_path = settings.media_dir / 'draft-continuity.png'
+    frame_path.write_bytes(b'previous-shot frame')
+    shot.continuity_frames.append(ShotContinuityFrame(
+        aspect_ratio='16:9',
+        filename='draft-continuity.png',
+        mime_type='image/png',
+        source_shot_id='previous-shot',
+        source_shot_title='Doorway',
+        source_time_ms=3300,
+    ))
+    db.commit()
+    called = {}
+
+    def render(image, prompt, duration, aspect):
+        called.update(image=image, prompt=prompt)
+        (settings.media_dir / 'draft-continuity-clip.mp4').write_bytes(b'clip')
+        return 'draft-continuity-clip.mp4', 'video/mp4', 'flowkit'
+
+    monkeypatch.setattr(draft, 'video_provider_status', lambda: ('flowkit', 'FlowKit', True, True, 'veo', 'ready'))
+    monkeypatch.setattr(draft, 'generate_shot_clip', render)
+    assert draft._generate_missing_clips(db, project, job, [shot]) == []
+
+    assert called['image'] == frame_path
+    assert 'Continue directly from the selected frame of the previous shot' in called['prompt']
+    clip_take = next(take for take in shot.takes if take.media_type == 'clip')
+    assert clip_take.settings['continuity_frame']['source_shot_title'] == 'Doorway'

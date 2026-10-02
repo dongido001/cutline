@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ProjectCreate(BaseModel):
@@ -67,6 +67,38 @@ class ShotClipRead(ShotImageRead):
     pass
 
 
+class ShotContinuityFrameRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    aspect_ratio: Literal["16:9", "9:16"]
+    url: str
+    mime_type: str
+    source_shot_id: str
+    source_shot_title: str
+    source_time_ms: int
+    created_at: datetime
+
+
+class ShotImageReferenceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    aspect_ratio: Literal["16:9", "9:16"]
+    filename: str
+    url: str
+    mime_type: str
+    source_shot_id: str
+    source_shot_title: str
+    source_media_id: str
+    source_media_kind: str
+    source_media_type: Literal["image", "clip"]
+    source_aspect_ratio: str
+    source_time_ms: int | None
+    mode: Literal["visual_continuity"]
+    created_at: datetime
+
+
 class ShotTakeRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -81,6 +113,21 @@ class ShotTakeRead(BaseModel):
     settings: dict[str, Any] = {}
     selected: bool
     created_at: datetime
+
+
+class CharacterContinuityStatus(BaseModel):
+    character_id: str
+    name: str
+    has_reference: bool
+    reference_ids: list[str] = []
+
+
+class ShotContinuityStatus(BaseModel):
+    snapshot: dict[str, Any] | None = None
+    characters: list[CharacterContinuityStatus] = []
+    missing_character_references: list[str] = []
+    missing_fields: list[str] = []
+    ready: bool = True
 
 
 class ShotRead(BaseModel):
@@ -100,6 +147,8 @@ class ShotRead(BaseModel):
     video_prompt: str
     title_card_text: str
     character_ids: list[str] = []
+    continuity_snapshot: dict[str, Any] | None = None
+    continuity: ShotContinuityStatus = Field(default_factory=ShotContinuityStatus)
     status: str
     selected_image_take_id: str | None = None
     selected_clip_take_id: str | None = None
@@ -110,15 +159,49 @@ class ShotRead(BaseModel):
     clip: ShotClipRead | None = None
     media_variants: list[ShotMediaVariantRead] = []
     takes: list[ShotTakeRead] = []
+    continuity_frames: list[ShotContinuityFrameRead] = []
+    image_references: list[ShotImageReferenceRead] = []
+
+
+class ShotCreate(BaseModel):
+    title: str = Field(default="", max_length=200)
+    action: str = Field(default="", max_length=10000)
+    dialogue: list[dict[str, Any]] = Field(default_factory=list)
+    sound: str = Field(default="", max_length=1000)
+    duration_ms: int = Field(default=5000, ge=1000, le=30000)
+
+    @field_validator("duration_ms", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: Any) -> Any:
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
+    framing: str = Field(default="Medium", min_length=1, max_length=200)
+    image_prompt: str = Field(default="", max_length=8000)
+    video_prompt: str = Field(default="", max_length=8000)
+    title_card_text: str = Field(default="", max_length=500)
+    character_ids: list[str] = Field(default_factory=list)
+    insert_after_shot_id: str | None = None
 
 
 class ShotUpdate(BaseModel):
-    framing: str = Field(min_length=1, max_length=80)
+    framing: str = Field(min_length=1, max_length=200)
     duration_ms: int = Field(ge=1000, le=30000)
+
+    @field_validator("duration_ms", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: Any) -> Any:
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
     image_prompt: str = Field(min_length=1, max_length=8000)
     video_prompt: str = Field(default="", max_length=8000)
     title_card_text: str = Field(default="", max_length=500)
     character_ids: list[str] | None = None
+    dialogue: list[dict[str, Any]] | None = None
+    title: str | None = None
+    action: str | None = None
+    sound: str | None = None
 
 
 class SceneUpdate(BaseModel):
@@ -196,12 +279,49 @@ class CharacterReferenceRead(BaseModel):
     created_at: datetime
 
 
+class VoicePresetRead(BaseModel):
+    id: str
+    provider: str
+    name: str
+    gender: Literal["female", "male", "neutral"] = "neutral"
+    language: str = "en"
+    description: str = ""
+    preview_url: str | None = None
+
+
+class VoiceProviderInfo(BaseModel):
+    id: str
+    label: str
+    configured: bool
+    available: bool
+    detail: str
+    voices: list[VoicePresetRead] = []
+
+
+class VoiceAuditionRequest(BaseModel):
+    provider: str = "vibevoice"
+    voice_id: str
+    text: str = Field(min_length=1, max_length=500)
+    character_id: str | None = None
+    settings: dict[str, Any] = {}
+
+
+class VoiceAuditionResponse(BaseModel):
+    url: str
+    provider: str
+    voice_id: str
+    duration_ms: int
+
+
 class CharacterRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
     notes: str
+    voice_provider: str = "vibevoice"
+    voice_id: str | None = None
+    voice_settings: dict[str, Any] = {}
     created_at: datetime
     references: list[CharacterReferenceRead] = []
 
@@ -209,15 +329,104 @@ class CharacterRead(BaseModel):
 class CharacterCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     notes: str = Field(default="", max_length=2000)
+    voice_provider: str = "vibevoice"
+    voice_id: str | None = None
+    voice_settings: dict[str, Any] = {}
 
 
 class CharacterUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     notes: str | None = Field(default=None, max_length=2000)
+    voice_provider: str | None = Field(default=None, max_length=40)
+    voice_id: str | None = Field(default=None, max_length=120)
+    voice_settings: dict[str, Any] | None = None
 
 
 class ShotImageGenerateRequest(BaseModel):
-    character_ids: list[str] = []
+    character_ids: list[str] | None = None
+    refresh_continuity: bool = False
+    image_reference_id: str | None = Field(default=None, min_length=1)
+    aspect_ratio: str | None = None
+
+
+class PublishProviderStatus(BaseModel):
+    id: Literal["youtube", "facebook"]
+    label: str
+    configured: bool
+    available: bool
+    detail: str
+    privacy_options: list[str]
+
+
+class PublishAssetRead(BaseModel):
+    id: str
+    scope: Literal["final", "scene", "shot"]
+    label: str
+    source_ref: str | None = None
+    variant: Literal["landscape", "shorts"]
+    aspect_ratio: str
+    duration_ms: int
+    ready: bool
+    missing_count: int = 0
+    url: str | None = None
+
+
+class PublishPlanRead(BaseModel):
+    variant: Literal["landscape", "shorts"]
+    aspect_ratio: str
+    providers: list[PublishProviderStatus]
+    final: list[PublishAssetRead] = []
+    scenes: list[PublishAssetRead] = []
+    shots: list[PublishAssetRead] = []
+
+
+class PublishCreate(BaseModel):
+    platforms: list[Literal["youtube", "facebook"]]
+    scope: Literal["final", "scenes", "shots"] = "final"
+    variant: Literal["landscape", "shorts"] = "landscape"
+    title: str = Field(min_length=1, max_length=180)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = []
+    privacy: dict[Literal["youtube", "facebook"], str] = {}
+    selected_asset_ids: list[str] = []
+    scheduled_at: str | None = None
+    schedule_interval_hours: float | None = None
+    made_for_kids: bool = False
+    platform_options: dict[str, dict[str, Any]] = {}
+
+    @field_validator("tags", mode="after")
+    @classmethod
+    def clean_tags(cls, value: list[str]) -> list[str]:
+        cleaned = []
+        for item in value:
+            tag = str(item).strip().lstrip("#")
+            if tag and tag not in cleaned:
+                cleaned.append(tag[:60])
+        return cleaned[:20]
+
+
+class PublishRecordRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    job_id: str | None = None
+    scope: str
+    variant: str
+    platforms: list[str]
+    title: str
+    description: str
+    tags: list[str]
+    privacy: dict[str, Any]
+    selected_asset_ids: list[str]
+    scheduled_at: str | None = None
+    schedule_interval_hours: float | None = None
+    made_for_kids: bool
+    options: dict[str, Any]
+    status: str
+    results: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
 
 
 class ProjectDetail(ProjectSummary):
@@ -225,6 +434,7 @@ class ProjectDetail(ProjectSummary):
     final_cut: ProjectFinalCutRead | None = None
     variant_exports: list[ProjectVariantExportRead] = []
     characters: list[CharacterRead] = []
+    publishes: list[PublishRecordRead] = []
 
 
 class TimelineSource(BaseModel):
@@ -251,7 +461,17 @@ class TimelinePrimaryItem(BaseModel):
     source_in_ms: int = Field(default=0, ge=0)
     source_out_ms: int | None = Field(default=None, ge=1)
     text: str = Field(default="", max_length=1000)
+    mute_audio: bool = False
     variant: dict[str, TimelineVariantGeometry] = {}
+
+    @field_validator("duration_ms", "source_in_ms", "source_out_ms", mode="before")
+    @classmethod
+    def _coerce_primary_ms(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
 
 
 class TimelineImageOverlay(BaseModel):
@@ -262,12 +482,30 @@ class TimelineImageOverlay(BaseModel):
     opacity: float = Field(default=1, ge=0, le=1)
     variant: dict[str, TimelineVariantGeometry] = {}
 
+    @field_validator("start_ms", "duration_ms", mode="before")
+    @classmethod
+    def _coerce_overlay_ms(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
+
 
 class TimelineTextOverlay(BaseModel):
     id: str
     text: str = Field(min_length=1, max_length=1000)
     start_ms: int = Field(ge=0)
     duration_ms: int = Field(ge=100, le=300_000)
+
+    @field_validator("start_ms", "duration_ms", mode="before")
+    @classmethod
+    def _coerce_text_ms(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
     presentation: Literal["overlay", "full-frame"] = "overlay"
     size: Literal["small", "medium", "large"] = "medium"
     color: Literal["white", "black"] = "white"
@@ -332,6 +570,18 @@ class JobRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def ensure_utc(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
+
+
+class JobQueueItemRead(JobRead):
+    project_title: str | None = None
+    elapsed_seconds: float | None = None
+
 
 class SuggestionDecision(BaseModel):
     decision: Literal["accepted", "rejected"]
@@ -351,6 +601,7 @@ class ProviderStatus(BaseModel):
 
 
 class ImageProviderStatus(ProviderStatus):
+    supports_image_references: bool = False
     priority: int
     image_generation: bool
     connected: bool = False

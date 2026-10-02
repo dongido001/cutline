@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+import html as html_lib
+import json
 from contextlib import asynccontextmanager
 from copy import deepcopy
 
@@ -5,11 +8,12 @@ import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from .cast import sync_project_cast
+from .cast import is_usable_reference_image, sync_project_cast
+from .continuity import get_or_create_shot_snapshot
 from .database import Base, engine, get_db
 from .final_cut import invalidate_final_cut
 from .media import delete_media_file, image_provider_statuses
@@ -18,13 +22,18 @@ from .video import video_provider_status
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
-from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset
+from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
 from .schemas import (
     CharacterCreate,
     CharacterRead,
     CharacterUpdate,
+    VoiceAuditionRequest,
+    VoiceAuditionResponse,
+    VoiceProviderInfo,
+    VoicePresetRead,
     CreateDraftRequest,
     JobRead,
+    JobQueueItemRead,
     ImageProviderStatus,
     ProjectTimelineRead,
     ProjectApproval,
@@ -33,9 +42,13 @@ from .schemas import (
     ProjectDetail,
     ProjectSummary,
     ProviderStatus,
+    PublishCreate,
+    PublishPlanRead,
+    PublishRecordRead,
     SceneRead,
     SceneUpdate,
     ShotImageGenerateRequest,
+    ShotCreate,
     ShotRead,
     ShotUpdate,
     SuggestionDecision,
@@ -45,6 +58,13 @@ from .schemas import (
     TimelineUpdate,
 )
 from .settings import settings
+from .publishing import build_publish_plan, provider_statuses as publish_provider_statuses, validate_publish_request
+from .oauth import (
+    youtube_auth_url, facebook_auth_url,
+    handle_youtube_callback, handle_facebook_callback,
+    disconnect_platform, all_token_statuses, token_status as oauth_token_status,
+)
+from .image_references import earlier_shots, media_sources, reference_snapshot, release_reference_asset, snapshot_filenames, validate_reference_bytes
 from .jobs import mark_job_cancelled, revoke_job_task
 from .tasks import (
     enqueue_cast_reference,
@@ -52,7 +72,9 @@ from .tasks import (
     enqueue_script_analysis,
     enqueue_script_continuation,
     enqueue_shot_clip,
+    enqueue_shot_lipsync,
     enqueue_shot_image,
+    enqueue_publish_project,
 )
 from .timeline import append_missing_shots, ensure_timeline, initial_document, promote_available_clips, validate_timeline
 
@@ -280,6 +302,12 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail
             selectinload(ScriptVersion.scenes)
             .selectinload(Scene.shots)
             .selectinload(Shot.takes),
+            selectinload(ScriptVersion.scenes)
+            .selectinload(Scene.shots)
+            .selectinload(Shot.image_references),
+            selectinload(ScriptVersion.scenes)
+            .selectinload(Scene.shots)
+            .selectinload(Shot.continuity_frames),
             selectinload(ScriptVersion.suggestions),
         )
         .order_by(ScriptVersion.version_number.desc())
@@ -301,6 +329,11 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail
         }
         for export in project.variant_exports
     ]
+    data["publishes"] = db.scalars(
+        select(PublishRecord)
+        .where(PublishRecord.project_id == project.id)
+        .order_by(PublishRecord.created_at.desc())
+    ).all()
     characters = db.scalars(
         select(Character)
         .where(Character.project_id == project_id)
@@ -339,6 +372,14 @@ def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
         for media in (shot.image, shot.clip, *shot.media_variants)
         if media
     }
+    for version in versions:
+        for scene in version.scenes:
+            for shot in scene.shots:
+                filenames.update(ref.filename for ref in shot.image_references)
+                for take in shot.takes:
+                    filenames.update(snapshot_filenames(take.settings))
+    for attempts in db.scalars(select(Job.attempts).where(Job.project_id == project.id)):
+        filenames.update(snapshot_filenames(attempts))
     if project.final_cut:
         filenames.add(project.final_cut.filename)
     filenames.update(item.filename for item in project.variant_exports)
@@ -388,6 +429,458 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
     return JobRead.model_validate(job)
 
 
+@app.get("/api/jobs", response_model=list[JobQueueItemRead])
+def list_all_jobs(
+    status: str | None = None,
+    kind: str | None = None,
+    limit: int = 80,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    query = select(Job).order_by(Job.created_at.desc())
+    if status:
+        if status == "active":
+            query = query.where(Job.status.in_(["queued", "running"]))
+        else:
+            query = query.where(Job.status == status)
+    if kind:
+        query = query.where(Job.kind == kind)
+    query = query.limit(min(limit, 300)).offset(offset)
+    jobs = list(db.scalars(query).all())
+
+    project_ids = {j.project_id for j in jobs if j.project_id}
+    projects = {p.id: p.title for p in db.scalars(select(Project).where(Project.id.in_(project_ids))).all()} if project_ids else {}
+
+    results = []
+    now_ts = now().timestamp()
+    for job in jobs:
+        queue_pos = None
+        if job.status == "queued":
+            pending_ids = list(db.scalars(
+                select(Job.id).where(Job.status == "queued", Job.created_at <= job.created_at)
+            ).all())
+            queue_pos = len(pending_ids)
+        def _to_utc(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        data = JobRead.model_validate(job).model_dump(mode="json")
+        data["project_title"] = projects.get(job.project_id, "Untitled project")
+        created_dt = _to_utc(job.created_at)
+        updated_dt = _to_utc(job.updated_at)
+        created_ts = created_dt.timestamp() if created_dt else now_ts
+        updated_ts = updated_dt.timestamp() if updated_dt else now_ts
+        data["elapsed_seconds"] = max(0.0, round((updated_ts if job.status in {"completed", "failed", "cancelled"} else now_ts) - created_ts, 1))
+        data["queue_position"] = queue_pos
+        results.append(data)
+    return results
+
+
+@app.get("/api/system/queues")
+def system_queue_status(db: Session = Depends(get_db)) -> dict:
+    from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
+    queues = [
+        {"id": "image", "name": "Image Worker", "pending": image_huey.pending_count(), "scheduled": image_huey.scheduled_count(), "status": "active"},
+        {"id": "video", "name": "Video Worker", "pending": video_huey.pending_count(), "scheduled": video_huey.scheduled_count(), "status": "active"},
+        {"id": "chatgpt", "name": "ChatGPT Bridge", "pending": chatgpt_huey.pending_count(), "scheduled": chatgpt_huey.scheduled_count(), "status": "active"},
+        {"id": "gemini", "name": "Gemini Bridge", "pending": gemini_huey.pending_count(), "scheduled": gemini_huey.scheduled_count(), "status": "active"},
+        {"id": "general", "name": "General Worker", "pending": general_huey.pending_count(), "scheduled": general_huey.scheduled_count(), "status": "active"},
+    ]
+    active_count = db.scalar(select(func.count(Job.id)).where(Job.status.in_(["queued", "running"]))) or 0
+    failed_count = db.scalar(select(func.count(Job.id)).where(Job.status == "failed")) or 0
+    completed_count = db.scalar(select(func.count(Job.id)).where(Job.status == "completed")) or 0
+    total_count = db.scalar(select(func.count(Job.id))) or 0
+
+    bridges = []
+    # ChatGPT Web Bridge
+    chatgpt_ok = False
+    chatgpt_detail = "Offline"
+    try:
+        chatgpt_host = settings.chatgpt_web_base_url.replace('/v1', '').rstrip('/')
+        res = httpx.get(f"{chatgpt_host}/health", timeout=1.5)
+        if res.is_success:
+            chatgpt_ok = True
+            chatgpt_detail = f"Online · {settings.chatgpt_web_model}"
+    except Exception:
+        pass
+    bridges.append({"id": "chatgpt_web", "name": "ChatGPT Web Bridge", "url": settings.chatgpt_web_base_url, "available": chatgpt_ok, "detail": chatgpt_detail})
+
+    # Gemini Web Bridge
+    gemini_ok = False
+    gemini_detail = "Offline"
+    try:
+        gemini_host = settings.gemini_web_base_url.replace('/openai/v1', '').replace('/v1', '').rstrip('/')
+        res = httpx.get(f"{gemini_host}/health", timeout=1.5)
+        if res.is_success:
+            gemini_ok = True
+            gemini_detail = f"Online · {settings.gemini_web_model}"
+    except Exception:
+        pass
+    bridges.append({"id": "gemini_web", "name": "Gemini Web Bridge", "url": settings.gemini_web_base_url, "available": gemini_ok, "detail": gemini_detail})
+
+    # Video Flowkit Bridge
+    video_ok = False
+    video_detail = "Offline"
+    try:
+        res = httpx.get(f"{settings.flowkit_base_url.rstrip('/')}/health", timeout=1.5)
+        if res.is_success:
+            video_ok = True
+            video_detail = "Online"
+    except Exception:
+        pass
+    bridges.append({"id": "video_provider", "name": "Video Generation Service", "url": settings.flowkit_base_url, "available": video_ok, "detail": video_detail})
+
+    return {
+        "queues": queues,
+        "active_jobs": active_count,
+        "failed_jobs": failed_count,
+        "completed_jobs": completed_count,
+        "total_jobs": total_count,
+        "bridges": bridges,
+    }
+
+
+@app.post("/api/jobs/{job_id}/retry", response_model=JobRead)
+def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Only failed or cancelled jobs can be retried")
+
+    task = None
+    if job.kind == "shot_image":
+        shot_id = job.attempts[0].get("shot_id") if job.attempts else None
+        aspect_ratio = job.attempts[0].get("aspect_ratio") if job.attempts else "16:9"
+        char_ids = job.attempts[0].get("character_ids") if job.attempts else None
+        if not shot_id:
+            raise HTTPException(status_code=400, detail="Cannot retry: missing shot information")
+        task = enqueue_shot_image(shot_id, job.id, aspect_ratio, character_ids=char_ids)
+    elif job.kind == "shot_clip":
+        shot_id = job.attempts[0].get("shot_id") if job.attempts else None
+        aspect_ratio = job.attempts[0].get("aspect_ratio") if job.attempts else "16:9"
+        if not shot_id:
+            raise HTTPException(status_code=400, detail="Cannot retry: missing shot information")
+        task = enqueue_shot_clip(shot_id, job.id, aspect_ratio)
+    elif job.kind == "create_draft":
+        variant = job.attempts[0].get("variant", "landscape") if job.attempts else "landscape"
+        task = enqueue_create_draft(job.project_id, job.id, variant, retry_failed_only=True)
+    elif job.kind == "final_cut" or job.kind.startswith("final_cut:"):
+        variant = job.attempts[0].get("variant") if job.attempts else None
+        if not variant and ":" in job.kind:
+            variant = job.kind.split(":", 1)[1]
+        variant = variant or "landscape"
+        task = enqueue_final_cut(job.project_id, job.id, variant)
+    elif job.kind == "shot_lipsync":
+        shot_id = job.attempts[0].get("shot_id") if job.attempts else None
+        aspect_ratio = job.attempts[0].get("aspect_ratio") if job.attempts else None
+        if not shot_id:
+            raise HTTPException(status_code=400, detail="Cannot retry: missing shot information")
+        task = enqueue_shot_lipsync(shot_id, job.id, aspect_ratio)
+    elif job.kind == "cast_reference":
+        char_id = job.attempts[0].get("character_id") if job.attempts else None
+        if not char_id:
+            raise HTTPException(status_code=400, detail="Cannot retry: missing character information")
+        task = enqueue_cast_reference(char_id, job.id)
+    elif job.kind == "publish":
+        publish_record_id = job.attempts[0].get("publish_record_id") if job.attempts else None
+        if not publish_record_id:
+            rec = db.scalar(select(PublishRecord).where(PublishRecord.job_id == job.id))
+            publish_record_id = rec.id if rec else None
+        if not publish_record_id:
+            raise HTTPException(status_code=400, detail="Cannot retry: missing publish record")
+        task = enqueue_publish_project(job.project_id, job.id, publish_record_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"Retry is not supported for job kind '{job.kind}'")
+
+    job.status = "queued"
+    job.progress = 0.0
+    job.message = "Queued for retry"
+    job.error = None
+    job.task_id = task.id if task else job.task_id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.post("/api/jobs/cancel-all")
+def cancel_all_active_jobs(db: Session = Depends(get_db)) -> dict:
+    active_jobs = list(db.scalars(select(Job).where(Job.status.in_(["queued", "running"]))).all())
+    count = 0
+    for job in active_jobs:
+        mark_job_cancelled(job)
+        revoke_job_task(job)
+        count += 1
+    db.commit()
+    return {"cancelled": count}
+
+
+@app.delete("/api/jobs/cleanup")
+def cleanup_finished_jobs(
+    status_filter: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    if status_filter == "completed":
+        statuses = ["completed"]
+    elif status_filter == "failed":
+        statuses = ["failed"]
+    elif status_filter == "cancelled":
+        statuses = ["cancelled"]
+    else:
+        statuses = ["completed", "cancelled"]
+    deleted = db.execute(delete(Job).where(Job.status.in_(statuses))).rowcount
+    db.commit()
+    return {"deleted": deleted}
+
+
+@app.delete("/api/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_single_job(job_id: str, db: Session = Depends(get_db)) -> None:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in {"running", "queued"}:
+        revoke_job_task(job)
+    db.delete(job)
+    db.commit()
+
+
+@app.post("/api/system/queues/{queue_name}/flush")
+def flush_queue(queue_name: str, db: Session = Depends(get_db)) -> dict:
+    from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
+    queue_map = {
+        "image": image_huey,
+        "video": video_huey,
+        "chatgpt": chatgpt_huey,
+        "gemini": gemini_huey,
+        "general": general_huey,
+    }
+    target = queue_map.get(queue_name)
+    if not target:
+        raise HTTPException(status_code=404, detail="Queue not found")
+    target.flush()
+
+    # Cancel phantom/orphaned jobs in DB corresponding to this queue
+    kind_map = {
+        "image": ["shot_image", "cast_reference"],
+        "video": ["shot_clip", "shot_lipsync", "final_cut"],
+        "chatgpt": ["create_draft"],
+        "gemini": ["create_draft"],
+        "general": ["create_draft", "export"],
+    }
+    kinds = kind_map.get(queue_name, [])
+    queued_jobs = list(db.scalars(
+        select(Job).where(Job.status == "queued")
+    ).all())
+    cancelled_count = 0
+    for job in queued_jobs:
+        if not kinds or any(job.kind == k or job.kind.startswith(f"{k}:") for k in kinds):
+            job.status = "cancelled"
+            job.message = f"Cancelled: queue '{queue_name}' was flushed"
+            cancelled_count += 1
+    db.commit()
+
+    return {"status": "ok", "message": f"Queue {queue_name} flushed ({cancelled_count} queued jobs cancelled)"}
+
+
+@app.get("/api/system/services")
+def get_system_services() -> list[dict]:
+    from .services_manager import list_services
+    return list_services()
+
+
+@app.post("/api/system/services/{service_id}/start")
+def start_system_service(service_id: str) -> dict:
+    from .services_manager import get_service
+    svc = get_service(service_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail="Service not found")
+    result = svc.start()
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to start service"))
+    return result
+
+
+@app.post("/api/system/services/{service_id}/stop")
+def stop_system_service(service_id: str) -> dict:
+    from .services_manager import get_service
+    svc = get_service(service_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return svc.stop()
+
+
+@app.post("/api/system/services/{service_id}/restart")
+def restart_system_service(service_id: str) -> dict:
+    from .services_manager import get_service
+    svc = get_service(service_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail="Service not found")
+    result = svc.restart()
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to restart service"))
+    return result
+
+
+@app.get("/api/system/services/{service_id}/logs")
+def get_system_service_logs(service_id: str, lines: int = 80) -> dict:
+    from .services_manager import get_service
+    svc = get_service(service_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"id": service_id, "logs": svc.get_logs(lines=lines)}
+
+
+@app.post("/api/scenes/{scene_id}/shots", response_model=ShotRead, status_code=status.HTTP_201_CREATED)
+def create_shot(
+    scene_id: str,
+    payload: ShotCreate,
+    db: Session = Depends(get_db),
+) -> Shot:
+    scene = db.get(Scene, scene_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+
+    project = scene.script_version.project
+    existing_shots = sorted(scene.shots, key=lambda s: s.order_index)
+
+    insert_idx = len(existing_shots)
+    if payload.insert_after_shot_id:
+        match_idx = next(
+            (i for i, s in enumerate(existing_shots) if s.id == payload.insert_after_shot_id),
+            None,
+        )
+        if match_idx is not None:
+            insert_idx = match_idx + 1
+
+    for s in existing_shots[insert_idx:]:
+        s.order_index += 1
+
+    title = payload.title.strip() if payload.title else f"Shot {insert_idx + 1}"
+    image_prompt = payload.image_prompt.strip()
+    if not image_prompt:
+        if payload.action.strip():
+            image_prompt = f"{scene.title}. {payload.action.strip()}"
+        else:
+            image_prompt = f"{scene.title}, {title}, cinematic lighting, photorealistic, 8k"
+
+    normalized_dialogue = []
+    for item in payload.dialogue:
+        if isinstance(item, dict):
+            char = str(item.get("character") or item.get("speaker") or "Character").strip() or "Character"
+            txt = str(item.get("text") or item.get("line") or item.get("dialogue") or "").strip()
+            if txt:
+                normalized_dialogue.append({
+                    "character": char,
+                    "speaker": char,
+                    "text": txt,
+                    "line": txt,
+                })
+
+    new_shot = Shot(
+        scene_id=scene.id,
+        order_index=insert_idx,
+        title=title,
+        action=payload.action.strip(),
+        dialogue=normalized_dialogue,
+        sound=payload.sound.strip(),
+        duration_ms=payload.duration_ms,
+        framing=payload.framing,
+        image_prompt=image_prompt,
+        video_prompt=payload.video_prompt.strip(),
+        title_card_text=payload.title_card_text.strip(),
+        character_ids=list(dict.fromkeys(payload.character_ids)),
+        status="planned",
+    )
+    db.add(new_shot)
+    db.flush()
+
+    scene_shots = db.scalars(
+        select(Shot).where(Shot.scene_id == scene.id).order_by(Shot.order_index)
+    ).all()
+    for idx, s in enumerate(scene_shots):
+        s.order_index = idx
+
+    if project.timeline:
+        try:
+            append_missing_shots(project, db)
+        except Exception:
+            pass
+
+    invalidate_final_cut(project, db)
+    db.commit()
+    db.refresh(new_shot)
+    return new_shot
+
+
+@app.delete("/api/shots/{shot_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_shot(shot_id: str, db: Session = Depends(get_db)) -> None:
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    scene = shot.scene
+    project = scene.script_version.project
+
+    files_to_delete: list[str] = []
+    if shot.image and shot.image.filename:
+        files_to_delete.append(shot.image.filename)
+    if shot.clip and shot.clip.filename:
+        files_to_delete.append(shot.clip.filename)
+    if shot.dialogue_audio_filename:
+        files_to_delete.append(shot.dialogue_audio_filename)
+    for variant in shot.media_variants:
+        if variant.filename:
+            files_to_delete.append(variant.filename)
+    for take in shot.takes:
+        if take.filename:
+            files_to_delete.append(take.filename)
+    for frame in shot.continuity_frames:
+        if frame.filename:
+            files_to_delete.append(frame.filename)
+
+    if project.timeline:
+        for doc_attr in ("document", "shorts_document"):
+            raw_doc = getattr(project.timeline, doc_attr)
+            if not raw_doc:
+                continue
+            document = TimelineDocument.model_validate(raw_doc)
+            orig_primary_len = len(document.primary)
+            orig_image_overlay_len = len(document.image_overlays)
+            document.primary = [
+                item for item in document.primary
+                if not (item.source and item.source.ref_id == shot_id)
+            ]
+            document.image_overlays = [
+                overlay for overlay in document.image_overlays
+                if not (overlay.source and overlay.source.ref_id == shot_id)
+            ]
+            if (
+                len(document.primary) != orig_primary_len
+                or len(document.image_overlays) != orig_image_overlay_len
+            ):
+                setattr(project.timeline, doc_attr, document.model_dump(mode="json"))
+                project.timeline.revision += 1
+
+    invalidate_final_cut(project, db)
+    scene_id = scene.id
+    db.delete(shot)
+    db.flush()
+
+    remaining_shots = db.scalars(
+        select(Shot).where(Shot.scene_id == scene_id).order_by(Shot.order_index)
+    ).all()
+    for idx, s in enumerate(remaining_shots):
+        s.order_index = idx
+
+    db.commit()
+
+    for fname in files_to_delete:
+        delete_media_file(fname)
+
+
 @app.patch("/api/shots/{shot_id}", response_model=ShotRead)
 def update_shot(
     shot_id: str, payload: ShotUpdate, db: Session = Depends(get_db)
@@ -400,6 +893,12 @@ def update_shot(
         invalidated_filename = invalidate_final_cut(
             shot.scene.script_version.project, db
         )
+    if payload.title is not None:
+        shot.title = payload.title.strip()
+    if payload.action is not None:
+        shot.action = payload.action.strip()
+    if payload.sound is not None:
+        shot.sound = payload.sound.strip()
     shot.framing = payload.framing
     shot.duration_ms = payload.duration_ms
     shot.image_prompt = payload.image_prompt
@@ -418,6 +917,20 @@ def update_shot(
             if len(characters) != len(requested):
                 raise HTTPException(status_code=404, detail="One or more cast characters were not found")
         shot.character_ids = requested
+    if payload.dialogue is not None:
+        normalized_dialogue = []
+        for item in payload.dialogue:
+            if isinstance(item, dict):
+                char = str(item.get("character") or item.get("speaker") or "Character").strip() or "Character"
+                txt = str(item.get("text") or item.get("line") or item.get("dialogue") or "").strip()
+                if txt:
+                    normalized_dialogue.append({
+                        "character": char,
+                        "speaker": char,
+                        "text": txt,
+                        "line": txt,
+                    })
+        shot.dialogue = normalized_dialogue
     db.commit()
     db.refresh(shot)
     delete_media_file(invalidated_filename)
@@ -447,28 +960,44 @@ def queue_shot_image(
         raise HTTPException(
             status_code=409, detail="Add an image prompt before generating"
         )
-    character_ids = list(dict.fromkeys(payload.character_ids or shot.character_ids or []))
-    if character_ids:
-        characters = db.scalars(
-            select(Character)
-            .where(
-                Character.project_id == project.id,
-                Character.id.in_(character_ids),
-            )
-            .options(selectinload(Character.references))
-        ).all()
-        if len(characters) != len(character_ids):
-            raise HTTPException(status_code=404, detail="One or more cast characters were not found")
-        missing_refs = [character.name for character in characters if not character.references]
-        if missing_refs:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Add a reference image for: {', '.join(missing_refs)}",
-            )
-    shot.character_ids = character_ids
-    target_aspect = aspect_ratio or project.aspect_ratio
+    target_aspect = payload.aspect_ratio or aspect_ratio or project.aspect_ratio
     if target_aspect not in {"16:9", "9:16"}:
         raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+    requested_ids = (
+        list(dict.fromkeys(payload.character_ids))
+        if payload.character_ids is not None
+        else None
+    )
+    if requested_ids is not None:
+        valid_ids = set(db.scalars(
+            select(Character.id).where(
+                Character.project_id == project.id,
+                Character.id.in_(requested_ids),
+            )
+        ).all()) if requested_ids else set()
+        if len(valid_ids) != len(requested_ids):
+            raise HTTPException(status_code=404, detail="One or more cast characters were not found")
+    image_reference_id = payload.image_reference_id
+    if image_reference_id is not None:
+        image_reference = reference_snapshot(shot, target_aspect, image_reference_id)
+        if image_reference is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Selected image reference is no longer available for this aspect ratio",
+            )
+    else:
+        image_reference = None
+    try:
+        snapshot = get_or_create_shot_snapshot(
+            db, project, shot, target_aspect,
+            refresh=payload.refresh_continuity,
+            character_ids=requested_ids,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        code = 404 if "not found in this project" in message else 409
+        raise HTTPException(status_code=code, detail=message) from exc
+    character_ids = list(snapshot.get("character_ids") or [])
     job = Job(
         project_id=project.id,
         kind="shot_image",
@@ -478,6 +1007,9 @@ def queue_shot_image(
                 "shot_id": shot.id,
                 "aspect_ratio": target_aspect,
                 "character_ids": character_ids,
+                "continuity_snapshot": snapshot,
+                "image_reference_id": image_reference_id,
+                "image_reference": image_reference,
             }
         ],
     )
@@ -558,7 +1090,14 @@ def create_character(
     )
     if existing:
         raise HTTPException(status_code=409, detail="A character with that name already exists")
-    character = Character(project_id=project_id, name=name, notes=payload.notes.strip())
+    character = Character(
+        project_id=project_id,
+        name=name,
+        notes=payload.notes.strip(),
+        voice_provider=payload.voice_provider or "vibevoice",
+        voice_id=payload.voice_id,
+        voice_settings=payload.voice_settings or {},
+    )
     db.add(character)
     db.commit()
     db.refresh(character)
@@ -594,9 +1133,71 @@ def update_character(
         character.name = name
     if payload.notes is not None:
         character.notes = payload.notes.strip()
+    if payload.voice_provider is not None:
+        character.voice_provider = payload.voice_provider.strip()
+    if payload.voice_id is not None:
+        character.voice_id = payload.voice_id.strip() if payload.voice_id else None
+    if payload.voice_settings is not None:
+        character.voice_settings = payload.voice_settings
     db.commit()
     db.refresh(character)
     return character
+
+
+@app.get("/api/voices", response_model=list[VoiceProviderInfo])
+def get_voices() -> list[VoiceProviderInfo]:
+    from .voice_service import list_voice_providers
+    return list_voice_providers()
+
+
+@app.get("/api/voices/vibevoice/{voice_id}/sample")
+def get_vibevoice_sample(voice_id: str):
+    from fastapi.responses import FileResponse
+    from .voice_service import get_vibevoice_sample_path
+    path = get_vibevoice_sample_path(voice_id)
+    if not path or not path.is_file():
+        raise HTTPException(status_code=404, detail="Voice sample not found")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/voices/audition", response_model=VoiceAuditionResponse)
+def audition_voice(payload: VoiceAuditionRequest) -> VoiceAuditionResponse:
+    from .voice_service import synthesize_audition
+    try:
+        return synthesize_audition(
+            provider=payload.provider,
+            voice_id=payload.voice_id,
+            text=payload.text,
+            settings_dict=payload.settings,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/voices/custom", response_model=VoicePresetRead)
+async def upload_custom_voice(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    gender: str = Form("male"),
+    language: str = Form("en-NG"),
+    description: str = Form(""),
+) -> VoicePresetRead:
+    from .voice_service import save_custom_voice
+    if not name.strip():
+        raise HTTPException(status_code=422, detail="Voice name is required")
+    file_bytes = await file.read()
+    if len(file_bytes) < 500:
+        raise HTTPException(status_code=400, detail="Audio file is too short or empty")
+    try:
+        return save_custom_voice(
+            file_bytes=file_bytes,
+            name=name.strip(),
+            gender=gender.strip().lower() if gender in ("male", "female", "neutral") else "neutral",
+            language=language.strip() or "en-NG",
+            description=description.strip(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process custom voice: {exc}")
 
 
 @app.delete("/api/characters/{character_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -640,6 +1241,8 @@ async def upload_character_reference(
         raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller")
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
+    if not is_usable_reference_image(content):
+        raise HTTPException(status_code=400, detail="Image must contain visible pixels")
 
     from uuid import uuid4
 
@@ -829,7 +1432,15 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
         )
     target_aspect = aspect_ratio or project.aspect_ratio
     image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
-    if not shot.image and not image_variant:
+    continuity_frame = next(
+        (
+            frame
+            for frame in shot.continuity_frames
+            if frame.aspect_ratio == target_aspect
+        ),
+        None,
+    )
+    if not continuity_frame and not shot.image and not image_variant:
         raise HTTPException(
             status_code=409, detail="Generate or upload a shot image first"
         )
@@ -851,6 +1462,236 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
     db.commit()
     db.refresh(job)
     return job
+
+
+@app.post(
+    "/api/shots/{shot_id}/continuity-frame",
+    response_model=ShotRead,
+)
+async def save_shot_continuity_frame(
+    shot_id: str,
+    file: UploadFile = File(...),
+    source_shot_id: str = Form(...),
+    source_time_ms: int = Form(..., ge=0, le=1_800_000),
+    aspect_ratio: str = Form(...),
+    db: Session = Depends(get_db),
+) -> Shot:
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    project = shot.scene.script_version.project
+    if project.status != "shot_plan":
+        raise HTTPException(status_code=409, detail="Approve the script before editing shot continuity")
+    if aspect_ratio not in {"16:9", "9:16"}:
+        raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+    if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Upload a PNG, JPEG, or WebP frame")
+
+    ordered_shots = [
+        candidate
+        for scene in sorted(shot.scene.script_version.scenes, key=lambda item: item.order_index)
+        for candidate in sorted(scene.shots, key=lambda item: item.order_index)
+    ]
+    shot_index = next(
+        (index for index, candidate in enumerate(ordered_shots) if candidate.id == shot.id),
+        -1,
+    )
+    if shot_index <= 0 or ordered_shots[shot_index - 1].id != source_shot_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Continuity must come from the immediately previous shot",
+        )
+    source_shot = ordered_shots[shot_index - 1]
+    source_clip_variant = next(
+        (
+            item
+            for item in source_shot.media_variants
+            if item.media_type == "clip" and item.aspect_ratio == aspect_ratio
+        ),
+        None,
+    )
+    source_clip = source_clip_variant or (
+        source_shot.clip if aspect_ratio == project.aspect_ratio else None
+    )
+    if not source_clip:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The previous shot has no {aspect_ratio} video",
+        )
+
+    from uuid import uuid4
+
+    content = await file.read(20 * 1024 * 1024 + 1)
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Frame must be 20 MB or smaller")
+    if not content or not is_usable_reference_image(content):
+        raise HTTPException(status_code=400, detail="Frame image is empty or invalid")
+
+    extension = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[file.content_type]
+    filename = f"continuity-{uuid4()}{extension}"
+    destination = settings.media_dir / filename
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+
+    frame = next(
+        (
+            item
+            for item in shot.continuity_frames
+            if item.aspect_ratio == aspect_ratio
+        ),
+        None,
+    )
+    previous_filename = frame.filename if frame else None
+    if frame:
+        frame.filename = filename
+        frame.mime_type = file.content_type
+        frame.source_shot_id = source_shot.id
+        frame.source_shot_title = source_shot.title
+        frame.source_time_ms = source_time_ms
+        frame.created_at = now()
+    else:
+        frame = ShotContinuityFrame(
+            shot_id=shot.id,
+            aspect_ratio=aspect_ratio,
+            filename=filename,
+            mime_type=file.content_type,
+            source_shot_id=source_shot.id,
+            source_shot_title=source_shot.title,
+            source_time_ms=source_time_ms,
+        )
+        db.add(frame)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        raise
+    db.refresh(shot)
+    delete_media_file(previous_filename)
+    return shot
+
+
+@app.delete(
+    "/api/shots/{shot_id}/continuity-frame",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_shot_continuity_frame(
+    shot_id: str, aspect_ratio: str, db: Session = Depends(get_db)
+) -> None:
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    frame = next(
+        (
+            item
+            for item in shot.continuity_frames
+            if item.aspect_ratio == aspect_ratio
+        ),
+        None,
+    )
+    if not frame:
+        raise HTTPException(status_code=404, detail="Continuity frame not found")
+    filename = frame.filename
+    db.delete(frame)
+    db.commit()
+    delete_media_file(filename)
+
+
+
+def _image_reference_target(db, shot_id, aspect_ratio):
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    if shot.scene.script_version.project.status != "shot_plan":
+        raise HTTPException(status_code=409, detail="Approve the script before editing image references")
+    if aspect_ratio not in {"16:9", "9:16"}:
+        raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+    return shot
+
+
+@app.get("/api/shots/{shot_id}/image-reference/sources")
+def image_reference_sources(shot_id: str, db: Session = Depends(get_db)):
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    return [dict(id=item.id, title=item.title, media=media_sources(item)) for item in earlier_shots(shot)]
+
+
+@app.post("/api/shots/{shot_id}/image-reference", response_model=ShotRead)
+async def save_image_reference(
+    shot_id: str,
+    source_shot_id: str = Form(...),
+    source_media_id: str = Form(...),
+    source_media_kind: str = Form(...),
+    aspect_ratio: str = Form(...),
+    mode: str = Form("visual_continuity"),
+    source_time_ms: int | None = Form(None, ge=0, le=1_800_000),
+    file: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    shot = _image_reference_target(db, shot_id, aspect_ratio)
+    if mode != "visual_continuity":
+        raise HTTPException(status_code=422, detail="Unsupported image reference mode")
+    source = next((item for item in earlier_shots(shot) if item.id == source_shot_id), None)
+    if not source:
+        raise HTTPException(status_code=409, detail="Choose an earlier shot in this script version")
+    media = next((item for item in media_sources(source)
+                  if item['source_media_id'] == source_media_id and item['source_media_kind'] == source_media_kind), None)
+    if not media:
+        raise HTTPException(status_code=404, detail="Source media is no longer available")
+    if media['source_media_type'] == 'clip':
+        if file is None or source_time_ms is None:
+            raise HTTPException(status_code=422, detail="Choose and capture a video frame")
+        content = await file.read(20 * 1024 * 1024 + 1)
+        mime_type = file.content_type
+    else:
+        if file is not None or source_time_ms is not None:
+            raise HTTPException(status_code=422, detail="Still references do not accept a frame or timestamp")
+        content = (settings.media_dir / media['filename']).read_bytes()
+        mime_type = media['mime_type']
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Choose a PNG, JPEG, or WebP reference")
+    try:
+        validate_reference_bytes(content, mime_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from uuid import uuid4
+    extension = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime_type]
+    filename = f"image-reference-{uuid4()}{extension}"
+    path = settings.media_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    ref = next((item for item in shot.image_references if item.aspect_ratio == aspect_ratio), None)
+    previous = ref.filename if ref else None
+    if ref is None:
+        ref = ShotImageReference(shot=shot, aspect_ratio=aspect_ratio)
+        db.add(ref)
+    for key in ('source_shot_id', 'source_shot_title', 'source_media_id', 'source_media_kind',
+                'source_media_type', 'source_aspect_ratio'):
+        setattr(ref, key, media[key])
+    ref.filename, ref.mime_type = filename, mime_type
+    ref.source_time_ms, ref.mode, ref.created_at = source_time_ms, mode, now()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        path.unlink(missing_ok=True)
+        raise
+    db.refresh(shot)
+    release_reference_asset(db, previous)
+    return shot
+
+
+@app.delete("/api/shots/{shot_id}/image-reference", status_code=204)
+def remove_image_reference(shot_id: str, aspect_ratio: str, db: Session = Depends(get_db)):
+    shot = _image_reference_target(db, shot_id, aspect_ratio)
+    ref = next((item for item in shot.image_references if item.aspect_ratio == aspect_ratio), None)
+    if ref:
+        filename = ref.filename
+        db.delete(ref)
+        db.commit()
+        db.expire(shot, ['image_references'])
+        release_reference_asset(db, filename)
 
 
 @app.post("/api/shots/{shot_id}/clip/upload", response_model=ShotRead)
@@ -1037,7 +1878,9 @@ def create_draft(
     job = Job(
         project_id=project.id,
         kind="create_draft",
-        attempts=[{"variant": payload.variant, "retry_failed_only": payload.retry_failed_only}],
+        attempts=[{"variant": payload.variant, "retry_failed_only": payload.retry_failed_only,
+                   "image_references": {shot.id: reference_snapshot(shot, "9:16" if payload.variant == "shorts" else "16:9")
+                       for version in project.versions for scene in version.scenes for shot in scene.shots}}],
     )
     db.add(job)
     db.commit()
@@ -1062,6 +1905,62 @@ def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_
     return scene
 
 
+
+@app.post(
+    "/api/shots/{shot_id}/lipsync",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_shot_lipsync(
+    shot_id: str,
+    aspect_ratio: str | None = None,
+    db: Session = Depends(get_db),
+) -> Job:
+    shot = db.get(Shot, shot_id)
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    if not shot.dialogue:
+        raise HTTPException(
+            status_code=400, detail="Shot does not contain any dialogue lines to lip-sync"
+        )
+    project = shot.scene.script_version.project
+    target_aspect = aspect_ratio or project.aspect_ratio
+
+    has_visual = bool(
+        shot.clip
+        or shot.image
+        or any(m.filename for m in shot.media_variants if m.aspect_ratio == target_aspect)
+    )
+    if not has_visual:
+        raise HTTPException(
+            status_code=409,
+            detail="Generate or upload a shot frame or clip before running lip-sync",
+        )
+
+    job = Job(
+        project_id=project.id,
+        kind="shot_lipsync",
+        status="queued",
+        message="Queued for dialogue lip-sync...",
+        attempts=[{"shot_id": shot.id, "aspect_ratio": target_aspect}],
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    task = enqueue_shot_lipsync(shot.id, job.id, target_aspect)
+    job.task_id = task.id if task else None
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.get("/api/system/lipsync/status")
+def system_lipsync_status() -> dict:
+    from .lipsync import get_lipsync_status
+    return get_lipsync_status().model_dump()
+
+
 @app.post("/api/shots/{shot_id}/audio/generate", response_model=ShotRead)
 def generate_shot_audio(shot_id: str, db: Session = Depends(get_db)) -> Shot:
     shot = db.scalar(
@@ -1084,7 +1983,8 @@ def generate_shot_audio(shot_id: str, db: Session = Depends(get_db)) -> Shot:
         raise HTTPException(status_code=503, detail=detail)
     project = shot.scene.script_version.project
     try:
-        filename, mime_type, provider = synthesize_dialogue(shot.dialogue, duration_hint_ms=shot.duration_ms)
+        from .voice_service import synthesize_shot_dialogue
+        filename, mime_type, provider = synthesize_shot_dialogue(shot, db)
         record_take(
             db, shot, media_type="audio", aspect_ratio=project.aspect_ratio, filename=filename,
             mime_type=mime_type, source="generated", provider=provider, prompt="dialogue",
@@ -1164,6 +2064,77 @@ def select_shot_take(
     return shot
 
 
+@app.get("/api/publish/providers")
+def publish_providers() -> list[dict]:
+    return publish_provider_statuses()
+
+
+@app.get("/api/projects/{project_id}/publish/plan", response_model=PublishPlanRead)
+def project_publish_plan(project_id: str, variant: str = "landscape", db: Session = Depends(get_db)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return build_publish_plan(project, variant)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/publishes", response_model=list[PublishRecordRead])
+def list_publishes(project_id: str, db: Session = Depends(get_db)) -> list[PublishRecord]:
+    if not db.get(Project, project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return db.scalars(
+        select(PublishRecord)
+        .where(PublishRecord.project_id == project_id)
+        .order_by(PublishRecord.created_at.desc())
+    ).all()
+
+
+@app.post("/api/projects/{project_id}/publish", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+def queue_publish(project_id: str, payload: PublishCreate, db: Session = Depends(get_db)) -> Job:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    data = payload.model_dump(mode="json")
+    try:
+        validate_publish_request(data)
+        plan = build_publish_plan(project, payload.variant)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    available_ids = {item["id"] for group in ("final", "scenes", "shots") for item in plan[group] if item.get("ready")}
+    requested_ids = set(payload.selected_asset_ids or [])
+    if requested_ids and not requested_ids <= available_ids:
+        raise HTTPException(status_code=409, detail="One or more selected publish assets are not ready")
+    job = Job(project_id=project.id, kind="publish", message="Queued publish", attempts=[data])
+    db.add(job)
+    db.flush()
+    record = PublishRecord(
+        project_id=project.id,
+        job_id=job.id,
+        scope=payload.scope,
+        variant=payload.variant,
+        platforms=payload.platforms,
+        title=payload.title.strip(),
+        description=payload.description.strip(),
+        tags=payload.tags,
+        privacy=payload.privacy,
+        selected_asset_ids=payload.selected_asset_ids,
+        scheduled_at=payload.scheduled_at,
+        made_for_kids=payload.made_for_kids,
+        options={**payload.platform_options, "schedule_interval_hours": payload.schedule_interval_hours},
+    )
+    db.add(record)
+    db.flush()
+    job.attempts = [{**data, "publish_record_id": record.id}]
+    db.commit()
+    task = enqueue_publish_project(project.id, job.id, record.id)
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 @app.delete(
     "/api/projects/{project_id}/final-cut",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -1237,7 +2208,11 @@ def reset_timeline(project_id: str, db: Session = Depends(get_db)) -> dict:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     timeline = ensure_timeline(project, db)
-    timeline.document = initial_document(project, db)
+    doc = initial_document(project, db)
+    timeline.document = doc
+    if timeline.shorts_document is not None:
+        from copy import deepcopy
+        timeline.shorts_document = deepcopy(doc)
     timeline.revision += 1
     db.commit()
     return {"revision": timeline.revision, "document": timeline.document, "assets": project.timeline_assets}
@@ -1539,3 +2514,184 @@ def sync_cast_from_script(project_id: str, db: Session = Depends(get_db)) -> lis
             .order_by(Character.name)
         )
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Social OAuth Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/auth/social/status")
+def social_auth_status(db: Session = Depends(get_db)) -> list[dict]:
+    """Return connection status for all social platforms."""
+    return all_token_statuses(db)
+
+
+@app.get("/auth/youtube/start")
+def youtube_auth_start(db: Session = Depends(get_db)):
+    """Return the Google OAuth authorization URL for YouTube."""
+    from fastapi.responses import JSONResponse
+    try:
+        url = youtube_auth_url(db)
+        return {"url": url}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/auth/youtube/callback")
+def youtube_auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+    """Handle Google OAuth callback, exchange code for token, redirect to UI."""
+    from fastapi.responses import HTMLResponse
+    try:
+        tok = handle_youtube_callback(code, state, db)
+        name = tok.account_name or "your channel"
+        safe_name = html_lib.escape(name)
+        message_json = json.dumps({"type": "oauth_success", "platform": "youtube", "account": name}).replace("</", "<\\/")
+        target_origin_json = json.dumps(settings.frontend_origin)
+        html = f"""<!DOCTYPE html>
+<html>
+<head><title>Connected!</title>
+<style>
+  body {{ background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif;
+         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+  .card {{ background: #1a1f2e; border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+           padding: 2rem 3rem; text-align: center; max-width: 400px; }}
+  .icon {{ font-size: 3rem; margin-bottom: 1rem; }}
+  h2 {{ color: #4ade80; margin: 0 0 .5rem; }}
+  p {{ color: #94a3b8; margin: 0 0 1.5rem; }}
+  small {{ color: #64748b; font-size: .8rem; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">✅</div>
+  <h2>YouTube Connected!</h2>
+  <p>Linked to <strong>{safe_name}</strong></p>
+  <small>You can close this window and return to Cutline.</small>
+</div>
+<script>
+  // Notify the opener window and close
+  if (window.opener) {{
+    window.opener.postMessage({message_json}, {target_origin_json});
+    setTimeout(() => window.close(), 1500);
+  }} else {{
+    setTimeout(() => window.close(), 3000);
+  }}
+</script>
+</body>
+</html>"""
+        return HTMLResponse(content=html)
+    except Exception as exc:
+        error_text = str(exc)
+        safe_error = html_lib.escape(error_text)
+        message_json = json.dumps({"type": "oauth_error", "platform": "youtube", "error": error_text}).replace("</", "<\\/")
+        target_origin_json = json.dumps(settings.frontend_origin)
+        html_err = f"""<!DOCTYPE html>
+<html>
+<head><title>Connection Failed</title>
+<style>
+  body {{ background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif;
+         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+  .card {{ background: #1a1f2e; border: 1px solid rgba(239,68,68,.3); border-radius: 16px;
+           padding: 2rem 3rem; text-align: center; max-width: 400px; }}
+  h2 {{ color: #ef4444; margin: 0 0 .5rem; }}
+  p {{ color: #94a3b8; margin: 0; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="font-size:3rem;margin-bottom:1rem">❌</div>
+  <h2>Connection Failed</h2>
+  <p>{safe_error}</p>
+</div>
+<script>
+  if (window.opener) {{
+    window.opener.postMessage({message_json}, {target_origin_json});
+    setTimeout(() => window.close(), 3000);
+  }}
+</script>
+</body>
+</html>"""
+        from fastapi.responses import HTMLResponse as HR
+        return HR(content=html_err, status_code=400)
+
+
+@app.get("/auth/facebook/start")
+def facebook_auth_start(db: Session = Depends(get_db)):
+    """Return the Facebook OAuth dialog URL."""
+    try:
+        url = facebook_auth_url(db)
+        return {"url": url}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/auth/facebook/callback")
+def facebook_auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+    """Handle Facebook OAuth callback."""
+    from fastapi.responses import HTMLResponse
+    try:
+        tok = handle_facebook_callback(code, state, db)
+        name = tok.account_name or "your page"
+        safe_name = html_lib.escape(name)
+        message_json = json.dumps({"type": "oauth_success", "platform": "facebook", "account": name}).replace("</", "<\\/")
+        target_origin_json = json.dumps(settings.frontend_origin)
+        html = f"""<!DOCTYPE html>
+<html>
+<head><title>Connected!</title>
+<style>
+  body {{ background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif;
+         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+  .card {{ background: #1a1f2e; border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+           padding: 2rem 3rem; text-align: center; max-width: 400px; }}
+  h2 {{ color: #4ade80; margin: 0 0 .5rem; }}
+  p {{ color: #94a3b8; margin: 0 0 1.5rem; }}
+  small {{ color: #64748b; font-size: .8rem; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="font-size:3rem;margin-bottom:1rem">✅</div>
+  <h2>Facebook Connected!</h2>
+  <p>Linked to <strong>{safe_name}</strong></p>
+  <small>You can close this window and return to Cutline.</small>
+</div>
+<script>
+  if (window.opener) {{
+    window.opener.postMessage({message_json}, {target_origin_json});
+    setTimeout(() => window.close(), 1500);
+  }} else {{
+    setTimeout(() => window.close(), 3000);
+  }}
+</script>
+</body>
+</html>"""
+        return HTMLResponse(content=html)
+    except Exception as exc:
+        error_text = str(exc)
+        safe_error = html_lib.escape(error_text)
+        message_json = json.dumps({"type": "oauth_error", "platform": "facebook", "error": error_text}).replace("</", "<\\/")
+        target_origin_json = json.dumps(settings.frontend_origin)
+        html_err = f"""<!DOCTYPE html>
+<html><head><title>Connection Failed</title></head>
+<body style="background:#0f1117;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+<div style="background:#1a1f2e;border:1px solid rgba(239,68,68,.3);border-radius:16px;padding:2rem 3rem;text-align:center;max-width:400px">
+  <div style="font-size:3rem;margin-bottom:1rem">❌</div>
+  <h2 style="color:#ef4444;margin:0 0 .5rem">Connection Failed</h2>
+  <p style="color:#94a3b8;margin:0">{safe_error}</p>
+</div>
+<script>
+  if (window.opener) {{
+    window.opener.postMessage({message_json}, {target_origin_json});
+    setTimeout(() => window.close(), 3000);
+  }}
+</script>
+</body></html>"""
+        from fastapi.responses import HTMLResponse as HR
+        return HR(content=html_err, status_code=400)
+
+
+@app.delete("/auth/{platform}/disconnect", status_code=204)
+def social_disconnect(platform: str, db: Session = Depends(get_db)):
+    """Revoke stored OAuth token for a platform."""
+    if platform not in ("youtube", "facebook"):
+        raise HTTPException(status_code=400, detail="Unknown platform")
+    disconnect_platform(platform, db)
