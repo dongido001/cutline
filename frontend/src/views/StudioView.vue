@@ -464,9 +464,32 @@ async function copyShotVideoPrompt() {
 watch(() => route.params.projectId, async (projectId) => {
   if (typeof projectId !== 'string' || store.currentProject?.id === projectId) return
   try {
-    await store.selectProject(projectId)
+    const queryEpisode = typeof route.query.episode === 'string' ? route.query.episode : undefined
+    await store.loadProject(projectId, { resumeJobs: true, episodeId: queryEpisode })
   } catch {
     await router.replace('/')
+  }
+})
+watch(() => store.currentEpisodeId, (newEpId) => {
+  if (newEpId && route.query.episode !== newEpId && store.currentProject) {
+    void router.replace({
+      query: {
+        ...route.query,
+        episode: newEpId,
+      },
+    })
+  }
+})
+watch(() => route.query.episode, async (newQueryEp) => {
+  if (typeof newQueryEp === 'string' && newQueryEp && store.currentProject) {
+    let targetEpId = newQueryEp
+    const matchingEp = store.episodes.find(
+      (e) => e.id === newQueryEp || String(e.episode_number) === newQueryEp
+    )
+    if (matchingEp) targetEpId = matchingEp.id
+    if (targetEpId !== store.currentEpisodeId) {
+      await store.selectEpisode(targetEpId)
+    }
   }
 })
 watch(() => store.currentProject?.id, () => {
@@ -561,9 +584,17 @@ watch([previewShot, previewPlaying], () => {
 onUnmounted(stopPreviewTimer)
 onMounted(async () => {
   const projectId = typeof route.params.projectId === 'string' ? route.params.projectId : undefined
-  await store.initialize(projectId)
+  const queryEpisode = typeof route.query.episode === 'string' ? route.query.episode : undefined
+  await store.initialize(projectId, queryEpisode)
   if (!projectId && store.projects[0]) {
     await router.replace(projectRoute(store.projects[0].id, defaultStage(store.projects[0])))
+  } else if (store.currentEpisodeId && route.query.episode !== store.currentEpisodeId) {
+    void router.replace({
+      query: {
+        ...route.query,
+        episode: store.currentEpisodeId,
+      },
+    })
   }
 })
 
@@ -780,6 +811,11 @@ function defaultStage(project: ProjectSummary): ProductionStage {
 }
 
 function projectRoute(projectId: string, stage: ProductionStage, shotId?: string | null) {
+  const query: Record<string, string> = {}
+  if (route.query.scene) query.scene = String(route.query.scene)
+  if (store.currentEpisodeId) query.episode = store.currentEpisodeId
+  else if (route.query.episode) query.episode = String(route.query.episode)
+
   return {
     name: 'project-stage',
     params: {
@@ -787,6 +823,7 @@ function projectRoute(projectId: string, stage: ProductionStage, shotId?: string
       stage,
       ...((stage === 'shots' || stage === 'clips') && shotId ? { shotId } : {}),
     },
+    query,
   }
 }
 

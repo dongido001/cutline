@@ -486,7 +486,10 @@ def get_project(
 
     active_episode = None
     if episode_id:
-        active_episode = next((e for e in episodes if e.id == episode_id), None)
+        active_episode = next(
+            (e for e in episodes if e.id == episode_id or str(e.episode_number) == str(episode_id)),
+            None,
+        )
     if not active_episode:
         active_episode = episodes[0]
 

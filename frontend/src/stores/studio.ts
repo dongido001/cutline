@@ -276,7 +276,7 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function initialize(projectId?: string) {
+  async function initialize(projectId?: string, episodeId?: string) {
     error.value = ''
     try {
       const [providerResult, imageProviderResult, videoProviderResult, projectResult] = await Promise.all([api.providers(), api.imageProviders(), api.videoProvider(), api.projects()])
@@ -284,16 +284,27 @@ export const useStudioStore = defineStore('studio', () => {
       imageProviders.value = imageProviderResult
       videoProvider.value = videoProviderResult
       projects.value = projectResult
-      if (projectId) await loadProject(projectId, { resumeJobs: true })
+      if (projectId) await loadProject(projectId, { resumeJobs: true, episodeId })
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not connect to the local API'
     }
   }
 
   async function loadProject(id: string, options?: { resumeJobs?: boolean; episodeId?: string }) {
-    const epId = options?.episodeId || currentEpisodeId.value || undefined
+    let epId = options?.episodeId || currentEpisodeId.value || undefined
+    if (!epId) {
+      try {
+        const saved = localStorage.getItem(`cutline:active-episode:${id}`)
+        if (saved) epId = saved
+      } catch {}
+    }
     currentProject.value = await api.project(id, epId)
     currentEpisodeId.value = currentProject.value.current_episode_id || null
+    if (currentEpisodeId.value) {
+      try {
+        localStorage.setItem(`cutline:active-episode:${id}`, currentEpisodeId.value)
+      } catch {}
+    }
     if (options?.resumeJobs) {
       imageJobs.value = {}
       castJobs.value = {}
@@ -308,6 +319,9 @@ export const useStudioStore = defineStore('studio', () => {
   async function selectEpisode(episodeId: string) {
     if (!currentProject.value) return
     currentEpisodeId.value = episodeId
+    try {
+      localStorage.setItem(`cutline:active-episode:${currentProject.value.id}`, episodeId)
+    } catch {}
     await loadProject(currentProject.value.id, { episodeId, resumeJobs: false })
   }
 
@@ -347,6 +361,9 @@ export const useStudioStore = defineStore('studio', () => {
 
   async function deleteEpisode(episodeId: string) {
     if (!currentProject.value) return
+    try {
+      localStorage.removeItem(`cutline:active-episode:${currentProject.value.id}`)
+    } catch {}
     await api.deleteEpisode(currentProject.value.id, episodeId)
     currentEpisodeId.value = null
     await loadProject(currentProject.value.id, { resumeJobs: false })
