@@ -22,8 +22,12 @@ from .video import video_provider_status
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
-from .models import Character, CharacterReference, Job, Project, ProjectFinalCut, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
+from .models import Character, CharacterReference, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
 from .schemas import (
+    EpisodeCreate,
+    EpisodeSummary,
+    EpisodeUpdate,
+    ProjectUpdate,
     CharacterCreate,
     CharacterRead,
     CharacterUpdate,
@@ -76,7 +80,7 @@ from .tasks import (
     enqueue_shot_image,
     enqueue_publish_project,
 )
-from .timeline import append_missing_shots, ensure_timeline, initial_document, promote_available_clips, validate_timeline
+from .timeline import append_missing_shots, ensure_timeline, initial_document, latest_shots, promote_available_clips, validate_timeline
 
 
 @asynccontextmanager
@@ -214,14 +218,31 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Job
         aspect_ratio=payload.aspect_ratio,
         target_duration_seconds=payload.target_duration_seconds,
         text_provider=payload.text_provider,
+        episode_label=payload.episode_label,
         status="analyzing",
     )
     db.add(project)
     db.flush()
-    version = ScriptVersion(project_id=project.id, source_text=payload.script)
+    episode = Episode(
+        project_id=project.id,
+        episode_number=1,
+        title=payload.title,
+        status="analyzing",
+    )
+    db.add(episode)
+    db.flush()
+    version = ScriptVersion(
+        project_id=project.id,
+        episode_id=episode.id,
+        source_text=payload.script,
+    )
     db.add(version)
     db.flush()
-    job = Job(project_id=project.id, kind="script_analysis")
+    job = Job(
+        project_id=project.id,
+        episode_id=episode.id,
+        kind="script_analysis",
+    )
     db.add(job)
     db.commit()
     task = enqueue_script_analysis(
@@ -281,15 +302,202 @@ def list_projects(db: Session = Depends(get_db)) -> list[Project]:
     return list(db.scalars(select(Project).order_by(Project.updated_at.desc())))
 
 
-@app.get("/api/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail:
+@app.patch("/api/projects/{project_id}", response_model=ProjectSummary)
+def update_project(
+    project_id: str,
+    payload: ProjectUpdate,
+    db: Session = Depends(get_db),
+) -> Project:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if payload.title is not None:
+        project.title = payload.title
+    if payload.episode_label is not None:
+        project.episode_label = payload.episode_label
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@app.get("/api/projects/{project_id}/episodes", response_model=list[EpisodeSummary])
+def list_episodes(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    episodes = db.scalars(
+        select(Episode)
+        .where(Episode.project_id == project_id)
+        .order_by(Episode.episode_number)
+    ).all()
+    results = []
+    for ep in episodes:
+        shots = latest_shots(project_id, db, episode_id=ep.id)
+        results.append(
+            {
+                "id": ep.id,
+                "project_id": ep.project_id,
+                "episode_number": ep.episode_number,
+                "title": ep.title,
+                "synopsis": ep.synopsis,
+                "status": ep.status,
+                "shot_count": len(shots),
+                "duration_ms": sum(s.duration_ms for s in shots),
+                "created_at": ep.created_at,
+                "updated_at": ep.updated_at,
+            }
+        )
+    return results
+
+
+@app.post("/api/projects/{project_id}/episodes", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+def create_episode(
+    project_id: str,
+    payload: EpisodeCreate,
+    db: Session = Depends(get_db),
+) -> Job:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    existing_nums = db.scalars(
+        select(Episode.episode_number).where(Episode.project_id == project_id)
+    ).all()
+    next_num = max(existing_nums, default=0) + 1
+
+    episode = Episode(
+        project_id=project.id,
+        episode_number=next_num,
+        title=payload.title,
+        status="analyzing",
+    )
+    db.add(episode)
+    db.flush()
+
+    version = ScriptVersion(
+        project_id=project.id,
+        episode_id=episode.id,
+        source_text=payload.script,
+    )
+    db.add(version)
+    db.flush()
+
+    job = Job(
+        project_id=project.id,
+        episode_id=episode.id,
+        kind="script_analysis",
+    )
+    db.add(job)
+    db.commit()
+
+    task = enqueue_script_analysis(
+        project.text_provider, project.id, version.id, job.id
+    )
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.patch("/api/projects/{project_id}/episodes/{episode_id}", response_model=EpisodeSummary)
+def update_episode(
+    project_id: str,
+    episode_id: str,
+    payload: EpisodeUpdate,
+    db: Session = Depends(get_db),
+) -> dict:
+    episode = db.scalar(
+        select(Episode).where(
+            Episode.id == episode_id, Episode.project_id == project_id
+        )
+    )
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if payload.title is not None:
+        episode.title = payload.title
+    if payload.synopsis is not None:
+        episode.synopsis = payload.synopsis
+    if payload.status is not None:
+        episode.status = payload.status
+    db.commit()
+    db.refresh(episode)
+    shots = latest_shots(project_id, db, episode_id=episode.id)
+    return {
+        "id": episode.id,
+        "project_id": episode.project_id,
+        "episode_number": episode.episode_number,
+        "title": episode.title,
+        "synopsis": episode.synopsis,
+        "status": episode.status,
+        "shot_count": len(shots),
+        "duration_ms": sum(s.duration_ms for s in shots),
+        "created_at": episode.created_at,
+        "updated_at": episode.updated_at,
+    }
+
+
+@app.delete("/api/projects/{project_id}/episodes/{episode_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_episode(
+    project_id: str,
+    episode_id: str,
+    db: Session = Depends(get_db),
+) -> None:
+    count = db.scalar(
+        select(func.count(Episode.id)).where(Episode.project_id == project_id)
+    )
+    if count is not None and count <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the only episode of a project")
+    episode = db.scalar(
+        select(Episode).where(
+            Episode.id == episode_id, Episode.project_id == project_id
+        )
+    )
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    db.delete(episode)
+    db.commit()
+
+
+@app.get("/api/projects/{project_id}", response_model=ProjectDetail)
+def get_project(
+    project_id: str,
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> ProjectDetail:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    episodes = db.scalars(
+        select(Episode)
+        .where(Episode.project_id == project_id)
+        .order_by(Episode.episode_number)
+    ).all()
+
+    if not episodes:
+        ep1 = Episode(
+            project_id=project_id,
+            episode_number=1,
+            title=project.title,
+            status=project.status,
+        )
+        db.add(ep1)
+        db.flush()
+        episodes = [ep1]
+
+    active_episode = None
+    if episode_id:
+        active_episode = next((e for e in episodes if e.id == episode_id), None)
+    if not active_episode:
+        active_episode = episodes[0]
+
+    version_query = select(ScriptVersion).where(
+        ScriptVersion.project_id == project_id
+    )
+    if active_episode:
+        version_query = version_query.where(ScriptVersion.episode_id == active_episode.id)
+
     version = db.scalar(
-        select(ScriptVersion)
-        .where(ScriptVersion.project_id == project_id)
-        .options(
+        version_query.options(
             selectinload(ScriptVersion.scenes)
             .selectinload(Scene.shots)
             .selectinload(Shot.image),
@@ -312,10 +520,81 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail
         )
         .order_by(ScriptVersion.version_number.desc())
     )
+    if not version and active_episode.episode_number == 1:
+        version = db.scalar(
+            select(ScriptVersion)
+            .where(ScriptVersion.project_id == project_id)
+            .options(
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.image),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.clip),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.media_variants),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.takes),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.image_references),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.continuity_frames),
+                selectinload(ScriptVersion.suggestions),
+            )
+            .order_by(ScriptVersion.version_number.desc())
+        )
+
+    active_timeline = db.scalar(
+        select(ProjectTimeline).where(
+            ProjectTimeline.project_id == project_id,
+            ProjectTimeline.episode_id == active_episode.id,
+        )
+    ) or (project.timeline if active_episode.episode_number == 1 else None)
+
+    active_final_cut = db.scalar(
+        select(ProjectFinalCut).where(
+            ProjectFinalCut.project_id == project_id,
+            ProjectFinalCut.episode_id == active_episode.id,
+        )
+    ) or (project.final_cut if active_episode.episode_number == 1 else None)
+
+    active_variant_exports = db.scalars(
+        select(ProjectVariantExport).where(
+            ProjectVariantExport.project_id == project_id,
+            ProjectVariantExport.episode_id == active_episode.id,
+        )
+    ).all()
+    if not active_variant_exports and active_episode.episode_number == 1:
+        active_variant_exports = project.variant_exports
+
+    episodes_summary = []
+    for ep in episodes:
+        ep_shots = latest_shots(project_id, db, episode_id=ep.id)
+        episodes_summary.append(
+            {
+                "id": ep.id,
+                "project_id": ep.project_id,
+                "episode_number": ep.episode_number,
+                "title": ep.title,
+                "synopsis": ep.synopsis,
+                "status": ep.status,
+                "shot_count": len(ep_shots),
+                "duration_ms": sum(s.duration_ms for s in ep_shots),
+                "created_at": ep.created_at,
+                "updated_at": ep.updated_at,
+            }
+        )
+
     data = ProjectSummary.model_validate(project).model_dump()
+    data["episodes"] = episodes_summary
+    data["current_episode_id"] = active_episode.id
     data["current_version"] = version
-    data["final_cut"] = project.final_cut
-    timeline_revision = project.timeline.revision if project.timeline else 0
+    data["final_cut"] = active_final_cut
+    timeline_revision = active_timeline.revision if active_timeline else 0
     data["variant_exports"] = [
         {
             **{
@@ -327,7 +606,7 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectDetail
             },
             "is_stale": export.timeline_revision != timeline_revision,
         }
-        for export in project.variant_exports
+        for export in active_variant_exports
     ]
     data["publishes"] = db.scalars(
         select(PublishRecord)
@@ -525,7 +804,9 @@ def system_queue_status(db: Session = Depends(get_db)) -> dict:
     video_ok = False
     video_detail = "Offline"
     try:
-        res = httpx.get(f"{settings.flowkit_base_url.rstrip('/')}/health", timeout=1.5)
+        res = httpx.get(f"{settings.flowkit_base_url.rstrip('/')}/status", timeout=1.5)
+        if not res.is_success:
+            res = httpx.get("http://127.0.0.1:8100/health", timeout=1.5)
         if res.is_success:
             video_ok = True
             video_detail = "Online"
@@ -1630,7 +1911,16 @@ def image_reference_sources(shot_id: str, db: Session = Depends(get_db)):
     shot = db.get(Shot, shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
-    return [dict(id=item.id, title=item.title, media=media_sources(item)) for item in earlier_shots(shot)]
+    results = []
+    current_ep = shot.scene.script_version.episode
+    for item in earlier_shots(shot):
+        item_ep = item.scene.script_version.episode
+        title = item.title
+        if current_ep and item_ep and item_ep.id != current_ep.id:
+            label = shot.scene.script_version.project.episode_label or "Episode"
+            title = f"[{label} {item_ep.episode_number}] {item.title}"
+        results.append(dict(id=item.id, title=title, media=media_sources(item)))
+    return results
 
 
 @app.post("/api/shots/{shot_id}/image-reference", response_model=ShotRead)
@@ -1650,7 +1940,7 @@ async def save_image_reference(
         raise HTTPException(status_code=422, detail="Unsupported image reference mode")
     source = next((item for item in earlier_shots(shot) if item.id == source_shot_id), None)
     if not source:
-        raise HTTPException(status_code=409, detail="Choose an earlier shot in this script version")
+        raise HTTPException(status_code=409, detail="Choose an earlier shot in this project")
     media = next((item for item in media_sources(source)
                   if item['source_media_id'] == source_media_id and item['source_media_kind'] == source_media_kind), None)
     if not media:
@@ -1820,7 +2110,12 @@ def delete_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session 
     response_model=JobRead,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def queue_final_cut(project_id: str, variant: str = "landscape", db: Session = Depends(get_db)) -> Job:
+def queue_final_cut(
+    project_id: str,
+    variant: str = "landscape",
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> Job:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1828,28 +2123,30 @@ def queue_final_cut(project_id: str, variant: str = "landscape", db: Session = D
         raise HTTPException(status_code=409, detail="Approve the script before rendering")
     if variant not in {"landscape", "shorts"}:
         raise HTTPException(status_code=422, detail="Variant must be landscape or shorts")
-    active_job = db.scalar(
-        select(Job).where(
-            Job.project_id == project.id,
-            Job.kind == f"final_cut:{variant}",
-            Job.status.in_(["queued", "running"]),
-        )
+    
+    job_query = select(Job).where(
+        Job.project_id == project.id,
+        Job.kind == f"final_cut:{variant}",
+        Job.status.in_(["queued", "running"]),
     )
+    if episode_id:
+        job_query = job_query.where(Job.episode_id == episode_id)
+    active_job = db.scalar(job_query)
     if active_job:
         return active_job
 
-    timeline = ensure_timeline(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
     document_data = (
         timeline.shorts_document or timeline.document
         if variant == "shorts"
         else timeline.document
     )
     try:
-        validate_timeline(TimelineDocument.model_validate(document_data), project, db)
+        validate_timeline(TimelineDocument.model_validate(document_data), project, db, episode_id=episode_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    job = Job(project_id=project.id, kind=f"final_cut:{variant}")
+    job = Job(project_id=project.id, episode_id=episode_id, kind=f"final_cut:{variant}")
     db.add(job)
     db.commit()
     task = enqueue_final_cut(project.id, job.id, variant)
@@ -2233,13 +2530,18 @@ def delete_final_cut(project_id: str, variant: str = "landscape", db: Session = 
 
 
 @app.get("/api/projects/{project_id}/timeline", response_model=ProjectTimelineRead)
-def get_timeline(project_id: str, edit: str = "landscape", db: Session = Depends(get_db)) -> dict:
+def get_timeline(
+    project_id: str,
+    edit: str = "landscape",
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if edit not in {"landscape", "shorts"}:
         raise HTTPException(status_code=422, detail="edit must be landscape or shorts")
-    timeline = ensure_timeline(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
     if edit == "shorts":
         if not timeline.shorts_document:
             timeline.shorts_document = deepcopy(timeline.document)
@@ -2257,15 +2559,20 @@ def get_timeline(project_id: str, edit: str = "landscape", db: Session = Depends
 
 
 @app.put("/api/projects/{project_id}/timeline", response_model=ProjectTimelineRead)
-def update_timeline(project_id: str, payload: TimelineUpdate, db: Session = Depends(get_db)) -> dict:
+def update_timeline(
+    project_id: str,
+    payload: TimelineUpdate,
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    timeline = ensure_timeline(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
     if timeline.revision != payload.revision:
         raise HTTPException(status_code=409, detail="The timeline changed in another session. Reload it before saving.")
     try:
-        validate_timeline(payload.document, project, db)
+        validate_timeline(payload.document, project, db, episode_id=episode_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     dumped = payload.document.model_dump(mode="json")
@@ -2286,12 +2593,16 @@ def update_timeline(project_id: str, payload: TimelineUpdate, db: Session = Depe
 
 
 @app.post("/api/projects/{project_id}/timeline/reset", response_model=ProjectTimelineRead)
-def reset_timeline(project_id: str, db: Session = Depends(get_db)) -> dict:
+def reset_timeline(
+    project_id: str,
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    timeline = ensure_timeline(project, db)
-    doc = initial_document(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
+    doc = initial_document(project, db, episode_id=episode_id)
     timeline.document = doc
     if timeline.shorts_document is not None:
         from copy import deepcopy
@@ -2538,16 +2849,22 @@ def _suggestion_value(current: object, before: object, after: object) -> object:
 def approve_project(
     project_id: str,
     payload: ProjectApproval,
+    episode_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> Project:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    version = db.scalar(
-        select(ScriptVersion)
-        .where(ScriptVersion.project_id == project_id)
-        .order_by(ScriptVersion.version_number.desc())
-    )
+    version_query = select(ScriptVersion).where(ScriptVersion.project_id == project_id)
+    if episode_id:
+        version_query = version_query.where(ScriptVersion.episode_id == episode_id)
+    version = db.scalar(version_query.order_by(ScriptVersion.version_number.desc()))
+    if not version and episode_id:
+        version = db.scalar(
+            select(ScriptVersion)
+            .where(ScriptVersion.project_id == project_id)
+            .order_by(ScriptVersion.version_number.desc())
+        )
     if not version:
         raise HTTPException(status_code=409, detail="Project has no script")
     pending = db.scalar(
@@ -2560,11 +2877,15 @@ def approve_project(
     if pending:
         raise HTTPException(status_code=409, detail="Resolve blocking suggestions first")
     invalidated_filename = None
-    if payload.approved and append_missing_shots(project, db):
+    if payload.approved and append_missing_shots(project, db, episode_id=episode_id):
         invalidated_filename = invalidate_final_cut(project, db)
     if payload.approved:
         sync_project_cast(project, db, source_text=version.source_text, tag_shots=True)
     version.status = "approved" if payload.approved else "review"
+    if episode_id:
+        ep = db.get(Episode, episode_id)
+        if ep:
+            ep.status = "shot_plan" if payload.approved else "review"
     project.status = "shot_plan" if payload.approved else "review"
     db.commit()
     db.refresh(project)

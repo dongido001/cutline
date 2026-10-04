@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import httpx
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,9 @@ class ServiceDefinition:
             pid = _find_pid_by_port(self.port)
             if pid:
                 return [pid]
+        owned = self._owned_pids()
+        if owned:
+            return owned
         if self.pattern:
             return _find_pids_by_pattern(self.pattern)
         return []
@@ -237,7 +241,7 @@ class ServiceDefinition:
             if not python_bin.exists():
                 return {"ok": False, "error": f"FlowKit python executable not found at {python_bin}"}
             proc = subprocess.Popen(
-                [str(python_bin), "-m", "agent.main"],
+                [str(python_bin), "-u", "-m", "agent.main"],
                 cwd=str(flowkit_root),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -305,13 +309,15 @@ class ServiceDefinition:
         if proc is not None:
             self._remember_pid(proc.pid)
 
-        # Wait for startup
-        time.sleep(1.0)
-        new_pids = self.get_pids()
-        if new_pids:
-            return {"ok": True, "message": f"{self.name} started successfully (PID {new_pids[0]})."}
-        if proc and proc.poll() is not None:
-            return {"ok": False, "error": f"{self.name} exited immediately with code {proc.poll()}"}
+        # Wait up to 4 seconds for startup
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            new_pids = self.get_pids()
+            if new_pids:
+                return {"ok": True, "message": f"{self.name} started successfully (PID {new_pids[0]})."}
+            if proc and proc.poll() is not None:
+                return {"ok": False, "error": f"{self.name} exited immediately with code {proc.poll()}"}
+            time.sleep(0.3)
         return {"ok": True, "message": f"{self.name} start command issued."}
 
     def restart(self) -> Dict[str, Any]:
