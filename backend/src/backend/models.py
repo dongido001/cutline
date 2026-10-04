@@ -409,6 +409,9 @@ class TimelineAsset(Base):
 
 class ProjectVariantExport(Base):
     __tablename__ = "project_variant_exports"
+    __table_args__ = (
+        UniqueConstraint("project_id", "episode_id", "variant", name="uq_project_variant_exports"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)

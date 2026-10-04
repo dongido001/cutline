@@ -443,6 +443,48 @@ def _relax_single_timeline_constraints(engine: Engine) -> None:
                 connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_final_cuts_project_id ON project_final_cuts (project_id)"))
             except Exception:
                 pass
+        if "project_variant_exports" in tables:
+            try:
+                res = connection.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='project_variant_exports'")).fetchone()
+                if res and res[0] and ("UNIQUE (project_id, variant)" in res[0] or "UNIQUE(project_id, variant)" in res[0]):
+                    connection.execute(text("PRAGMA foreign_keys=OFF"))
+                    connection.execute(text("""
+                        CREATE TABLE project_variant_exports_new (
+                            id VARCHAR NOT NULL PRIMARY KEY,
+                            project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                            episode_id VARCHAR REFERENCES episodes(id) ON DELETE CASCADE,
+                            variant VARCHAR(16) NOT NULL,
+                            filename VARCHAR(240) NOT NULL,
+                            mime_type VARCHAR(80) NOT NULL,
+                            duration_ms INTEGER NOT NULL,
+                            width INTEGER NOT NULL,
+                            height INTEGER NOT NULL,
+                            clip_count INTEGER NOT NULL,
+                            fallback_count INTEGER NOT NULL,
+                            timeline_revision INTEGER NOT NULL,
+                            created_at DATETIME NOT NULL,
+                            UNIQUE (project_id, episode_id, variant)
+                        )
+                    """))
+                    connection.execute(text("""
+                        INSERT INTO project_variant_exports_new (
+                            id, project_id, episode_id, variant, filename, mime_type,
+                            duration_ms, width, height, clip_count, fallback_count,
+                            timeline_revision, created_at
+                        )
+                        SELECT
+                            id, project_id, episode_id, variant, filename, mime_type,
+                            duration_ms, width, height, clip_count, fallback_count,
+                            timeline_revision, created_at
+                        FROM project_variant_exports
+                    """))
+                    connection.execute(text("DROP TABLE project_variant_exports"))
+                    connection.execute(text("ALTER TABLE project_variant_exports_new RENAME TO project_variant_exports"))
+                    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_project_id ON project_variant_exports (project_id)"))
+                    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_episode_id ON project_variant_exports (episode_id)"))
+                    connection.execute(text("PRAGMA foreign_keys=ON"))
+            except Exception:
+                pass
 
 
 def _backfill_episodes(engine: Engine) -> None:
