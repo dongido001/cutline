@@ -23,7 +23,7 @@ CHARACTER_SECTION_STOP = re.compile(
     r"(?im)^(?:#{1,6}\s*)?(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+|SCENE|OPENING|---)\b"
 )
 CHARACTER_LINE = re.compile(
-    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-]{0,80}?)(?:\*\*)?"
+    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-,/\"\(\)]{0,80}?)(?:\*\*)?"
     r"(?:\s*\((?P<role>[^)]+)\))?"
     r"\s*[—–\-:]\s*(?P<notes>.+)$"
 )
@@ -69,7 +69,17 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
             if found:
                 break
             continue
-        name = canonical_character_name(match.group("name"))
+        raw_name = match.group("name").strip()
+        nickname_match = re.search(r'["\']([^"\']+)["\']', raw_name)
+        if nickname_match:
+            name = canonical_character_name(nickname_match.group(1))
+        elif "," in raw_name:
+            # Drop trailing age e.g. "MAYA SANTOS, 25" -> "MAYA SANTOS"
+            base = raw_name.split(",")[0].strip()
+            # If multi-word, check if first word is the character name
+            name = canonical_character_name(base)
+        else:
+            name = canonical_character_name(raw_name)
         if not name or name in seen:
             continue
         role = (match.group("role") or "").strip()
@@ -170,6 +180,36 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
 
     location_match = re.search(r"^Location:\s*(.+)$", script, re.IGNORECASE | re.MULTILINE)
     location = location_match.group(1).strip() if location_match else "Unspecified"
+
+    set_match = re.search(
+        r"^(?:Set(?: notes)?|Set / location):\s*(.+?)(?=\n\s*(?:Lighting|Wardrobe|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        script,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    default_set_notes = set_match.group(1).strip() if set_match else ""
+    if not default_set_notes and location and location != "Unspecified":
+        default_set_notes = location
+
+    lighting_match = re.search(
+        r"^(?:Lighting(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Wardrobe|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        script,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    default_lighting_notes = lighting_match.group(1).strip() if lighting_match else ""
+
+    wardrobe_match = re.search(
+        r"^(?:Wardrobe(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        script,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    default_wardrobe_notes = wardrobe_match.group(1).strip() if wardrobe_match else ""
+
+    props_match = re.search(
+        r"^(?:Props(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Wardrobe|Character consistency|SHOT\s+\d+|SCENE|$))",
+        script,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    default_props_notes = props_match.group(1).strip() if props_match else ""
     preamble_lines = [line.strip() for line in script[: matches[0].start()].splitlines()]
     film_title = next(
         (
@@ -177,11 +217,11 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
             for line in preamble_lines
             if line
             and not re.match(
-                r"^(Genre|Duration|Format|Aspect ratio|Character consistency|Location):",
+                r"^(Genre|Duration|Format|Aspect ratio|Character consistency|Location|Set|Lighting|Wardrobe|Props|Continuity):",
                 line,
                 re.IGNORECASE,
             )
-            and line.lower() != "character consistency"
+            and line.lower() not in ("character consistency", "continuity notes", "continuity")
         ),
         "MAIN SEQUENCE",
     )
@@ -374,10 +414,10 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
                     "end_ms": source_scene["end_ms"],
                     "action": source_scene["action"],
                     "dialogue": list(source_scene["dialogue"]),
-                    "set_notes": "",
-                    "lighting_notes": "",
-                    "wardrobe_notes": "",
-                    "props_notes": "",
+                    "set_notes": default_set_notes,
+                    "lighting_notes": default_lighting_notes,
+                    "wardrobe_notes": default_wardrobe_notes,
+                    "props_notes": default_props_notes,
                     "shots": [],
                 }
             )

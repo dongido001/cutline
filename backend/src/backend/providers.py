@@ -174,6 +174,10 @@ def normalize_analysis_result(
                 "action": action,
                 "dialogue": _normalize_dialogue(raw_scene.get("dialogue")),
                 "shots": shots,
+                "set_notes": str(raw_scene.get("set_notes") or ""),
+                "lighting_notes": str(raw_scene.get("lighting_notes") or ""),
+                "wardrobe_notes": str(raw_scene.get("wardrobe_notes") or ""),
+                "props_notes": str(raw_scene.get("props_notes") or ""),
             }
         )
 

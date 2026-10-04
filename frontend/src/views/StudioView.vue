@@ -27,6 +27,7 @@ import {
   RefreshCw,
   Save,
   Scissors,
+  Settings,
   SkipBack,
   SkipForward,
   Sparkles,
@@ -361,6 +362,51 @@ const castCharacters = computed(() => store.currentProject?.characters ?? [])
 const selectedCast = computed(() =>
   castCharacters.value.filter((character) => selectedCharacterIds.value.includes(character.id)),
 )
+const managingCharacterId = ref<string | null>(null)
+const managingCharacter = computed(() =>
+  castCharacters.value.find((character) => character.id === managingCharacterId.value) ?? null,
+)
+const characterNotesDraft = ref('')
+const savingCharacterNotes = ref(false)
+const characterNotesSaved = ref(false)
+
+const characterNotesChanged = computed(() => {
+  if (!managingCharacter.value) return false
+  return characterNotesDraft.value.trim() !== (managingCharacter.value.notes || '').trim()
+})
+
+function openCastManager(characterId: string) {
+  managingCharacterId.value = characterId
+  const char = castCharacters.value.find((c) => c.id === characterId)
+  characterNotesDraft.value = char?.notes || ''
+  characterNotesSaved.value = false
+}
+
+async function saveCharacterNotes() {
+  if (!managingCharacter.value || !characterNotesChanged.value || savingCharacterNotes.value) return
+  savingCharacterNotes.value = true
+  try {
+    await store.updateCharacter(managingCharacter.value.id, { notes: characterNotesDraft.value })
+    characterNotesSaved.value = true
+    setTimeout(() => { characterNotesSaved.value = false }, 2000)
+  } finally {
+    savingCharacterNotes.value = false
+  }
+}
+
+async function handleGenerateFaceFromManager() {
+  if (!managingCharacter.value) return
+  if (characterNotesChanged.value) {
+    await saveCharacterNotes()
+  }
+  await generateCastFace(managingCharacter.value)
+}
+
+async function handleDeleteCharacterFromManager(characterId: string) {
+  if (!confirm('Are you sure you want to remove this character from the cast?')) return
+  await removeCastCharacter(characterId)
+  managingCharacterId.value = null
+}
 const selectedShotVideoPrompt = computed(() => selectedShot.value
   ? buildShotVideoPrompt(selectedShot.value, selectedShotScene.value, selectedCast.value, mediaAspect.value)
   : '')
@@ -1053,16 +1099,112 @@ async function copyScriptGuide() {
 
 const createFileInput = ref<HTMLInputElement | null>(null)
 const continueFileInput = ref<HTMLInputElement | null>(null)
+const episodeFileInput = ref<HTMLInputElement | null>(null)
 const isDraggingCreate = ref(false)
 const isDraggingContinuation = ref(false)
+const isDraggingEpisodeFile = ref(false)
 const createFileName = ref('')
 const continuationFileName = ref('')
+const episodeFileName = ref('')
 
-function openScreenplayFilePicker(target: 'create' | 'continue') {
+const showEpisodeDropdown = ref(false)
+const episodeDropdownRef = ref<HTMLElement | null>(null)
+const showNewEpisodeModal = ref(false)
+const showProjectSettingsModal = ref(false)
+const showOriginalScriptModal = ref(false)
+const scriptCopied = ref(false)
+const originalScriptText = computed(() => {
+  return store.currentProject?.current_version?.source_text || 'No script available.'
+})
+
+async function copyOriginalScript() {
+  if (!originalScriptText.value) return
+  await navigator.clipboard.writeText(originalScriptText.value)
+  scriptCopied.value = true
+  setTimeout(() => {
+    scriptCopied.value = false
+  }, 2000)
+}
+const newEpisodeForm = reactive({
+  title: '',
+  script: '',
+  target_duration_seconds: 60,
+})
+const projectSettingsForm = reactive({
+  title: '',
+  episode_label: 'Episode',
+})
+
+const episodeLabel = computed(() => store.episodeLabel)
+const currentEpisodeDisplay = computed(() => {
+  if (!store.currentEpisode) return `${episodeLabel.value}s`
+  return `${episodeLabel.value} ${store.currentEpisode.episode_number}: ${store.currentEpisode.title}`
+})
+
+function handleDocumentClick(e: MouseEvent) {
+  if (episodeDropdownRef.value && !episodeDropdownRef.value.contains(e.target as Node)) {
+    showEpisodeDropdown.value = false
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleDocumentClick)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleDocumentClick)
+})
+
+async function handleSelectEpisode(episodeId: string) {
+  showEpisodeDropdown.value = false
+  await store.selectEpisode(episodeId)
+}
+
+function openNewEpisodeModal() {
+  showEpisodeDropdown.value = false
+  const nextNum = (store.episodes.length || 0) + 1
+  newEpisodeForm.title = `${episodeLabel.value} ${nextNum}`
+  newEpisodeForm.script = ''
+  newEpisodeForm.target_duration_seconds = store.currentProject?.target_duration_seconds || 60
+  episodeFileName.value = ''
+  showNewEpisodeModal.value = true
+}
+
+async function handleCreateEpisodeSubmit() {
+  if (!newEpisodeForm.script.trim() || !newEpisodeForm.title.trim()) return
+  await store.createEpisode({
+    title: newEpisodeForm.title.trim(),
+    script: newEpisodeForm.script.trim(),
+    target_duration_seconds: newEpisodeForm.target_duration_seconds,
+  })
+  showNewEpisodeModal.value = false
+}
+
+function openProjectSettings() {
+  showEpisodeDropdown.value = false
+  if (store.currentProject) {
+    projectSettingsForm.title = store.currentProject.title
+    projectSettingsForm.episode_label = store.currentProject.episode_label || 'Episode'
+  }
+  showProjectSettingsModal.value = true
+}
+
+async function handleSaveProjectSettings() {
+  if (!projectSettingsForm.title.trim()) return
+  await store.updateProjectSettings({
+    title: projectSettingsForm.title.trim(),
+    episode_label: projectSettingsForm.episode_label.trim() || 'Episode',
+  })
+  showProjectSettingsModal.value = false
+}
+
+function openScreenplayFilePicker(target: 'create' | 'continue' | 'episode') {
   if (target === 'create') {
     createFileInput.value?.click()
-  } else {
+  } else if (target === 'continue') {
     continueFileInput.value?.click()
+  } else {
+    episodeFileInput.value?.click()
   }
 }
 
@@ -1092,7 +1234,7 @@ function extractScreenplayTitle(text: string): string {
   return ''
 }
 
-async function processScreenplayFile(file: File, target: 'create' | 'continue') {
+async function processScreenplayFile(file: File, target: 'create' | 'continue' | 'episode') {
   if (!file) return
   try {
     const content = await readFileAsText(file)
@@ -1108,16 +1250,23 @@ async function processScreenplayFile(file: File, target: 'create' | 'continue') 
           form.title = base.charAt(0).toUpperCase() + base.slice(1)
         }
       }
-    } else {
+    } else if (target === 'continue') {
       continuationForm.script = content
       continuationFileName.value = file.name
+    } else if (target === 'episode') {
+      newEpisodeForm.script = content
+      episodeFileName.value = file.name
+      const titleFromScript = extractScreenplayTitle(content)
+      if (titleFromScript) {
+        newEpisodeForm.title = titleFromScript
+      }
     }
   } catch (err) {
     console.error('Failed to read screenplay file:', err)
   }
 }
 
-function handleScreenplayFileSelected(event: Event, target: 'create' | 'continue') {
+function handleScreenplayFileSelected(event: Event, target: 'create' | 'continue' | 'episode') {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (file) {
@@ -1126,11 +1275,13 @@ function handleScreenplayFileSelected(event: Event, target: 'create' | 'continue
   input.value = ''
 }
 
-function handleScreenplayDrop(event: DragEvent, target: 'create' | 'continue') {
+function handleScreenplayDrop(event: DragEvent, target: 'create' | 'continue' | 'episode') {
   if (target === 'create') {
     isDraggingCreate.value = false
-  } else {
+  } else if (target === 'continue') {
     isDraggingContinuation.value = false
+  } else {
+    isDraggingEpisodeFile.value = false
   }
   const file = event.dataTransfer?.files?.[0]
   if (file) {
@@ -1138,13 +1289,19 @@ function handleScreenplayDrop(event: DragEvent, target: 'create' | 'continue') {
   }
 }
 
-function clearLoadedFile(target: 'create' | 'continue') {
+function clearLoadedFile(target: 'create' | 'continue' | 'episode') {
   if (target === 'create') {
     createFileName.value = ''
     form.script = ''
-  } else {
+    if (createFileInput.value) createFileInput.value.value = ''
+  } else if (target === 'continue') {
     continuationFileName.value = ''
     continuationForm.script = ''
+    if (continueFileInput.value) continueFileInput.value.value = ''
+  } else {
+    episodeFileName.value = ''
+    newEpisodeForm.script = ''
+    if (episodeFileInput.value) episodeFileInput.value.value = ''
   }
 }
 
@@ -1403,7 +1560,66 @@ function formatRenderedAt(value: string) {
       </div>
       <header class="project-header">
         <div>
-          <div class="breadcrumb"><span>Projects</span><ChevronRight :size="14" /><span>{{ projectTitle }}</span></div>
+          <div class="breadcrumb">
+            <span>Projects</span>
+            <ChevronRight :size="14" />
+            <button type="button" class="project-title-link" @click="openProjectSettings" :title="'Project Settings: ' + projectTitle">
+              <Film :size="13" />
+              <span>{{ projectTitle }}</span>
+            </button>
+            <ChevronRight :size="14" />
+            <div class="episode-switcher" ref="episodeDropdownRef">
+              <button
+                type="button"
+                class="episode-switcher-trigger"
+                :class="{ 'is-open': showEpisodeDropdown }"
+                @click="showEpisodeDropdown = !showEpisodeDropdown"
+                :title="'Switch ' + episodeLabel"
+              >
+                <Clapperboard :size="13" />
+                <span class="episode-switcher-label">{{ currentEpisodeDisplay }}</span>
+                <ChevronDown :size="13" class="switcher-arrow" />
+              </button>
+
+              <div v-if="showEpisodeDropdown" class="episode-dropdown-menu">
+                <div class="episode-menu-header">
+                  <span>{{ episodeLabel }}s ({{ store.episodes.length }})</span>
+                  <button type="button" class="episode-settings-icon-btn" title="Project settings & label" @click="openProjectSettings">
+                    <Settings :size="13" />
+                  </button>
+                </div>
+                <div class="episode-menu-list">
+                  <button
+                    v-for="ep in store.episodes"
+                    :key="ep.id"
+                    type="button"
+                    class="episode-menu-item"
+                    :class="{ 'is-active': ep.id === store.currentEpisodeId }"
+                    @click="handleSelectEpisode(ep.id)"
+                  >
+                    <div class="episode-item-main">
+                      <div class="episode-item-headline">
+                        <span class="episode-badge">{{ episodeLabel }} {{ ep.episode_number }}</span>
+                        <strong class="episode-item-title">{{ ep.title }}</strong>
+                      </div>
+                      <div class="episode-item-meta">
+                        <span>{{ ep.shot_count }} shots</span>
+                        <span class="meta-dot">·</span>
+                        <span class="episode-status-tag" :class="ep.status">{{ ep.status.replace('_', ' ') }}</span>
+                      </div>
+                    </div>
+                    <Check v-if="ep.id === store.currentEpisodeId" :size="15" class="episode-check-icon" />
+                  </button>
+                </div>
+                <div class="episode-menu-footer">
+                  <button type="button" class="add-episode-btn" @click="openNewEpisodeModal">
+                    <Plus :size="14" />
+                    <span>New {{ episodeLabel }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
           <h1>{{ stageTitle }}</h1>
         </div>
         <div class="header-actions">
@@ -1463,7 +1679,18 @@ function formatRenderedAt(value: string) {
               <span class="eyebrow">Scene {{ String(activeScene + 1).padStart(2, '0') }}</span>
               <h2>{{ selectedScene.title }}</h2>
             </div>
-            <div class="time-chip"><Clock3 :size="14" /> {{ sceneTime(selectedScene) }}</div>
+            <div class="script-toolbar-right">
+              <button
+                type="button"
+                class="view-original-script-btn"
+                title="View original screenplay text"
+                @click="showOriginalScriptModal = true"
+              >
+                <FileText :size="14" />
+                <span>Original Script</span>
+              </button>
+              <div class="time-chip"><Clock3 :size="14" /> {{ sceneTime(selectedScene) }}</div>
+            </div>
           </div>
 
           <article class="screenplay">
@@ -1604,16 +1831,26 @@ function formatRenderedAt(value: string) {
             </header>
             <div v-if="!castCharacters.length" class="cast-empty">Sync cast from the script, then generate faces once. Shots inherit tags automatically.</div>
             <div v-else class="produce-cast-row">
-              <article v-for="character in castCharacters" :key="character.id" class="produce-cast-card">
+              <article
+                v-for="character in castCharacters"
+                :key="character.id"
+                class="produce-cast-card"
+                @click="openCastManager(character.id)"
+              >
                 <div class="produce-cast-face">
                   <img v-if="character.references[0]" :src="character.references[0].url" :alt="character.name" />
                   <span v-else>{{ character.name.slice(0, 1) }}</span>
                 </div>
                 <strong>{{ character.name }}</strong>
                 <small>{{ character.references.length ? `${character.references.length} ref${character.references.length === 1 ? '' : 's'}` : 'needs face' }}</small>
-                <button type="button" class="ghost-link" :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable" @click="generateCastFace(character)">
-                  {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add face' : 'Generate' }}
-                </button>
+                <div class="produce-cast-card-actions" @click.stop>
+                  <button type="button" class="ghost-link" @click="openCastManager(character.id)">
+                    Manage
+                  </button>
+                  <button type="button" class="ghost-link" :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable" @click="generateCastFace(character)">
+                    {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add face' : 'Generate' }}
+                  </button>
+                </div>
               </article>
             </div>
             <input ref="castRefInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="handleCastReferenceUpload" />
@@ -2150,6 +2387,203 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
+  <!-- New Episode / Part Modal -->
+  <div v-if="showNewEpisodeModal" class="modal-backdrop" @click.self="!store.creatingEpisode && (showNewEpisodeModal = false)">
+    <form class="project-modal new-episode-modal" @submit.prevent="handleCreateEpisodeSubmit">
+      <header>
+        <div>
+          <span class="section-label">Add {{ episodeLabel }}</span>
+          <h2>New {{ episodeLabel }} / Part</h2>
+        </div>
+        <button type="button" class="mini-icon" aria-label="Close" :disabled="store.creatingEpisode" @click="showNewEpisodeModal = false">
+          <X :size="17" />
+        </button>
+      </header>
+
+      <div class="field">
+        <label for="new-episode-title">{{ episodeLabel }} Title</label>
+        <input
+          id="new-episode-title"
+          v-model="newEpisodeForm.title"
+          type="text"
+          :placeholder="`${episodeLabel} ${(store.episodes.length || 0) + 1} title...`"
+          required
+        />
+      </div>
+
+      <div class="screenplay-input">
+        <div class="screenplay-input-header">
+          <label for="new-episode-script">Screenplay</label>
+          <div class="field-actions">
+            <button type="button" class="field-action-button" @click="openScreenplayFilePicker('episode')">
+              <Upload :size="13" />
+              <span>Import file</span>
+            </button>
+            <button type="button" class="field-action-button" @click="showScriptGuide = true">
+              <BookOpen :size="13" />
+              <span>Guide</span>
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="screenplay-dropzone"
+          :class="{ 'is-dragging': isDraggingEpisodeFile, 'has-file': Boolean(episodeFileName) }"
+          @dragover.prevent="isDraggingEpisodeFile = true"
+          @dragleave.prevent="isDraggingEpisodeFile = false"
+          @drop.prevent="handleScreenplayDrop($event, 'episode')"
+        >
+          <textarea
+            id="new-episode-script"
+            v-model="newEpisodeForm.script"
+            rows="10"
+            :placeholder="`Paste ${episodeLabel.toLowerCase()} screenplay or drop file (.txt, .md, .fountain)...`"
+            required
+          ></textarea>
+          <div v-if="episodeFileName" class="screenplay-file-pill">
+            <FileText :size="13" />
+            <span>{{ episodeFileName }}</span>
+            <button type="button" class="pill-remove" @click="clearLoadedFile('episode')"><X :size="11" /></button>
+          </div>
+        </div>
+        <input
+          ref="episodeFileInput"
+          type="file"
+          accept=".txt,.md,.markdown,.fountain,.screenplay,text/plain,text/markdown"
+          style="display: none"
+          @change="handleScreenplayFileSelected($event, 'episode')"
+        />
+      </div>
+
+      <div class="modal-row">
+        <div class="field">
+          <label for="new-episode-duration">Target duration (seconds)</label>
+          <input id="new-episode-duration" v-model.number="newEpisodeForm.target_duration_seconds" type="number" min="10" max="600" step="5" />
+        </div>
+      </div>
+
+      <footer>
+        <button type="button" class="secondary-button" :disabled="store.creatingEpisode" @click="showNewEpisodeModal = false">Cancel</button>
+        <button type="submit" class="primary-button" :disabled="store.creatingEpisode || !newEpisodeForm.script.trim() || !newEpisodeForm.title.trim()">
+          <Sparkles v-if="!store.creatingEpisode" :size="15" />
+          <span>{{ store.creatingEpisode ? `Creating ${episodeLabel}...` : `Create ${episodeLabel}` }}</span>
+        </button>
+      </footer>
+    </form>
+  </div>
+
+  <!-- Project Settings / Label Modal -->
+  <div v-if="showOriginalScriptModal" class="modal-backdrop" @click.self="showOriginalScriptModal = false">
+    <div class="project-modal original-script-modal" role="dialog" aria-modal="true" aria-labelledby="original-script-title">
+      <header>
+        <div>
+          <span class="section-label">Source Screenplay</span>
+          <h2 id="original-script-title">Original Script · {{ currentEpisodeDisplay }}</h2>
+        </div>
+        <button type="button" class="mini-icon" aria-label="Close" @click="showOriginalScriptModal = false">
+          <X :size="17" />
+        </button>
+      </header>
+
+      <div class="original-script-content">
+        <pre class="original-script-pre">{{ originalScriptText }}</pre>
+      </div>
+
+      <footer>
+        <button type="button" class="secondary-button" @click="copyOriginalScript">
+          <Check v-if="scriptCopied" :size="14" />
+          <Copy v-else :size="14" />
+          <span>{{ scriptCopied ? 'Copied to Clipboard' : 'Copy Script' }}</span>
+        </button>
+        <button type="button" class="primary-button" @click="showOriginalScriptModal = false">
+          <span>Close</span>
+        </button>
+      </footer>
+    </div>
+  </div>
+
+  <div v-if="showProjectSettingsModal" class="modal-backdrop" @click.self="!store.updatingProject && (showProjectSettingsModal = false)">
+    <form class="project-modal project-settings-modal" @submit.prevent="handleSaveProjectSettings">
+      <header>
+        <div>
+          <span class="section-label">Project Settings</span>
+          <h2>Project Naming & Structure</h2>
+        </div>
+        <button type="button" class="mini-icon" aria-label="Close" :disabled="store.updatingProject" @click="showProjectSettingsModal = false">
+          <X :size="17" />
+        </button>
+      </header>
+
+      <div class="field">
+        <label for="project-settings-title">Project / Show Title</label>
+        <input
+          id="project-settings-title"
+          v-model="projectSettingsForm.title"
+          type="text"
+          placeholder="Series or project title..."
+          required
+        />
+      </div>
+
+      <div class="field">
+        <label>Installment Naming Terminology</label>
+        <p class="field-hint">Choose how chapters or segments in this project are labeled across Cutline.</p>
+        <div class="label-options-grid">
+          <button
+            type="button"
+            class="label-choice-card"
+            :class="{ 'is-selected': projectSettingsForm.episode_label === 'Episode' }"
+            @click="projectSettingsForm.episode_label = 'Episode'"
+          >
+            <strong>Episode</strong>
+            <small>Episode 1, Episode 2, Episode 3</small>
+          </button>
+          <button
+            type="button"
+            class="label-choice-card"
+            :class="{ 'is-selected': projectSettingsForm.episode_label === 'Part' }"
+            @click="projectSettingsForm.episode_label = 'Part'"
+          >
+            <strong>Part</strong>
+            <small>Part 1, Part 2, Part 3</small>
+          </button>
+          <button
+            type="button"
+            class="label-choice-card"
+            :class="{ 'is-selected': projectSettingsForm.episode_label === 'Chapter' }"
+            @click="projectSettingsForm.episode_label = 'Chapter'"
+          >
+            <strong>Chapter</strong>
+            <small>Chapter 1, Chapter 2, Chapter 3</small>
+          </button>
+          <button
+            type="button"
+            class="label-choice-card"
+            :class="{ 'is-selected': !['Episode', 'Part', 'Chapter'].includes(projectSettingsForm.episode_label) }"
+            @click="projectSettingsForm.episode_label = 'Custom'"
+          >
+            <strong>Custom</strong>
+            <small>Scene, Act, Segment...</small>
+          </button>
+        </div>
+        <input
+          v-if="!['Episode', 'Part', 'Chapter'].includes(projectSettingsForm.episode_label) || projectSettingsForm.episode_label === 'Custom'"
+          v-model="projectSettingsForm.episode_label"
+          type="text"
+          class="custom-label-input"
+          placeholder="Enter custom label (e.g. Scene, Act, Reel)..."
+        />
+      </div>
+
+      <footer>
+        <button type="button" class="secondary-button" :disabled="store.updatingProject" @click="showProjectSettingsModal = false">Cancel</button>
+        <button type="submit" class="primary-button" :disabled="store.updatingProject || !projectSettingsForm.title.trim()">
+          <span>{{ store.updatingProject ? 'Saving...' : 'Save Settings' }}</span>
+        </button>
+      </footer>
+    </form>
+  </div>
+
   <div v-if="showContinuation" class="modal-backdrop" @click.self="!store.continuingScript && (showContinuation = false)">
     <form class="project-modal continuation-modal" @submit.prevent="submitContinuation">
       <header><div><span class="section-label">Continue project</span><h2>Append screenplay</h2></div><button type="button" class="mini-icon" aria-label="Close" :disabled="store.continuingScript" @click="showContinuation = false"><X :size="17" /></button></header>
@@ -2314,6 +2748,125 @@ function formatRenderedAt(value: string) {
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteFinalCutCandidate = false"><X :size="17" /></button></header>
       <div><h2 id="delete-final-cut-title">Delete the rendered final cut?</h2><p>Your individual clips, storyboard images, prompts, and timeline will remain.</p></div>
       <footer><button class="secondary-button" @click="deleteFinalCutCandidate = false">Cancel</button><button class="danger-button" @click="confirmDeleteFinalCut"><Trash2 :size="15" />Delete final cut</button></footer>
+    </section>
+  </div>
+  <!-- Cast Reference Manager Modal -->
+  <div v-if="managingCharacter" class="modal-backdrop" @click.self="managingCharacterId = null">
+    <section class="project-modal cast-manager-modal" role="dialog" aria-modal="true" aria-labelledby="cast-manager-title">
+      <header>
+        <div>
+          <span class="section-label">Cast Character</span>
+          <h2 id="cast-manager-title">{{ managingCharacter.name }}</h2>
+        </div>
+        <button type="button" class="mini-icon" aria-label="Close" @click="managingCharacterId = null">
+          <X :size="17" />
+        </button>
+      </header>
+
+      <div class="cast-manager-content">
+        <p class="cast-manager-sub">
+          Manage face references for <strong>{{ managingCharacter.name }}</strong>. Shots tagged with this character inherit these references for visual consistency.
+        </p>
+
+        <!-- Face Prompt / Appearance Notes Editor -->
+        <div class="cast-prompt-section">
+          <div class="cast-prompt-header">
+            <label for="cast-character-prompt">
+              <strong>Face Appearance & Generation Prompt</strong>
+              <small>Edit this prompt to adjust facial features, hair, skin tone, or age before generating.</small>
+            </label>
+            <button
+              v-if="characterNotesChanged || characterNotesSaved"
+              type="button"
+              class="secondary-button mini-btn"
+              :disabled="savingCharacterNotes || characterNotesSaved"
+              @click="saveCharacterNotes"
+            >
+              <Check v-if="characterNotesSaved" :size="13" />
+              <span>{{ characterNotesSaved ? 'Saved' : savingCharacterNotes ? 'Saving…' : 'Save prompt' }}</span>
+            </button>
+          </div>
+          <textarea
+            id="cast-character-prompt"
+            v-model="characterNotesDraft"
+            class="cast-prompt-textarea"
+            rows="3"
+            maxlength="2000"
+            placeholder="Describe facial features, skin tone, eye color, hair style, age, and distinguishing traits..."
+            @blur="saveCharacterNotes"
+          ></textarea>
+        </div>
+
+        <div class="cast-manager-section-header">
+          <strong>Face References ({{ managingCharacter.references.length }})</strong>
+          <small v-if="managingCharacter.references.length > 1">Delete duplicate or unwanted face references below.</small>
+        </div>
+
+        <div v-if="!managingCharacter.references.length" class="cast-no-refs">
+          <p>No face references yet. Generate one with AI or upload a photo.</p>
+        </div>
+
+        <div v-else class="cast-refs-grid">
+          <div
+            v-for="(refItem, idx) in managingCharacter.references"
+            :key="refItem.id"
+            class="cast-ref-card"
+          >
+            <div class="cast-ref-thumb">
+              <img :src="refItem.url" :alt="`${managingCharacter.name} face ${idx + 1}`" />
+            </div>
+            <div class="cast-ref-footer">
+              <span class="ref-tag">Ref {{ idx + 1 }}</span>
+              <button
+                type="button"
+                class="ref-delete-btn"
+                title="Delete this reference"
+                :disabled="castingBusy"
+                @click="removeCastReference(refItem.id)"
+              >
+                <Trash2 :size="13" />
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="cast-manager-toolbar">
+          <button
+            type="button"
+            class="primary-button"
+            :disabled="castingBusy || store.isGeneratingCast(managingCharacter.id) || !imageGenerationAvailable"
+            @click="handleGenerateFaceFromManager"
+          >
+            <Sparkles :size="15" />
+            <span>{{ store.isGeneratingCast(managingCharacter.id) ? 'Generating…' : 'Generate face with AI' }}</span>
+          </button>
+          <button
+            type="button"
+            class="secondary-button"
+            :disabled="castingBusy"
+            @click="chooseCastReference(managingCharacter.id)"
+          >
+            <Upload :size="15" />
+            <span>Upload photo</span>
+          </button>
+          <button
+            type="button"
+            class="danger-link-btn"
+            :disabled="castingBusy"
+            @click="handleDeleteCharacterFromManager(managingCharacter.id)"
+          >
+            <Trash2 :size="14" />
+            <span>Delete character</span>
+          </button>
+        </div>
+      </div>
+
+      <footer>
+        <button type="button" class="primary-button" @click="managingCharacterId = null">
+          <span>Done</span>
+        </button>
+      </footer>
     </section>
   </div>
 </template>
@@ -2804,4 +3357,529 @@ input::placeholder { color: #68716c; }
     display: none;
   }
 }
+
+.cast-prompt-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line-subtle);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.cast-prompt-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cast-prompt-header label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.cast-prompt-header strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.cast-prompt-header small {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.cast-prompt-textarea {
+  width: 100%;
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 72px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cast-prompt-textarea:focus {
+  border-color: var(--line-default);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
+}
+
+.mini-btn {
+  padding: 3px 9px;
+  font-size: 11px;
+  height: auto;
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cast-manager-modal {
+  max-width: 580px;
+  width: 92vw;
+}
+
+.cast-manager-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 8px 0;
+}
+
+.cast-manager-sub {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.cast-manager-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cast-manager-section-header strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.cast-manager-section-header small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.cast-no-refs {
+  padding: 24px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--line-subtle);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.cast-refs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.cast-ref-card {
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line-subtle);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.cast-ref-card:hover {
+  border-color: var(--line-default);
+  transform: translateY(-1px);
+}
+
+.cast-ref-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #000;
+  overflow: hidden;
+}
+
+.cast-ref-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.cast-ref-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.ref-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ref-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 0;
+  color: #ff7878;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 5px;
+  transition: background 0.12s ease;
+}
+
+.ref-delete-btn:hover {
+  background: rgba(238, 92, 92, 0.18);
+  color: #ff9e9e;
+}
+
+.ref-delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-manager-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.danger-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: #ff6b6b;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+}
+
+.danger-link-btn:hover {
+  background: rgba(238, 92, 92, 0.12);
+}
+
+.danger-link-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.produce-cast-card {
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.produce-cast-card:hover {
+  border-color: var(--line-default) !important;
+  transform: translateY(-1px);
+}
+
+.produce-cast-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.script-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.view-original-script-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.view-original-script-btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-primary);
+  border-color: var(--line-default);
+}
+
+.original-script-modal {
+  max-width: 760px;
+  width: 90vw;
+}
+
+.original-script-content {
+  margin: 16px 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--line-subtle);
+  padding: 16px;
+}
+
+.original-script-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
 </style>
+/* Episode Switcher & Multi-part styling */
+.project-title-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+.project-title-link:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+.episode-switcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.episode-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.episode-switcher-trigger:hover, .episode-switcher-trigger.is-open {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.episode-switcher-label {
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.switcher-arrow {
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+.episode-switcher-trigger.is-open .switcher-arrow {
+  transform: rotate(180deg);
+}
+.episode-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 280px;
+  max-width: 360px;
+  background: #141715;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  z-index: 200;
+  overflow: hidden;
+  animation: dropIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes dropIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.episode-menu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.episode-settings-icon-btn {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+}
+.episode-settings-icon-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.episode-menu-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.episode-menu-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+.episode-menu-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.episode-menu-item.is-active {
+  background: rgba(73, 169, 120, 0.12);
+  border-color: rgba(73, 169, 120, 0.28);
+}
+.episode-item-main {
+  flex: 1;
+  min-width: 0;
+}
+.episode-item-headline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.episode-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #c5ccc7;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.episode-item-title {
+  font-size: 12px;
+  color: #eff2f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.episode-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.episode-status-tag {
+  text-transform: capitalize;
+}
+.episode-status-tag.ready, .episode-status-tag.shot_plan {
+  color: #7fd1a5;
+}
+.episode-check-icon {
+  color: #7fd1a5;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+.episode-menu-footer {
+  padding: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.25);
+}
+.add-episode-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #eff2f0;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.add-episode-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.label-options-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.label-choice-card {
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.label-choice-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.label-choice-card.is-selected {
+  border-color: #49a978;
+  background: rgba(73, 169, 120, 0.14);
+}
+.label-choice-card small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.custom-label-input {
+  margin-top: 10px;
+  width: 100%;
+}
+.field-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
