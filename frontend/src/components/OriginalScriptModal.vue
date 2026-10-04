@@ -13,6 +13,18 @@ const emit = defineEmits<{
 }>()
 
 const copied = ref(false)
+const backdropPressed = ref(false)
+
+function onBackdropMouseDown(e: MouseEvent) {
+  backdropPressed.value = e.target === e.currentTarget
+}
+
+function onBackdropClick(e: MouseEvent) {
+  if (backdropPressed.value && e.target === e.currentTarget) {
+    emit('close')
+  }
+  backdropPressed.value = false
+}
 
 async function copyScript() {
   if (!props.sourceText) return
@@ -25,7 +37,12 @@ async function copyScript() {
 </script>
 
 <template>
-  <div v-if="show" class="modal-backdrop" @click.self="emit('close')">
+  <div
+    v-if="show"
+    class="modal-backdrop"
+    @mousedown="onBackdropMouseDown"
+    @click="onBackdropClick"
+  >
     <div class="project-modal original-script-modal" role="dialog" aria-modal="true" aria-labelledby="original-script-title">
       <header>
         <div>

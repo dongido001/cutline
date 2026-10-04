@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Check, ChevronDown, Clapperboard, Plus, Settings } from '@lucide/vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { Check, ChevronDown, Clapperboard, Pencil, Plus, Settings, X } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
 
 const emit = defineEmits<{
@@ -11,6 +11,11 @@ const emit = defineEmits<{
 const store = useStudioStore()
 const isOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
+
+const editingEpisodeId = ref<string | null>(null)
+const editingTitle = ref('')
+const savingId = ref<string | null>(null)
+const renameInputRef = ref<HTMLInputElement | null>(null)
 
 const episodeLabel = computed(() => store.episodeLabel || 'Episode')
 
@@ -23,10 +28,14 @@ const currentEpisodeDisplay = computed(() => {
 
 function toggleDropdown() {
   isOpen.value = !isOpen.value
+  if (!isOpen.value) {
+    cancelEditing()
+  }
 }
 
 function closeDropdown() {
   isOpen.value = false
+  cancelEditing()
 }
 
 async function handleSelectEpisode(episodeId: string) {
@@ -43,6 +52,37 @@ function handleOpenSettings() {
 function handleOpenNewEpisode() {
   closeDropdown()
   emit('open-new-episode')
+}
+
+function startEditing(ep: { id: string; title: string | null; episode_number: number }) {
+  editingEpisodeId.value = ep.id
+  editingTitle.value = ep.title || `${episodeLabel.value} ${ep.episode_number}`
+  nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+function cancelEditing() {
+  editingEpisodeId.value = null
+  editingTitle.value = ''
+}
+
+async function saveEditing(ep: { id: string; episode_number: number }) {
+  if (!editingEpisodeId.value || savingId.value) return
+  const trimmed = editingTitle.value.trim()
+  savingId.value = ep.id
+  try {
+    await store.updateEpisode(ep.id, {
+      title: trimmed || `${episodeLabel.value} ${ep.episode_number}`,
+    })
+  } catch (err) {
+    console.error('Failed to update episode title', err)
+  } finally {
+    savingId.value = null
+    editingEpisodeId.value = null
+    editingTitle.value = ''
+  }
 }
 
 function handleClickOutside(event: MouseEvent) {
@@ -88,27 +128,72 @@ onUnmounted(() => {
       </div>
 
       <div class="episode-menu-list">
-        <button
+        <div
           v-for="ep in store.episodes"
           :key="ep.id"
-          type="button"
           class="episode-menu-item"
-          :class="{ 'is-active': ep.id === store.currentEpisodeId }"
-          @click="handleSelectEpisode(ep.id)"
+          :class="{ 'is-active': ep.id === store.currentEpisodeId, 'is-editing': editingEpisodeId === ep.id }"
+          @click="editingEpisodeId !== ep.id && handleSelectEpisode(ep.id)"
         >
-          <div class="episode-item-main">
-            <div class="episode-item-headline">
-              <span class="episode-badge">{{ episodeLabel }} {{ ep.episode_number }}</span>
-              <strong class="episode-item-title">{{ ep.title || `${episodeLabel} ${ep.episode_number}` }}</strong>
-            </div>
-            <div class="episode-item-meta">
-              <span>{{ ep.shot_count }} shots</span>
-              <span>·</span>
-              <span class="episode-status-tag" :class="ep.status">{{ ep.status.replace('_', ' ') }}</span>
-            </div>
+          <!-- Editing Mode -->
+          <div v-if="editingEpisodeId === ep.id" class="episode-rename-row" @click.stop>
+            <span class="episode-badge">{{ episodeLabel }} {{ ep.episode_number }}</span>
+            <input
+              ref="renameInputRef"
+              v-model="editingTitle"
+              type="text"
+              class="episode-rename-input"
+              :placeholder="`${episodeLabel} ${ep.episode_number} title...`"
+              :disabled="savingId === ep.id"
+              @keydown.enter.prevent="saveEditing(ep)"
+              @keydown.esc.prevent="cancelEditing"
+            />
+            <button
+              type="button"
+              class="episode-rename-btn save-btn"
+              title="Save title (Enter)"
+              :disabled="savingId === ep.id"
+              @click.stop="saveEditing(ep)"
+            >
+              <Check :size="13" />
+            </button>
+            <button
+              type="button"
+              class="episode-rename-btn cancel-btn"
+              title="Cancel (Esc)"
+              :disabled="savingId === ep.id"
+              @click.stop="cancelEditing"
+            >
+              <X :size="13" />
+            </button>
           </div>
-          <Check v-if="ep.id === store.currentEpisodeId" :size="15" class="episode-check-icon" />
-        </button>
+
+          <!-- Normal Display Mode -->
+          <template v-else>
+            <div class="episode-item-main">
+              <div class="episode-item-headline">
+                <span class="episode-badge">{{ episodeLabel }} {{ ep.episode_number }}</span>
+                <strong class="episode-item-title">{{ ep.title || `${episodeLabel} ${ep.episode_number}` }}</strong>
+              </div>
+              <div class="episode-item-meta">
+                <span>{{ ep.shot_count }} shots</span>
+                <span>·</span>
+                <span class="episode-status-tag" :class="ep.status">{{ ep.status.replace('_', ' ') }}</span>
+              </div>
+            </div>
+            <div class="episode-item-actions">
+              <button
+                type="button"
+                class="episode-edit-icon-btn"
+                title="Rename episode"
+                @click.stop="startEditing(ep)"
+              >
+                <Pencil :size="12" />
+              </button>
+              <Check v-if="ep.id === store.currentEpisodeId" :size="15" class="episode-check-icon" />
+            </div>
+          </template>
+        </div>
       </div>
 
       <div class="episode-menu-footer">
@@ -181,8 +266,8 @@ onUnmounted(() => {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  min-width: 280px;
-  max-width: 360px;
+  min-width: 300px;
+  max-width: 380px;
   background: #141715;
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 12px;
@@ -261,6 +346,12 @@ onUnmounted(() => {
   border-color: rgba(73, 169, 120, 0.28);
 }
 
+.episode-menu-item.is-editing {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+  cursor: default;
+}
+
 .episode-item-main {
   flex: 1;
   min-width: 0;
@@ -308,10 +399,97 @@ onUnmounted(() => {
   color: #7fd1a5;
 }
 
+.episode-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.episode-edit-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  opacity: 0.6;
+}
+
+.episode-menu-item:hover .episode-edit-icon-btn {
+  opacity: 1;
+}
+
+.episode-edit-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
 .episode-check-icon {
   color: #7fd1a5;
-  margin-left: 8px;
   flex-shrink: 0;
+}
+
+.episode-rename-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.episode-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: #fff;
+  outline: none;
+}
+
+.episode-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.12s ease;
+}
+
+.episode-rename-btn.save-btn {
+  color: #7fd1a5;
+  background: rgba(73, 169, 120, 0.15);
+  border-color: rgba(73, 169, 120, 0.35);
+}
+
+.episode-rename-btn.save-btn:hover:not(:disabled) {
+  background: rgba(73, 169, 120, 0.3);
+  color: #fff;
+}
+
+.episode-rename-btn.cancel-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.episode-rename-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 
 .episode-menu-footer {

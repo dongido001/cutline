@@ -1,12 +1,15 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api, type AspectRatio, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProviderStatus, type ShotCreate, type ShotUpdate, type VoiceProviderInfo, type VoiceAuditionResponse } from '@/lib/api'
+import { api, type AspectRatio, type EpisodeCreate, type EpisodeSummary, type EpisodeUpdate, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProjectUpdateInput, type ProviderStatus, type ShotCreate, type ShotUpdate, type VoiceProviderInfo, type VoiceAuditionResponse } from '@/lib/api'
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
 export const useStudioStore = defineStore('studio', () => {
   const projects = ref<ProjectSummary[]>([])
   const currentProject = ref<ProjectDetail | null>(null)
+  const currentEpisodeId = ref<string | null>(null)
+  const creatingEpisode = ref(false)
+  const updatingProject = ref(false)
   const providers = ref<ProviderStatus[]>([])
   const videoProvider = ref<ProviderStatus | null>(null)
   const imageProviders = ref<ImageProviderStatus[]>([])
@@ -47,6 +50,12 @@ export const useStudioStore = defineStore('studio', () => {
   const error = ref('')
   const watchingJobIds = new Set<string>()
   const watchers = new Map<string, { promise: Promise<Job | null>; listeners: Set<(job: Job) => void> }>()
+
+  const episodes = computed(() => currentProject.value?.episodes ?? [])
+  const currentEpisode = computed(
+    () => episodes.value.find((e) => e.id === currentEpisodeId.value) || episodes.value[0] || null
+  )
+  const episodeLabel = computed(() => currentProject.value?.episode_label || 'Episode')
 
   const pendingSuggestions = computed(
     () => currentProject.value?.current_version?.suggestions.filter((item) => item.status === 'pending') ?? [],
@@ -281,8 +290,10 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function loadProject(id: string, options?: { resumeJobs?: boolean }) {
-    currentProject.value = await api.project(id)
+  async function loadProject(id: string, options?: { resumeJobs?: boolean; episodeId?: string }) {
+    const epId = options?.episodeId || currentEpisodeId.value || undefined
+    currentProject.value = await api.project(id, epId)
+    currentEpisodeId.value = currentProject.value.current_episode_id || null
     if (options?.resumeJobs) {
       imageJobs.value = {}
       castJobs.value = {}
@@ -292,6 +303,53 @@ export const useStudioStore = defineStore('studio', () => {
       processingClipId.value = null
       void resumeActiveJobs(id)
     }
+  }
+
+  async function selectEpisode(episodeId: string) {
+    if (!currentProject.value) return
+    currentEpisodeId.value = episodeId
+    await loadProject(currentProject.value.id, { episodeId, resumeJobs: false })
+  }
+
+  async function createEpisode(input: EpisodeCreate) {
+    if (!currentProject.value) return
+    creatingEpisode.value = true
+    try {
+      const job = await api.createEpisode(currentProject.value.id, input)
+      currentJob.value = job
+      await watchJob(job.id, (next) => { currentJob.value = next })
+      await loadProject(currentProject.value.id, { resumeJobs: false })
+    } finally {
+      creatingEpisode.value = false
+    }
+  }
+
+  async function updateProjectSettings(input: ProjectUpdateInput) {
+    if (!currentProject.value) return
+    updatingProject.value = true
+    try {
+      const updated = await api.updateProject(currentProject.value.id, input)
+      currentProject.value.title = updated.title
+      currentProject.value.episode_label = updated.episode_label
+    } finally {
+      updatingProject.value = false
+    }
+  }
+
+  async function updateEpisode(episodeId: string, input: EpisodeUpdate) {
+    if (!currentProject.value) return
+    const ep = await api.updateEpisode(currentProject.value.id, episodeId, input)
+    const idx = currentProject.value.episodes.findIndex((e) => e.id === episodeId)
+    if (idx !== -1) {
+      currentProject.value.episodes.splice(idx, 1, ep)
+    }
+  }
+
+  async function deleteEpisode(episodeId: string) {
+    if (!currentProject.value) return
+    await api.deleteEpisode(currentProject.value.id, episodeId)
+    currentEpisodeId.value = null
+    await loadProject(currentProject.value.id, { resumeJobs: false })
   }
 
   async function selectProject(id: string) {
@@ -370,11 +428,11 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   async function approveScript() {
-    if (!currentProject.value || currentProject.value.status === 'shot_plan') return
+    if (!currentProject.value) return
     error.value = ''
     approvingScript.value = true
     try {
-      await api.approve(currentProject.value.id)
+      await api.approve(currentProject.value.id, currentEpisodeId.value || undefined)
       await loadProject(currentProject.value.id)
       projects.value = await api.projects()
     } catch (cause) {
@@ -771,7 +829,7 @@ export const useStudioStore = defineStore('studio', () => {
     error.value = ''
     renderingFinalCut.value = true
     try {
-      finalCutJob.value = await api.renderFinalCut(currentProject.value.id, variant)
+      finalCutJob.value = await api.renderFinalCut(currentProject.value.id, variant, currentEpisodeId.value || undefined)
       while (finalCutJob.value.status === 'queued' || finalCutJob.value.status === 'running') {
         await delay(750)
         finalCutJob.value = await api.job(finalCutJob.value.id)
@@ -849,6 +907,17 @@ export const useStudioStore = defineStore('studio', () => {
   return {
     projects,
     currentProject,
+    currentEpisodeId,
+    creatingEpisode,
+    updatingProject,
+    episodes,
+    currentEpisode,
+    episodeLabel,
+    selectEpisode,
+    createEpisode,
+    updateProjectSettings,
+    updateEpisode,
+    deleteEpisode,
     providers,
     videoProvider,
     imageProviders,

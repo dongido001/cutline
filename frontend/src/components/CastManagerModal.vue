@@ -106,10 +106,27 @@ async function handleDeleteCharacter() {
     busy.value = false
   }
 }
+
+const backdropPressed = ref(false)
+
+function onBackdropMouseDown(e: MouseEvent) {
+  backdropPressed.value = e.target === e.currentTarget
+}
+
+function onBackdropClick(e: MouseEvent) {
+  if (backdropPressed.value && e.target === e.currentTarget) {
+    emit('close')
+  }
+  backdropPressed.value = false
+}
 </script>
 
 <template>
-  <div class="modal-backdrop" @click.self="emit('close')">
+  <div
+    class="modal-backdrop"
+    @mousedown="onBackdropMouseDown"
+    @click="onBackdropClick"
+  >
     <section class="project-modal cast-manager-modal" role="dialog" aria-modal="true" :aria-labelledby="'cast-manager-' + character.id">
       <header>
         <div>

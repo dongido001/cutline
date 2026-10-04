@@ -1027,14 +1027,25 @@ function chooseUpload() {
   uploadInput.value?.click()
 }
 
+const modalBackdropPressed = ref(false)
+
+function trackModalBackdropPress(event: MouseEvent | PointerEvent) {
+  modalBackdropPressed.value = event.target === event.currentTarget
+}
+
+function handleBackdropClose(event: MouseEvent, closeFn: () => void) {
+  if (modalBackdropPressed.value && event.target === event.currentTarget) {
+    closeFn()
+  }
+  modalBackdropPressed.value = false
+}
+
 function trackCreateBackdropPress(event: PointerEvent) {
-  createBackdropPressed.value = event.target === event.currentTarget
+  trackModalBackdropPress(event)
 }
 
 function closeCreateFromBackdrop(event: MouseEvent) {
-  const clickedBackdrop = event.target === event.currentTarget
-  if (createBackdropPressed.value && clickedBackdrop) showCreate.value = false
-  createBackdropPressed.value = false
+  handleBackdropClose(event, () => { showCreate.value = false })
 }
 
 function setShotDuration(event: Event) {
@@ -1137,6 +1148,7 @@ const projectSettingsForm = reactive({
   title: '',
   episode_label: 'Episode',
 })
+const episodeTitlesForm = reactive<Record<string, string>>({})
 
 const episodeLabel = computed(() => store.episodeLabel)
 const currentEpisodeDisplay = computed(() => {
@@ -1188,16 +1200,28 @@ function openProjectSettings() {
   if (store.currentProject) {
     projectSettingsForm.title = store.currentProject.title
     projectSettingsForm.episode_label = store.currentProject.episode_label || 'Episode'
+    for (const ep of store.episodes) {
+      episodeTitlesForm[ep.id] = ep.title || ''
+    }
   }
   showProjectSettingsModal.value = true
 }
 
 async function handleSaveProjectSettings() {
   if (!projectSettingsForm.title.trim()) return
+  const currentLabel = projectSettingsForm.episode_label.trim() || 'Episode'
   await store.updateProjectSettings({
     title: projectSettingsForm.title.trim(),
-    episode_label: projectSettingsForm.episode_label.trim() || 'Episode',
+    episode_label: currentLabel,
   })
+  for (const ep of store.episodes) {
+    const updatedTitle = episodeTitlesForm[ep.id]?.trim()
+    if (updatedTitle !== undefined && updatedTitle !== (ep.title || '')) {
+      await store.updateEpisode(ep.id, {
+        title: updatedTitle || `${currentLabel} ${ep.episode_number}`,
+      })
+    }
+  }
   showProjectSettingsModal.value = false
 }
 
@@ -2333,7 +2357,7 @@ function formatRenderedAt(value: string) {
     </form>
   </div>
 
-  <div v-if="showScriptGuide" class="modal-backdrop guide-backdrop" @click.self="showScriptGuide = false">
+  <div v-if="showScriptGuide" class="modal-backdrop guide-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => showScriptGuide = false)">
     <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="script-guide-title">
       <header>
         <div><span class="section-label">Reference</span><h2 id="script-guide-title">Structured script format</h2></div>
@@ -2349,7 +2373,7 @@ function formatRenderedAt(value: string) {
   </div>
 
   <!-- New Episode / Part Modal -->
-  <div v-if="showNewEpisodeModal" class="modal-backdrop" @click.self="!store.creatingEpisode && (showNewEpisodeModal = false)">
+  <div v-if="showNewEpisodeModal" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => !store.creatingEpisode && (showNewEpisodeModal = false))">
     <form class="project-modal new-episode-modal" @submit.prevent="handleCreateEpisodeSubmit">
       <header>
         <div>
@@ -2441,7 +2465,7 @@ function formatRenderedAt(value: string) {
     @close="showOriginalScriptModal = false"
   />
 
-  <div v-if="showProjectSettingsModal" class="modal-backdrop" @click.self="!store.updatingProject && (showProjectSettingsModal = false)">
+  <div v-if="showProjectSettingsModal" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => !store.updatingProject && (showProjectSettingsModal = false))">
     <form class="project-modal project-settings-modal" @submit.prevent="handleSaveProjectSettings">
       <header>
         <div>
@@ -2514,6 +2538,22 @@ function formatRenderedAt(value: string) {
         />
       </div>
 
+      <div v-if="store.episodes.length" class="field">
+        <label>{{ projectSettingsForm.episode_label || 'Episode' }} Titles</label>
+        <p class="field-hint">Update the title for each {{ (projectSettingsForm.episode_label || 'Episode').toLowerCase() }} in this project.</p>
+        <div class="episode-settings-list">
+          <div v-for="ep in store.episodes" :key="ep.id" class="episode-setting-item">
+            <span class="episode-setting-badge">{{ projectSettingsForm.episode_label || 'Episode' }} {{ ep.episode_number }}</span>
+            <input
+              v-model="episodeTitlesForm[ep.id]"
+              type="text"
+              class="episode-setting-title-input"
+              :placeholder="`${projectSettingsForm.episode_label || 'Episode'} ${ep.episode_number} title...`"
+            />
+          </div>
+        </div>
+      </div>
+
       <footer>
         <button type="button" class="secondary-button" :disabled="store.updatingProject" @click="showProjectSettingsModal = false">Cancel</button>
         <button type="submit" class="primary-button" :disabled="store.updatingProject || !projectSettingsForm.title.trim()">
@@ -2523,7 +2563,7 @@ function formatRenderedAt(value: string) {
     </form>
   </div>
 
-  <div v-if="showContinuation" class="modal-backdrop" @click.self="!store.continuingScript && (showContinuation = false)">
+  <div v-if="showContinuation" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => !store.continuingScript && (showContinuation = false))">
     <form class="project-modal continuation-modal" @submit.prevent="submitContinuation">
       <header><div><span class="section-label">Continue project</span><h2>Append screenplay</h2></div><button type="button" class="mini-icon" aria-label="Close" :disabled="store.continuingScript" @click="showContinuation = false"><X :size="17" /></button></header>
       <div class="continuation-summary"><span>Current cut</span><strong>{{ projectDuration }}</strong><span>Text provider</span><strong>{{ activeProvider?.label || store.currentProject?.text_provider }}</strong></div>
@@ -2633,7 +2673,7 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
-  <div v-if="deleteCandidate" class="modal-backdrop" @click.self="deleteCandidate = null">
+  <div v-if="deleteCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteCandidate = null)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-project-title">
       <header>
         <div class="danger-icon"><Trash2 :size="18" /></div>
@@ -2651,7 +2691,7 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
-  <div v-if="deleteShotCandidate" class="modal-backdrop" @click.self="deleteShotCandidate = null">
+  <div v-if="deleteShotCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteShotCandidate = null)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-shot-modal-title">
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteShotCandidate = null"><X :size="17" /></button></header>
       <div>
@@ -2666,7 +2706,7 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
-  <div v-if="deleteShotImageCandidate" class="modal-backdrop" @click.self="deleteShotImageCandidate = false">
+  <div v-if="deleteShotImageCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteShotImageCandidate = false)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-shot-image-title">
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteShotImageCandidate = false"><X :size="17" /></button></header>
       <div><h2 id="delete-shot-image-title">Delete this {{ mediaAspect }} storyboard image?</h2><p>The shot, prompts, and other aspect-ratio image will remain.</p></div>
@@ -2674,7 +2714,7 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
-  <div v-if="deleteShotClipCandidate" class="modal-backdrop" @click.self="deleteShotClipCandidate = false">
+  <div v-if="deleteShotClipCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteShotClipCandidate = false)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-shot-clip-title">
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteShotClipCandidate = false"><X :size="17" /></button></header>
       <div><h2 id="delete-shot-clip-title">Delete this shot video?</h2><p>The shot, storyboard image, and prompts will remain. Only the generated or uploaded video will be removed.</p></div>
@@ -2682,7 +2722,7 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
-  <div v-if="deleteFinalCutCandidate" class="modal-backdrop" @click.self="deleteFinalCutCandidate = false">
+  <div v-if="deleteFinalCutCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteFinalCutCandidate = false)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-final-cut-title">
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteFinalCutCandidate = false"><X :size="17" /></button></header>
       <div><h2 id="delete-final-cut-title">Delete the rendered final cut?</h2><p>Your individual clips, storyboard images, prompts, and timeline will remain.</p></div>
@@ -2960,6 +3000,50 @@ input::placeholder { color: #68716c; }
 
 .chat-session-callout-link:hover {
   text-decoration: underline;
+}
+
+.episode-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.episode-setting-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.episode-setting-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #c5ccc7;
+  white-space: nowrap;
+  min-width: 80px;
+  text-align: center;
+}
+
+.episode-setting-title-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line-subtle);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-primary);
+  font-size: 13px;
+  transition: border-color 0.15s ease;
+}
+
+.episode-setting-title-input:focus {
+  border-color: var(--line-default);
+  outline: none;
 }
 </style>
 
@@ -3306,4 +3390,48 @@ input::placeholder { color: #68716c; }
   border-color: var(--line-default);
 }
 
+
+.episode-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.episode-setting-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.episode-setting-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #c5ccc7;
+  white-space: nowrap;
+  min-width: 80px;
+  text-align: center;
+}
+
+.episode-setting-title-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line-subtle);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-primary);
+  font-size: 13px;
+  transition: border-color 0.15s ease;
+}
+
+.episode-setting-title-input:focus {
+  border-color: var(--line-default);
+  outline: none;
+}
 </style>
