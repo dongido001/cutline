@@ -2065,8 +2065,9 @@ function formatRenderedAt(value: string) {
                     <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
                     <small>{{ shot.framing }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</small>
                     <small v-if="store.isProcessingShot(shot.id)" class="shot-job-copy">{{ imageJobForShot(shot.id)?.message || 'Starting image generation' }}</small>
+                    <small v-else-if="store.isProcessingClip(shot.id)" class="shot-job-copy">{{ store.clipJobs[shot.id]?.message || 'Generating video' }}</small>
                   </span>
-                  <RefreshCw v-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="15" />
+                  <RefreshCw v-if="store.isProcessingShot(shot.id) || store.isProcessingClip(shot.id)" class="shot-processing-icon spinning" :size="15" />
                   <Check v-else-if="shotHasMedia(shot)" class="shot-ready-icon" :size="15" />
                 </button>
                 <button
@@ -2133,9 +2134,9 @@ function formatRenderedAt(value: string) {
                 <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
                 <img v-else-if="selectedAspectReference" :src="selectedAspectReference.url" :alt="`${mediaAspect} reference frame for ${selectedShotLabel}`" />
                 <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} media yet</strong><span>Generate a frame, then a clip — or run Create draft from the story view.</span></div>
-                <div v-if="store.isProcessingShot(selectedShot.id) || store.processingClipId === selectedShot.id" class="render-overlay">
+                <div v-if="store.isProcessingShot(selectedShot.id) || store.isProcessingClip(selectedShot.id)" class="render-overlay">
                   <RefreshCw class="spinning" :size="24" />
-                  <strong>{{ store.processingClipId === selectedShot.id ? (store.clipJob?.message || 'Generating video') : (selectedImageJob?.message || 'Rendering storyboard') }}</strong>
+                  <strong>{{ store.isProcessingClip(selectedShot.id) ? (store.clipJobs[selectedShot.id]?.message || 'Generating video') : (selectedImageJob?.message || 'Rendering storyboard') }}</strong>
                 </div>
               </div>
 
@@ -2164,7 +2165,7 @@ function formatRenderedAt(value: string) {
                 </button>
                 <button
                   class="primary-button"
-                  :disabled="store.processingClipId === selectedShot.id || (!selectedAspectImage && !selectedAspectReference) || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  :disabled="store.isProcessingClip(selectedShot.id) || (!selectedAspectImage && !selectedAspectReference) || !store.videoProvider?.configured || !store.videoProvider?.available"
                   @click="beginRegenerateClip"
                 >
                   <Video :size="15" />
@@ -2197,7 +2198,7 @@ function formatRenderedAt(value: string) {
                   {{ showPromptEditor ? 'Hide prompts' : 'Adjust prompts' }}
                 </button>
                 <button class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="chooseUpload"><Upload :size="15" />Upload image</button>
-                <button class="secondary-button" :disabled="store.processingClipId === selectedShot.id" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
+                <button class="secondary-button" :disabled="store.isProcessingClip(selectedShot.id)" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
                 <button
                   v-if="selectedAspectImage"
                   class="secondary-button destructive-action-button"
@@ -2755,7 +2756,7 @@ function formatRenderedAt(value: string) {
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-shot-clip-title">
       <header><div class="danger-icon"><Trash2 :size="18" /></div><button class="mini-icon" aria-label="Close" @click="deleteShotClipCandidate = false"><X :size="17" /></button></header>
       <div><h2 id="delete-shot-clip-title">Delete this shot video?</h2><p>The shot, storyboard image, and prompts will remain. Only the generated or uploaded video will be removed.</p></div>
-      <footer><button class="secondary-button" @click="deleteShotClipCandidate = false">Cancel</button><button class="danger-button" :disabled="store.processingClipId === selectedShot?.id" @click="confirmDeleteShotClip"><Trash2 :size="15" />Delete video</button></footer>
+      <footer><button class="secondary-button" @click="deleteShotClipCandidate = false">Cancel</button><button class="danger-button" :disabled="Boolean(selectedShot && store.isProcessingClip(selectedShot.id))" @click="confirmDeleteShotClip"><Trash2 :size="15" />Delete video</button></footer>
     </section>
   </div>
 

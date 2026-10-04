@@ -200,15 +200,20 @@ export const useStudioStore = defineStore('studio', () => {
           const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
           if (!shotId) continue
           processingClipId.value = shotId
-          clipJob.value = job
           clipJobs.value = { ...clipJobs.value, [shotId]: job }
+          if (!clipJob.value || clipJob.value.status !== 'running') {
+            clipJob.value = job
+          }
           void watchJob(job.id, (next) => {
             if (currentProject.value?.id !== projectId) return
-            clipJob.value = next
             clipJobs.value = { ...clipJobs.value, [shotId]: next }
+            if (clipJob.value?.id === next.id || !clipJob.value || clipJob.value.status === 'completed') {
+              clipJob.value = next
+            }
           }).then((finalJob) => {
             if (currentProject.value?.id !== projectId) return
             if (processingClipId.value === shotId) processingClipId.value = null
+            if (clipJob.value?.id === finalJob?.id) clipJob.value = finalJob ?? null
             if (finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Could not generate video')
             }
@@ -791,14 +796,19 @@ export const useStudioStore = defineStore('studio', () => {
     if (!currentProject.value) return
     error.value = ''
     processingClipId.value = id
+    let job: Job | null = null
     try {
-      let job = await api.generateShotClip(id, aspectRatio)
+      job = await api.generateShotClip(id, aspectRatio)
       const initialJob = withQueueLabel(job)
-      clipJob.value = initialJob
       clipJobs.value = { ...clipJobs.value, [id]: initialJob }
+      if (!clipJob.value || clipJob.value.status !== 'running') {
+        clipJob.value = initialJob
+      }
       const finalJob = await watchJob(job.id, (next) => {
-        clipJob.value = next
         clipJobs.value = { ...clipJobs.value, [id]: next }
+        if (clipJob.value?.id === next.id || !clipJob.value || clipJob.value.status === 'completed') {
+          clipJob.value = next
+        }
       })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
@@ -807,7 +817,12 @@ export const useStudioStore = defineStore('studio', () => {
       error.value = cause instanceof Error ? cause.message : 'Could not generate video'
       throw cause
     } finally {
-      processingClipId.value = null
+      if (processingClipId.value === id) {
+        processingClipId.value = null
+      }
+      if (job && clipJob.value?.id === job.id) {
+        clipJob.value = null
+      }
     }
   }
 
