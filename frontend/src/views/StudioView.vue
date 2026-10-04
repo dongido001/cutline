@@ -3650,7 +3650,7 @@ input::placeholder { color: #68716c; }
   line-height: 1.6;
   color: var(--text-primary);
 }
-</style>
+
 /* Episode Switcher & Multi-part styling */
 .project-title-link {
   display: inline-flex;
@@ -3883,3 +3883,4 @@ input::placeholder { color: #68716c; }
   color: var(--muted);
   margin-top: 4px;
 }
+</style>
