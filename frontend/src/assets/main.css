@@ -459,7 +459,9 @@
 
 @media (min-width: 781px) {
   .studio-layout { height: calc(100vh - 60px); min-height: 0; overflow: hidden; }
-  .project-rail { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; }
+  .project-rail { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .rail-projects { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+  .stage-list, .provider-panel { flex-shrink: 0; }
   .workspace { height: 100%; min-height: 0; overflow: hidden; }
   .produce-workspace { min-height: 0; overflow: hidden; }
   .shot-plan-workspace { overflow: hidden; }

@@ -3098,11 +3098,21 @@ input::placeholder { color: #68716c; }
     linear-gradient(180deg, rgba(255,255,255,.018), transparent 28%),
     #0b0e11;
   box-shadow: none;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-projects {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
-.rail-section {
+.stage-list {
   flex-shrink: 0;
 }
 
