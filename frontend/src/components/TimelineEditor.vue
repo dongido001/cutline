@@ -111,6 +111,10 @@ let overlayEdit: {
 
 const targetAspect = computed<AspectRatio>(() => variant.value === 'shorts' ? '9:16' : '16:9')
 const variantExport = computed(() => props.project.variant_exports.find((item) => item.variant === variant.value) ?? null)
+const downloadFilename = computed(() => {
+  const epPart = store.currentEpisode ? `_${store.episodeLabel}_${store.currentEpisode.episode_number}` : ''
+  return `${props.project.title}${epPart}_${variant.value}.mp4`.replace(/[\s/\\:]+/g, '_')
+})
 const primary = computed(() => timeline.value?.document.primary ?? [])
 const totalMs = computed(() => primary.value.reduce((sum, item) => sum + item.duration_ms, 0))
 const playheadPercent = computed(() => totalMs.value ? Math.min(100, Math.max(0, playheadMs.value / totalMs.value * 100)) : 0)
@@ -213,7 +217,7 @@ async function loadTimeline() {
   loading.value = true
   localError.value = ''
   try {
-    timeline.value = await api.timeline(props.project.id, variant.value)
+    timeline.value = await api.timeline(props.project.id, variant.value, store.currentEpisodeId || undefined)
     const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
     const requestedIndex = trimShot ? timeline.value.document.primary.findIndex((item) => item.source?.ref_id === trimShot && item.kind === 'video') : -1
     const initialIndex = requestedIndex >= 0 ? requestedIndex : 0
@@ -285,7 +289,7 @@ async function saveTimeline() {
       item.start_ms = Math.round(item.start_ms)
       item.duration_ms = Math.round(item.duration_ms)
     }
-    timeline.value = await api.saveTimeline(props.project.id, timeline.value, variant.value)
+    timeline.value = await api.saveTimeline(props.project.id, timeline.value, variant.value, store.currentEpisodeId || undefined)
     saveState.value = 'Saved'
     localError.value = ''
     await store.loadProject(props.project.id)
@@ -768,12 +772,12 @@ async function renderVariant() {
 
 async function resetTimeline() {
   if (!confirm('Reset the timeline to the current shot plan? All timeline edits and overlays will be removed.')) return
-  timeline.value = await api.resetTimeline(props.project.id)
+  timeline.value = await api.resetTimeline(props.project.id, store.currentEpisodeId || undefined)
   selectedId.value = timeline.value.document.primary[0]?.id ?? ''
   await store.loadProject(props.project.id)
 }
 
-watch(() => props.project.id, loadTimeline)
+watch(() => [props.project.id, store.currentEpisodeId], loadTimeline)
 watch(variant, () => {
   stopPlayback()
   emit('variantChange', variant.value)
@@ -964,7 +968,7 @@ onBeforeUnmount(() => {
         >
           <X :size="14" />{{ store.isCancellingJob(store.finalCutJob.id) ? 'Cancelling…' : 'Cancel' }}
         </button>
-        <a v-if="variantExport" class="secondary-button" :href="variantExport.url" :download="`${project.title}-${variant}.mp4`"><Download :size="15" />MP4</a>
+        <a v-if="variantExport" class="secondary-button" :href="variantExport.url" :download="downloadFilename"><Download :size="15" />MP4</a>
         <button
           class="secondary-button publish-header-btn"
           title="Publish to YouTube and social channels"

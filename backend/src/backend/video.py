@@ -151,8 +151,13 @@ def generate_flowkit_clip(
         try:
             submit.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            err_text = submit.text
+            if "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
+                raise RuntimeError(
+                    "Google Flow video quota reached for this account. Please wait for the daily quota to reset, switch accounts on flow.google.com, or switch provider to Runway."
+                ) from exc
             raise RuntimeError(
-                f"FlowKit video generation failed ({submit.status_code}): {submit.text}"
+                f"FlowKit video generation failed ({submit.status_code}): {err_text}"
             ) from exc
         submitted = submit.json()
 
@@ -177,9 +182,18 @@ def generate_flowkit_clip(
             }
             if workflows:
                 status_payload["workflows"] = workflows
-            status = client.post(f"{base_url}/check-status", json=status_payload)
-            status.raise_for_status()
-            body = status.json()
+            try:
+                status = client.post(f"{base_url}/check-status", json=status_payload)
+                if getattr(status, "status_code", 200) in (502, 503):
+                    time.sleep(2)
+                    continue
+                status.raise_for_status()
+                body = status.json()
+            except (httpx.HTTPStatusError, httpx.RequestError) as poll_err:
+                if isinstance(poll_err, httpx.HTTPStatusError) and poll_err.response.status_code not in (502, 503):
+                    raise
+                time.sleep(2)
+                continue
 
             results = (
                 body.get("results")

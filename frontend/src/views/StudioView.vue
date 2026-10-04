@@ -3098,6 +3098,16 @@ input::placeholder { color: #68716c; }
     linear-gradient(180deg, rgba(255,255,255,.018), transparent 28%),
     #0b0e11;
   box-shadow: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.rail-section {
+  flex-shrink: 0;
+}
+
+.provider-panel {
+  flex-shrink: 0;
 }
 
 .project-header {

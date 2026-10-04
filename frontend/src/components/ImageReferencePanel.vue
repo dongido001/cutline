@@ -5,7 +5,13 @@ import { useStudioStore } from '@/stores/studio'
 import Dialog from '@/components/ui/Dialog.vue'
 import VideoFramePicker from '@/components/VideoFramePicker.vue'
 
-const props = defineProps<{ shot: Shot; aspect: AspectRatio; previousShotId?: string }>()
+const props = defineProps<{
+  shot: Shot
+  aspect: AspectRatio
+  previousShotId?: string
+  canReferenceEarlier?: boolean
+}>()
+const canBrowse = computed(() => props.canReferenceEarlier ?? !!props.previousShotId)
 const store = useStudioStore()
 const active = computed(() => props.shot.image_references?.find((item) => item.aspect_ratio === props.aspect))
 const history = computed(() => props.shot.takes?.filter((take) => take.media_type === 'image' && take.aspect_ratio === props.aspect && take.settings.image_reference) || [])
@@ -26,7 +32,7 @@ async function browse(previous = false) {
   loading.value = true
   try {
     sources.value = await api.imageReferenceSources(props.shot.id)
-    sourceShotId.value = (previous ? props.previousShotId : active.value?.source_shot_id) || sources.value[sources.value.length - 1]?.id || ''
+    sourceShotId.value = (previous && props.previousShotId ? props.previousShotId : active.value?.source_shot_id) || sources.value[sources.value.length - 1]?.id || ''
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load sources' }
   finally { loading.value = false }
 }
@@ -72,10 +78,10 @@ async function remove() {
     <p v-else>None — generate using this shot's prompt and selected cast.</p>
     <div class="reference-actions">
       <button v-if="previousShotId" class="secondary-button" :disabled="busy" @click="browse(true)">Previous shot</button>
-      <button class="secondary-button" :disabled="busy || !previousShotId" @click="browse()">{{ active ? 'Change' : 'Choose another shot' }}</button>
+      <button class="secondary-button" :disabled="busy || !canBrowse" @click="browse()">{{ active ? 'Change' : 'Choose reference shot' }}</button>
       <button v-if="active" class="ghost-link" :disabled="busy" @click="remove">Remove</button>
     </div>
-    <p v-if="!previousShotId">References become available after the first shot.</p>
+    <p v-if="!canBrowse">References become available after the first shot.</p>
     <p v-if="error && !showBrowser && !selectedVideo" role="alert">{{ error }}</p>
     <details v-if="history.length" class="reference-history">
       <summary>References used by image takes ({{ history.length }})</summary>

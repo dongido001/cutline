@@ -242,3 +242,74 @@ def test_generate_shot_clip_dispatches_to_flowkit(monkeypatch, tmp_path):
         "aspect_ratio": "16:9",
         "scene_id": "scene-123",
     }
+
+
+def test_flowkit_polling_retries_transient_503(monkeypatch, tmp_path):
+    from backend import video
+
+    class FakeResponse:
+        def __init__(self, payload=None, content=b"video-bytes", status_code=200):
+            self._payload = payload
+            self.content = content
+            self.headers = {"content-type": "video/mp4"}
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise video.httpx.HTTPStatusError("error", request=None, response=self)
+
+    class FakeClient:
+        def __init__(self):
+            self.check_polls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, **kwargs):
+            if url.endswith("/upload-image"):
+                return FakeResponse({"media_id": "image-media", "project_id": "project-1"})
+            if url.endswith("/generate-video"):
+                return FakeResponse({"operations": [{"operation": {"name": "op-1"}}], "project_id": "project-1"})
+            if url.endswith("/check-status"):
+                self.check_polls += 1
+                if self.check_polls == 1:
+                    return FakeResponse(status_code=503)
+                return FakeResponse({
+                    "operations": [{
+                        "operation": {
+                            "name": "op-1",
+                            "metadata": {"video": {"mediaId": "video-media", "fifeUrl": "https://example.test/video.mp4"}},
+                        },
+                        "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                    }]
+                })
+            raise AssertionError(url)
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(video.time, "sleep", lambda _: None)
+    monkeypatch.setattr(video.httpx, "Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(video.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(video.settings, "flowkit_base_url", "http://flowkit.test/api/flow")
+    monkeypatch.setattr(video.settings, "flowkit_project_id", "")
+
+    image_path = tmp_path / "frame.png"
+    image_path.write_bytes(b"png")
+
+    filename, mime, provider = video.generate_flowkit_clip(
+        image_path=image_path,
+        prompt="slow pan",
+        duration_ms=6000,
+        aspect_ratio="16:9",
+        scene_id="scene-1",
+    )
+
+    assert provider == "flowkit"
+    assert mime == "video/mp4"

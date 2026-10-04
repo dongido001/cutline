@@ -153,6 +153,11 @@ def _analyze_script(project_id: str, version_id: str, job_id: str) -> None:
             raise_if_cancelled(db, job_id)
             version.structured_data = result
             version.status = "review"
+            if version.episode_id:
+                from .models import Episode
+                ep = db.get(Episode, version.episode_id)
+                if ep:
+                    ep.status = "review"
             project.status = "review"
             sync_project_cast(project, db, source_text=version.source_text, tag_shots=True)
             job.status = "completed"
@@ -997,9 +1002,10 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
             job.message = "Preparing the edit timeline"
             db.commit()
 
-            timeline = ensure_timeline(project, db)
-            promote_available_clips(project, db)
-            append_missing_shots(project, db)
+            episode_id = job.episode_id
+            timeline = ensure_timeline(project, db, episode_id=episode_id)
+            promote_available_clips(project, db, episode_id=episode_id)
+            append_missing_shots(project, db, episode_id=episode_id)
             if variant == "shorts":
                 if not timeline.shorts_document:
                     timeline.shorts_document = deepcopy(timeline.document)
@@ -1015,7 +1021,10 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
                 db.commit()
 
             result = assemble_timeline(project, document, variant, db, update_progress)
-            export = db.scalar(select(ProjectVariantExport).where(ProjectVariantExport.project_id == project.id, ProjectVariantExport.variant == variant))
+            query = select(ProjectVariantExport).where(ProjectVariantExport.project_id == project.id, ProjectVariantExport.variant == variant)
+            if episode_id:
+                query = query.where(ProjectVariantExport.episode_id == episode_id)
+            export = db.scalar(query)
             previous_filename = export.filename if export else None
             if export:
                 export.filename = result.filename
@@ -1025,11 +1034,13 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
                 export.clip_count = result.clip_count
                 export.fallback_count = result.fallback_count
                 export.timeline_revision = timeline.revision
+                export.episode_id = episode_id
                 export.created_at = now()
             else:
                 db.add(
                     ProjectVariantExport(
                         project_id=project.id,
+                        episode_id=episode_id,
                         variant=variant,
                         filename=result.filename,
                         duration_ms=result.duration_ms,

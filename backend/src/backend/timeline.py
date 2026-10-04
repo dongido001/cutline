@@ -13,11 +13,12 @@ def _id() -> str:
     return str(uuid.uuid4())
 
 
-def latest_shots(project_id: str, db: Session) -> list[Shot]:
+def latest_shots(project_id: str, db: Session, episode_id: str | None = None) -> list[Shot]:
+    stmt = select(ScriptVersion).where(ScriptVersion.project_id == project_id)
+    if episode_id:
+        stmt = stmt.where(ScriptVersion.episode_id == episode_id)
     version = db.scalar(
-        select(ScriptVersion)
-        .where(ScriptVersion.project_id == project_id)
-        .options(
+        stmt.options(
             selectinload(ScriptVersion.scenes)
             .selectinload(Scene.shots)
             .selectinload(Shot.image),
@@ -30,14 +31,31 @@ def latest_shots(project_id: str, db: Session) -> list[Shot]:
         )
         .order_by(ScriptVersion.version_number.desc())
     )
+    if not version and episode_id:
+        version = db.scalar(
+            select(ScriptVersion)
+            .where(ScriptVersion.project_id == project_id)
+            .options(
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.image),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.clip),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.media_variants),
+            )
+            .order_by(ScriptVersion.version_number.desc())
+        )
     return [shot for scene in version.scenes for shot in scene.shots] if version else []
 
 
-def initial_document(project: Project, db: Session) -> dict:
+def initial_document(project: Project, db: Session, episode_id: str | None = None) -> dict:
     primary: list[dict] = []
     text_overlays: list[dict] = []
     elapsed = 0
-    for index, shot in enumerate(latest_shots(project.id, db)):
+    for index, shot in enumerate(latest_shots(project.id, db, episode_id=episode_id)):
         kind = "video" if shot.clip else "image"
         source_kind = "shot_clip" if shot.clip else "shot_image"
         duration_ms = shot.duration_ms
@@ -85,7 +103,26 @@ def initial_document(project: Project, db: Session) -> dict:
     ).model_dump(mode="json")
 
 
-def ensure_timeline(project: Project, db: Session) -> ProjectTimeline:
+def ensure_timeline(project: Project, db: Session, episode_id: str | None = None) -> ProjectTimeline:
+    if episode_id:
+        timeline = db.scalar(
+            select(ProjectTimeline).where(
+                ProjectTimeline.project_id == project.id,
+                ProjectTimeline.episode_id == episode_id,
+            )
+        )
+        if timeline:
+            return timeline
+        timeline = ProjectTimeline(
+            project_id=project.id,
+            episode_id=episode_id,
+            revision=1,
+            document=initial_document(project, db, episode_id=episode_id),
+        )
+        db.add(timeline)
+        db.flush()
+        return timeline
+
     if project.timeline:
         return project.timeline
     timeline = ProjectTimeline(
@@ -98,7 +135,7 @@ def ensure_timeline(project: Project, db: Session) -> ProjectTimeline:
     return timeline
 
 
-def promote_available_clips(project: Project, db: Session) -> int:
+def promote_available_clips(project: Project, db: Session, episode_id: str | None = None) -> int:
     """Promote default storyboard blocks when their shot now has video media.
 
     Existing timeline timing, trims, and per-variant framing are kept intact.
@@ -153,7 +190,7 @@ def promote_available_clips(project: Project, db: Session) -> int:
     return total_promoted
 
 
-def append_missing_shots(project: Project, db: Session) -> int:
+def append_missing_shots(project: Project, db: Session, episode_id: str | None = None) -> int:
     """Append newly approved shots without changing existing timeline edits."""
     if not project.timeline:
         return 0
@@ -230,7 +267,7 @@ def timeline_duration(document: TimelineDocument | dict) -> int:
     return sum(item.duration_ms for item in parsed.primary)
 
 
-def validate_timeline(document: TimelineDocument, project: Project, db: Session) -> None:
+def validate_timeline(document: TimelineDocument, project: Project, db: Session, episode_id: str | None = None) -> None:
     total = timeline_duration(document)
     if not document.primary:
         raise ValueError("The timeline needs at least one primary item")

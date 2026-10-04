@@ -48,8 +48,56 @@ class Project(Base):
     characters: Mapped[list["Character"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="Character.name"
     )
+    episode_label: Mapped[str] = mapped_column(String(32), default="Episode")
+
+    episodes: Mapped[list["Episode"]] = relationship(
+        "Episode",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="Episode.episode_number",
+    )
     publish_records: Mapped[list["PublishRecord"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="PublishRecord.created_at.desc()"
+    )
+
+
+class Episode(Base):
+    __tablename__ = "episodes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    episode_number: Mapped[int] = mapped_column(Integer, default=1)
+    title: Mapped[str] = mapped_column(String(200))
+    synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+    project: Mapped["Project"] = relationship("Project", back_populates="episodes")
+    script_versions: Mapped[list["ScriptVersion"]] = relationship(
+        "ScriptVersion",
+        foreign_keys="[ScriptVersion.episode_id]",
+        cascade="all, delete-orphan",
+        order_by="ScriptVersion.version_number",
+    )
+    timeline: Mapped["ProjectTimeline | None"] = relationship(
+        "ProjectTimeline",
+        foreign_keys="[ProjectTimeline.episode_id]",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    final_cut: Mapped["ProjectFinalCut | None"] = relationship(
+        "ProjectFinalCut",
+        foreign_keys="[ProjectFinalCut.episode_id]",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    variant_exports: Mapped[list["ProjectVariantExport"]] = relationship(
+        "ProjectVariantExport",
+        foreign_keys="[ProjectVariantExport.episode_id]",
+        cascade="all, delete-orphan",
     )
 
 
@@ -58,13 +106,17 @@ class ScriptVersion(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     version_number: Mapped[int] = mapped_column(Integer, default=1)
     source_text: Mapped[str] = mapped_column(Text)
     structured_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="imported")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
-    project: Mapped[Project] = relationship(back_populates="versions")
+    project: Mapped[Project] = relationship(back_populates="versions", foreign_keys="[ScriptVersion.project_id]")
+    episode: Mapped["Episode | None"] = relationship(back_populates="script_versions", foreign_keys="[ScriptVersion.episode_id]")
     scenes: Mapped[list["Scene"]] = relationship(
         back_populates="script_version", cascade="all, delete-orphan", order_by="Scene.order_index"
     )
@@ -297,7 +349,10 @@ class ProjectFinalCut(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), unique=True, index=True
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
     )
     filename: Mapped[str] = mapped_column(String(240))
     mime_type: Mapped[str] = mapped_column(String(80), default="video/mp4")
@@ -308,7 +363,8 @@ class ProjectFinalCut(Base):
     fallback_count: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
-    project: Mapped[Project] = relationship(back_populates="final_cut")
+    project: Mapped[Project] = relationship(back_populates="final_cut", foreign_keys="[ProjectFinalCut.project_id]")
+    episode: Mapped["Episode | None"] = relationship(back_populates="final_cut", foreign_keys="[ProjectFinalCut.episode_id]")
 
     @property
     def url(self) -> str:
@@ -320,14 +376,18 @@ class ProjectTimeline(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), unique=True, index=True
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
     )
     revision: Mapped[int] = mapped_column(Integer, default=1)
     document: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     shorts_document: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
-    project: Mapped[Project] = relationship(back_populates="timeline")
+    project: Mapped[Project] = relationship(back_populates="timeline", foreign_keys="[ProjectTimeline.project_id]")
+    episode: Mapped["Episode | None"] = relationship(back_populates="timeline", foreign_keys="[ProjectTimeline.episode_id]")
 
 
 class TimelineAsset(Base):
@@ -349,10 +409,12 @@ class TimelineAsset(Base):
 
 class ProjectVariantExport(Base):
     __tablename__ = "project_variant_exports"
-    __table_args__ = (UniqueConstraint("project_id", "variant"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     variant: Mapped[str] = mapped_column(String(16))
     filename: Mapped[str] = mapped_column(String(240))
     mime_type: Mapped[str] = mapped_column(String(80), default="video/mp4")
@@ -364,7 +426,8 @@ class ProjectVariantExport(Base):
     timeline_revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
-    project: Mapped[Project] = relationship(back_populates="variant_exports")
+    project: Mapped[Project] = relationship(back_populates="variant_exports", foreign_keys="[ProjectVariantExport.project_id]")
+    episode: Mapped["Episode | None"] = relationship(back_populates="variant_exports", foreign_keys="[ProjectVariantExport.episode_id]")
 
     @property
     def url(self) -> str:
@@ -458,6 +521,9 @@ class Job(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     kind: Mapped[str] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(24), default="queued")
     progress: Mapped[float] = mapped_column(Float, default=0)

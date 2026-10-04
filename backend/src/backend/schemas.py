@@ -4,6 +4,38 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class EpisodeCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    script: str = Field(min_length=1)
+    target_duration_seconds: int = Field(default=60, ge=0, le=1800)
+
+
+class EpisodeUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    synopsis: str | None = None
+    status: str | None = None
+
+
+class EpisodeSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    episode_number: int
+    title: str
+    synopsis: str | None = None
+    status: str
+    shot_count: int = 0
+    duration_ms: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    episode_label: str | None = Field(default=None, min_length=1, max_length=32)
+
+
 class ProjectCreate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     aspect_ratio: Literal["16:9", "9:16"] = "16:9"
@@ -11,6 +43,7 @@ class ProjectCreate(BaseModel):
     text_provider: Literal[
         "mock", "ollama", "gemini_web", "chatgpt_web", "compatible"
     ] = "mock"
+    episode_label: str = "Episode"
     script: str = Field(min_length=1)
 
 
@@ -28,6 +61,7 @@ class ProjectSummary(BaseModel):
     aspect_ratio: str
     target_duration_seconds: int
     text_provider: str
+    episode_label: str = "Episode"
     created_at: datetime
     updated_at: datetime
 
@@ -259,6 +293,7 @@ class ScriptVersionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    episode_id: str | None = None
     version_number: int
     source_text: str
     status: str
@@ -432,6 +467,8 @@ class PublishRecordRead(BaseModel):
 
 
 class ProjectDetail(ProjectSummary):
+    episodes: list[EpisodeSummary] = []
+    current_episode_id: str | None = None
     current_version: ScriptVersionRead | None = None
     final_cut: ProjectFinalCutRead | None = None
     variant_exports: list[ProjectVariantExportRead] = []

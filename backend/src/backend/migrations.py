@@ -29,6 +29,7 @@ SCENE_COLUMNS = {
 }
 TIMELINE_COLUMNS = {
     "shorts_document": "JSON",
+    "episode_id": "VARCHAR",
 }
 LEGACY_SHOT_COLUMNS = {
     "title",
@@ -43,6 +44,7 @@ JOB_COLUMNS = {
     "provider_phase": "VARCHAR(24)",
     "conversation_url": "TEXT",
     "attempts": "JSON NOT NULL DEFAULT '[]'",
+    "episode_id": "VARCHAR",
 }
 CHARACTER_COLUMNS = {
     "voice_provider": "VARCHAR(40) NOT NULL DEFAULT 'vibevoice'",
@@ -51,6 +53,16 @@ CHARACTER_COLUMNS = {
 }
 PROJECT_COLUMNS = {
     "image_conversation_url": "TEXT",
+    "episode_label": "VARCHAR(32) NOT NULL DEFAULT 'Episode'",
+}
+SCRIPT_VERSION_COLUMNS = {
+    "episode_id": "VARCHAR",
+}
+FINAL_CUT_COLUMNS = {
+    "episode_id": "VARCHAR",
+}
+VARIANT_EXPORT_COLUMNS = {
+    "episode_id": "VARCHAR",
 }
 
 
@@ -213,6 +225,12 @@ def migrate_schema(engine: Engine) -> None:
     _ensure_publish_records(engine)
     _ensure_oauth_states(engine)
     _group_legacy_structured_shots(engine)
+    _ensure_episodes_table(engine)
+    _ensure_columns(engine, "script_versions", SCRIPT_VERSION_COLUMNS)
+    _ensure_columns(engine, "project_final_cuts", FINAL_CUT_COLUMNS)
+    _ensure_columns(engine, "project_variant_exports", VARIANT_EXPORT_COLUMNS)
+    _relax_single_timeline_constraints(engine)
+    _backfill_episodes(engine)
 
 
 def _group_legacy_structured_shots(engine: Engine) -> None:
@@ -379,4 +397,123 @@ def _group_legacy_structured_shots(engine: Engine) -> None:
             connection.execute(
                 text("UPDATE script_versions SET structured_data = :data WHERE id = :id"),
                 {"id": version["id"], "data": json.dumps(data)},
+            )
+
+
+def _ensure_episodes_table(engine: Engine) -> None:
+    if "projects" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS episodes (
+                    id VARCHAR NOT NULL PRIMARY KEY,
+                    project_id VARCHAR NOT NULL,
+                    episode_number INTEGER NOT NULL DEFAULT 1,
+                    title VARCHAR(200) NOT NULL,
+                    synopsis TEXT,
+                    status VARCHAR(32) NOT NULL DEFAULT 'draft',
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_episodes_project_id ON episodes (project_id)"
+            )
+        )
+
+
+def _relax_single_timeline_constraints(engine: Engine) -> None:
+    tables = inspect(engine).get_table_names()
+    with engine.begin() as connection:
+        if "project_timelines" in tables:
+            try:
+                connection.execute(text("DROP INDEX IF EXISTS ix_project_timelines_project_id"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_timelines_project_id ON project_timelines (project_id)"))
+            except Exception:
+                pass
+        if "project_final_cuts" in tables:
+            try:
+                connection.execute(text("DROP INDEX IF EXISTS ix_project_final_cuts_project_id"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_final_cuts_project_id ON project_final_cuts (project_id)"))
+            except Exception:
+                pass
+
+
+def _backfill_episodes(engine: Engine) -> None:
+    import uuid
+    from datetime import datetime, timezone
+
+    tables = inspect(engine).get_table_names()
+    if "episodes" not in tables or "projects" not in tables:
+        return
+    proj_cols = {c["name"] for c in inspect(engine).get_columns("projects")}
+    if "title" not in proj_cols:
+        return
+
+    with engine.begin() as connection:
+        projects = list(
+            connection.execute(
+                text(
+                    """
+                    SELECT p.id, p.title, p.status, p.created_at, p.updated_at
+                    FROM projects p
+                    LEFT JOIN episodes e ON e.project_id = p.id
+                    WHERE e.id IS NULL
+                    """
+                )
+            ).mappings()
+        )
+
+        for p in projects:
+            ep_id = str(uuid.uuid4())
+            now_iso = datetime.now(timezone.utc).isoformat()
+            created_at = p["created_at"] or now_iso
+            updated_at = p["updated_at"] or now_iso
+
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO episodes (id, project_id, episode_number, title, synopsis, status, created_at, updated_at)
+                    VALUES (:id, :project_id, 1, :title, NULL, :status, :created_at, :updated_at)
+                    """
+                ),
+                {
+                    "id": ep_id,
+                    "project_id": p["id"],
+                    "title": p["title"],
+                    "status": p["status"] or "draft",
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                },
+            )
+
+            connection.execute(
+                text(
+                    "UPDATE script_versions SET episode_id = :ep_id WHERE project_id = :proj_id AND episode_id IS NULL"
+                ),
+                {"ep_id": ep_id, "proj_id": p["id"]},
+            )
+            connection.execute(
+                text(
+                    "UPDATE project_timelines SET episode_id = :ep_id WHERE project_id = :proj_id AND episode_id IS NULL"
+                ),
+                {"ep_id": ep_id, "proj_id": p["id"]},
+            )
+            connection.execute(
+                text(
+                    "UPDATE project_final_cuts SET episode_id = :ep_id WHERE project_id = :proj_id AND episode_id IS NULL"
+                ),
+                {"ep_id": ep_id, "proj_id": p["id"]},
+            )
+            connection.execute(
+                text(
+                    "UPDATE project_variant_exports SET episode_id = :ep_id WHERE project_id = :proj_id AND episode_id IS NULL"
+                ),
+                {"ep_id": ep_id, "proj_id": p["id"]},
             )

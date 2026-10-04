@@ -107,7 +107,7 @@ def test_queue_snapshot_provider_bytes_and_historical_take(setup, monkeypatch, p
     target = shots[2]
     first = (
         choose(client, target, shots[0], video=True).json()['image_references'][0]
-        if with_reference or path == 'manual'
+        if with_reference
         else None
     )
     if path == 'manual':

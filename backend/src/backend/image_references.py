@@ -12,9 +12,36 @@ from .settings import settings
 
 
 def earlier_shots(shot):
-    ordered = [item for scene in sorted(shot.scene.script_version.scenes, key=lambda x: x.order_index)
-               for item in sorted(scene.shots, key=lambda x: x.order_index)]
-    return ordered[:next(i for i, item in enumerate(ordered) if item.id == shot.id)]
+    version = shot.scene.script_version
+    project = version.project
+    episode = version.episode
+    earlier = []
+
+    if project and episode and getattr(project, 'episodes', None):
+        prev_episodes = [
+            ep for ep in project.episodes
+            if ep.episode_number < episode.episode_number
+        ]
+        prev_episodes.sort(key=lambda ep: ep.episode_number)
+        for prev_ep in prev_episodes:
+            ep_versions = sorted(prev_ep.script_versions, key=lambda v: v.version_number)
+            if ep_versions:
+                latest_v = ep_versions[-1]
+                for sc in sorted(latest_v.scenes, key=lambda s: s.order_index):
+                    for sh in sorted(sc.shots, key=lambda s: s.order_index):
+                        earlier.append(sh)
+
+    ordered_current = [
+        item for scene in sorted(version.scenes, key=lambda x: x.order_index)
+        for item in sorted(scene.shots, key=lambda x: x.order_index)
+    ]
+    try:
+        shot_idx = next(i for i, item in enumerate(ordered_current) if item.id == shot.id)
+        earlier.extend(ordered_current[:shot_idx])
+    except StopIteration:
+        pass
+
+    return earlier
 
 
 def media_sources(shot):

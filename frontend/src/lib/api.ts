@@ -227,11 +227,42 @@ export interface Suggestion {
 
 export interface ScriptVersion {
   id: string
+  episode_id?: string | null
   version_number: number
   source_text: string
   status: string
   scenes: Scene[]
   suggestions: Suggestion[]
+}
+
+export interface EpisodeSummary {
+  id: string
+  project_id: string
+  episode_number: number
+  title: string
+  synopsis?: string | null
+  status: string
+  shot_count: number
+  duration_ms: number
+  created_at: string
+  updated_at: string
+}
+
+export interface EpisodeCreate {
+  title: string
+  script: string
+  target_duration_seconds?: number
+}
+
+export interface EpisodeUpdate {
+  title?: string
+  synopsis?: string | null
+  status?: string
+}
+
+export interface ProjectUpdateInput {
+  title?: string
+  episode_label?: string
 }
 
 export interface ProjectSummary {
@@ -241,11 +272,14 @@ export interface ProjectSummary {
   aspect_ratio: string
   target_duration_seconds: number
   text_provider: string
+  episode_label: string
   created_at: string
   updated_at: string
 }
 
 export interface ProjectDetail extends ProjectSummary {
+  episodes: EpisodeSummary[]
+  current_episode_id: string | null
   current_version: ScriptVersion | null
   final_cut: ProjectFinalCut | null
   variant_exports: ProjectVariantExport[]
@@ -617,8 +651,18 @@ export const api = {
       body: JSON.stringify({ take_id: takeId }),
     }),
   projects: () => request<ProjectSummary[]>('/api/projects'),
-  project: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
+  project: (id: string, episodeId?: string) =>
+    request<ProjectDetail>(`/api/projects/${id}${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`),
+  updateProject: (id: string, input: ProjectUpdateInput) =>
+    request<ProjectSummary>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: 'DELETE' }),
+  episodes: (projectId: string) => request<EpisodeSummary[]>(`/api/projects/${projectId}/episodes`),
+  createEpisode: (projectId: string, input: EpisodeCreate) =>
+    request<Job>(`/api/projects/${projectId}/episodes`, { method: 'POST', body: JSON.stringify(input) }),
+  updateEpisode: (projectId: string, episodeId: string, input: EpisodeUpdate) =>
+    request<EpisodeSummary>(`/api/projects/${projectId}/episodes/${episodeId}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  deleteEpisode: (projectId: string, episodeId: string) =>
+    request<void>(`/api/projects/${projectId}/episodes/${episodeId}`, { method: 'DELETE' }),
   createProject: (input: ProjectInput) =>
     request<Job>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   continueProject: (id: string, input: ProjectContinuationInput) =>
@@ -753,13 +797,19 @@ export const api = {
   },
   deleteShotClip: (id: string, aspectRatio?: AspectRatio) =>
     request<void>(`/api/shots/${id}/clip${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, { method: 'DELETE' }),
-  renderFinalCut: (id: string, variant: OutputVariant = 'landscape') =>
-    request<Job>(`/api/projects/${id}/final-cut/render?variant=${variant}`, { method: 'POST' }),
+  renderFinalCut: (id: string, variant: OutputVariant = 'landscape', episodeId?: string) => {
+    const qs = new URLSearchParams({ variant })
+    if (episodeId) qs.set('episode_id', episodeId)
+    return request<Job>(`/api/projects/${id}/final-cut/render?${qs.toString()}`, { method: 'POST' })
+  },
   deleteFinalCut: (id: string, variant: OutputVariant = 'landscape') =>
     request<void>(`/api/projects/${id}/final-cut?variant=${variant}`, { method: 'DELETE' }),
-  timeline: (id: string, edit: OutputVariant = 'landscape') =>
-    request<ProjectTimeline>(`/api/projects/${id}/timeline?edit=${edit}`),
-  saveTimeline: (id: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape') => {
+  timeline: (id: string, edit: OutputVariant = 'landscape', episodeId?: string) => {
+    const qs = new URLSearchParams({ edit })
+    if (episodeId) qs.set('episode_id', episodeId)
+    return request<ProjectTimeline>(`/api/projects/${id}/timeline?${qs.toString()}`)
+  },
+  saveTimeline: (id: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape', episodeId?: string) => {
     const sanitizePrimary = (item: TimelinePrimaryItem): TimelinePrimaryItem => ({
       ...item,
       duration_ms: Math.round(item.duration_ms),
@@ -778,7 +828,8 @@ export const api = {
       image_overlays: (timeline.document.image_overlays || []).map(sanitizeOverlay),
       text_overlays: (timeline.document.text_overlays || []).map(sanitizeOverlay),
     }
-    return request<ProjectTimeline>(`/api/projects/${id}/timeline`, {
+    const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+    return request<ProjectTimeline>(`/api/projects/${id}/timeline${qs}`, {
       method: 'PUT',
       body: JSON.stringify({
         revision: timeline.revision,
@@ -787,7 +838,10 @@ export const api = {
       }),
     })
   },
-  resetTimeline: (id: string) => request<ProjectTimeline>(`/api/projects/${id}/timeline/reset`, { method: 'POST' }),
+  resetTimeline: (id: string, episodeId?: string) => {
+    const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+    return request<ProjectTimeline>(`/api/projects/${id}/timeline/reset${qs}`, { method: 'POST' })
+  },
   uploadTimelineAsset: (id: string, file: File, label = file.name) => {
     const body = new FormData()
     body.append('file', file)
@@ -806,8 +860,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ decision }),
     }),
-  approve: (id: string) =>
-    request<ProjectSummary>(`/api/projects/${id}/approve`, {
+  approve: (id: string, episodeId?: string) =>
+    request<ProjectSummary>(`/api/projects/${id}/approve${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`, {
       method: 'POST',
       body: JSON.stringify({ approved: true }),
     }),
