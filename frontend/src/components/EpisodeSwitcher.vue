@@ -69,7 +69,7 @@ onUnmounted(() => {
       :title="'Switch ' + episodeLabel"
       @click="toggleDropdown"
     >
-      <Clapperboard :size="13" />
+      <Clapperboard :size="13" class="episode-trigger-icon" />
       <span class="episode-switcher-label">{{ currentEpisodeDisplay }}</span>
       <ChevronDown :size="13" class="switcher-arrow" />
     </button>
@@ -126,31 +126,42 @@ onUnmounted(() => {
   position: relative;
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .episode-switcher-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: 8px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #fff;
+  color: #eff2f0;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
   transition: all 0.15s ease;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .episode-switcher-trigger:hover,
 .episode-switcher-trigger.is-open {
   background: rgba(255, 255, 255, 0.09);
   border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.episode-trigger-icon {
+  color: #9ba39e;
+  flex-shrink: 0;
 }
 
 .episode-switcher-label {
-  max-width: 220px;
+  max-width: 240px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -159,6 +170,7 @@ onUnmounted(() => {
 .switcher-arrow {
   color: var(--muted);
   transition: transform 0.15s ease;
+  flex-shrink: 0;
 }
 
 .episode-switcher-trigger.is-open .switcher-arrow {

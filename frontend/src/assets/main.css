@@ -78,7 +78,7 @@
 .workspace.final-cut-stage { height: calc(100vh - 60px); overflow: hidden; }
 .error-banner { min-height: 34px; padding: 7px 14px; display: flex; align-items: center; gap: 7px; background: #fff1ef; color: #8f2f28; border-bottom: 1px solid #ebcac5; font-size: 10px; }
 .project-header { height: 80px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; background: white; border-bottom: 1px solid var(--line); }
-.breadcrumb { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+.breadcrumb { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .project-header h1 { margin: 5px 0 0; font-size: 20px; letter-spacing: 0; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .save-state { display: flex; align-items: center; gap: 4px; margin-right: 6px; color: var(--muted); font-size: 10px; }
@@ -459,7 +459,7 @@
 
 @media (min-width: 781px) {
   .studio-layout { height: calc(100vh - 60px); min-height: 0; overflow: hidden; }
-  .project-rail { height: 100%; min-height: 0; overflow-y: auto; }
+  .project-rail { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
   .workspace { height: 100%; min-height: 0; overflow: hidden; }
   .produce-workspace { min-height: 0; overflow: hidden; }
   .shot-plan-workspace { overflow: hidden; }

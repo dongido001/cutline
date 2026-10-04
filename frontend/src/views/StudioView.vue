@@ -1562,21 +1562,26 @@ function formatRenderedAt(value: string) {
         </button>
       </div>
       <header class="project-header">
-        <div>
+        <div class="project-header-left">
           <div class="breadcrumb">
-            <span>Projects</span>
-            <ChevronRight :size="14" />
-            <button type="button" class="project-title-link" @click="openProjectSettings" :title="'Project Settings: ' + projectTitle">
-              <Film :size="13" />
-              <span>{{ projectTitle }}</span>
+            <span class="breadcrumb-root">Projects</span>
+            <ChevronRight :size="13" class="breadcrumb-separator" />
+            <button
+              type="button"
+              class="project-title-link"
+              @click="openProjectSettings"
+              :title="'Project Settings: ' + projectTitle"
+            >
+              <Film :size="13" class="project-title-icon" />
+              <span class="project-title-text">{{ projectTitle }}</span>
             </button>
-            <ChevronRight :size="14" />
+            <ChevronRight :size="13" class="breadcrumb-separator" />
             <EpisodeSwitcher
               @open-settings="openProjectSettings"
               @open-new-episode="showNewEpisodeModal = true"
             />
           </div>
-          <h1>{{ stageTitle }}</h1>
+          <h1 class="project-stage-heading">{{ stageTitle }}</h1>
         </div>
         <div class="header-actions">
           <span class="save-state"><Check :size="14" /> Saved</span>
@@ -3015,9 +3020,84 @@ input::placeholder { color: #68716c; }
 
 .project-copy small,
 .save-state,
-.provider-state,
-.breadcrumb {
+.provider-state {
   color: var(--text-tertiary);
+}
+
+.project-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-tertiary);
+  flex-wrap: nowrap;
+}
+
+.breadcrumb-root {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.breadcrumb-separator {
+  color: rgba(255, 255, 255, 0.22);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.project-title-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #eff2f0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.project-title-link:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.project-title-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.project-title-text {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-stage-heading {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
 }
 
 .workspace {
