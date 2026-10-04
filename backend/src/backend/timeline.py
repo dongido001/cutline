@@ -141,12 +141,20 @@ def promote_available_clips(project: Project, db: Session, episode_id: str | Non
     Existing timeline timing, trims, and per-variant framing are kept intact.
     Only the source type changes from the shot's still image to its video.
     """
-    timeline = project.timeline or db.scalar(
-        select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)
-    )
+    if episode_id:
+        timeline = db.scalar(
+            select(ProjectTimeline).where(
+                ProjectTimeline.project_id == project.id,
+                ProjectTimeline.episode_id == episode_id,
+            )
+        )
+    else:
+        timeline = project.timeline or db.scalar(
+            select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)
+        )
     if not timeline:
         return 0
-    shots = latest_shots(project.id, db)
+    shots = latest_shots(project.id, db, episode_id=episode_id)
     clips_by_shot = {
         shot.id: shot
         for shot in shots
@@ -192,12 +200,23 @@ def promote_available_clips(project: Project, db: Session, episode_id: str | Non
 
 def append_missing_shots(project: Project, db: Session, episode_id: str | None = None) -> int:
     """Append newly approved shots without changing existing timeline edits."""
-    if not project.timeline:
+    if episode_id:
+        timeline = db.scalar(
+            select(ProjectTimeline).where(
+                ProjectTimeline.project_id == project.id,
+                ProjectTimeline.episode_id == episode_id,
+            )
+        )
+    else:
+        timeline = project.timeline or db.scalar(
+            select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)
+        )
+    if not timeline:
         return 0
-    shots = latest_shots(project.id, db)
+    shots = latest_shots(project.id, db, episode_id=episode_id)
     total_added = 0
     for doc_attr in ("document", "shorts_document"):
-        raw_doc = getattr(project.timeline, doc_attr)
+        raw_doc = getattr(timeline, doc_attr)
         if not raw_doc:
             continue
         document = TimelineDocument.model_validate(raw_doc)
@@ -274,7 +293,13 @@ def validate_timeline(document: TimelineDocument, project: Project, db: Session,
     if total > 30 * 60 * 1000:
         raise ValueError("The timeline cannot exceed 30 minutes")
 
-    shots = {shot.id for shot in latest_shots(project.id, db)}
+    ep_shots = {shot.id for shot in latest_shots(project.id, db, episode_id=episode_id)}
+    project_shots = set(
+        db.scalars(
+            select(Shot.id).join(Scene).join(ScriptVersion).where(ScriptVersion.project_id == project.id)
+        )
+    )
+    shots = ep_shots | project_shots
     assets = set(
         db.scalars(select(TimelineAsset.id).where(TimelineAsset.project_id == project.id))
     )

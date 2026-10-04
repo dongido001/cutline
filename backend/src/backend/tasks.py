@@ -563,8 +563,8 @@ def _generate_shot_image(
                     **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
                 },
             )
-            if project.timeline and not promote_available_clips(project, db):
-                project.timeline.revision += 1
+            episode_id = shot.scene.script_version.episode_id if shot.scene and shot.scene.script_version else None
+            promote_available_clips(project, db, episode_id=episode_id)
             raise_if_cancelled(db, job_id)
             shot.status = "image_ready"
             job.status = "completed"
