@@ -193,6 +193,18 @@ def video_provider() -> ProviderStatus:
     )
 
 
+@app.post("/api/video-provider/reset-flow-session")
+def reset_flow_session() -> dict:
+    base_url = settings.flowkit_base_url.rstrip("/")
+    try:
+        res = httpx.post(f"{base_url}/reset-session", timeout=15.0)
+        if not res.is_success:
+            raise HTTPException(status_code=res.status_code, detail=res.text)
+        return res.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"FlowKit communication error: {exc}")
+
+
 @app.get("/api/audio-provider", response_model=ProviderStatus)
 def audio_provider() -> ProviderStatus:
     configured, available, detail = vibevoice_status()

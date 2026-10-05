@@ -74,6 +74,23 @@ async function refreshProviders() {
   }
 }
 
+const resettingFlow = ref(false)
+const flowSyncMessage = ref('')
+
+async function resetFlowSession() {
+  resettingFlow.value = true
+  flowSyncMessage.value = ''
+  try {
+    const res = await api.resetFlowSession()
+    flowSyncMessage.value = res.message || 'Flow account synced!'
+    await store.initialize(store.currentProject?.id)
+  } catch (err: any) {
+    flowSyncMessage.value = err?.message || 'Failed to sync Flow account'
+  } finally {
+    resettingFlow.value = false
+  }
+}
+
 async function checkQueueStats() {
   try {
     const status = await api.systemQueues()
@@ -166,8 +183,14 @@ onUnmounted(() => {
       <div class="provider-settings-list">
         <UiCard v-for="provider in store.imageProviders" :key="`image-${provider.id}`" class="provider-setting-card"><span class="provider-status-dot" :class="{ ready: provider.verified, connected: provider.connected }"></span><div><strong>{{ provider.priority }}. {{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><UiBadge :tone="provider.verified ? 'success' : provider.connected ? 'accent' : provider.configured ? 'danger' : 'neutral'">{{ provider.verified ? 'Verified' : provider.connected ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
       </div>
-      <div class="settings-section-heading"><span>Video provider</span></div>
-      <UiCard v-if="store.videoProvider" class="video-provider-setting provider-setting-card"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ store.videoProvider.detail }}</small></div><UiBadge :tone="store.videoProvider.available ? 'success' : store.videoProvider.configured ? 'danger' : 'neutral'">{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+      <div class="settings-section-heading">
+        <span>Video provider</span>
+        <UiButton v-if="store.videoProvider" size="sm" variant="ghost" :disabled="resettingFlow" @click="resetFlowSession">
+          <RefreshCw :class="{ spin: resettingFlow }" :size="14" />
+          {{ resettingFlow ? 'Syncing Flow…' : 'Switch Account / Sync Flow' }}
+        </UiButton>
+      </div>
+      <UiCard v-if="store.videoProvider" class="video-provider-setting provider-setting-card"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ flowSyncMessage || store.videoProvider.detail }}</small></div><UiBadge :tone="store.videoProvider.available ? 'success' : store.videoProvider.configured ? 'danger' : 'neutral'">{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
       <p v-else class="settings-empty">Video provider status is unavailable.</p>
     </UiDialog>
   </div>

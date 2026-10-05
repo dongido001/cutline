@@ -77,6 +77,8 @@
 .workspace { min-width: 0; display: flex; flex-direction: column; background: var(--soft); }
 .workspace.final-cut-stage { height: calc(100vh - 60px); overflow: hidden; }
 .error-banner { min-height: 34px; padding: 7px 14px; display: flex; align-items: center; gap: 7px; background: #fff1ef; color: #8f2f28; border-bottom: 1px solid #ebcac5; font-size: 10px; }
+.info-banner { min-height: 34px; padding: 7px 14px; display: flex; align-items: center; justify-content: space-between; gap: 7px; background: #eaf5ed; color: #1c6239; border-bottom: 1px solid #cbe4d3; font-size: 10px; }
+.info-banner div { display: flex; align-items: center; gap: 7px; }
 .project-header { height: 80px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; background: white; border-bottom: 1px solid var(--line); }
 .breadcrumb { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .project-header h1 { margin: 5px 0 0; font-size: 20px; letter-spacing: 0; }

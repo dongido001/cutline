@@ -37,7 +37,7 @@ import {
   Volume2,
   X,
 } from '@lucide/vue'
-import type { AspectRatio, Character, OutputVariant, ProjectInput, ProjectSummary, Scene, Shot, Suggestion } from '@/lib/api'
+import { api, type AspectRatio, type Character, type OutputVariant, type ProjectInput, type ProjectSummary, type Scene, type Shot, type Suggestion } from '@/lib/api'
 import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
@@ -791,6 +791,23 @@ function beginRegenerateImage() {
 function beginRegenerateClip() {
   showPromptEditor.value = true
   void generateShotClip()
+}
+
+const resettingFlow = ref(false)
+const flowSyncNotice = ref('')
+
+async function syncFlowAccount() {
+  resettingFlow.value = true
+  flowSyncNotice.value = ''
+  try {
+    const res = await api.resetFlowSession()
+    flowSyncNotice.value = res.message || 'Flow account synced with active browser session.'
+    await store.initialize(store.currentProject?.id)
+  } catch (err: any) {
+    flowSyncNotice.value = err?.message || 'Failed to sync Flow account'
+  } finally {
+    resettingFlow.value = false
+  }
 }
 
 function sceneTime(scene: Scene) {
@@ -1609,6 +1626,10 @@ function formatRenderedAt(value: string) {
 
     <section class="workspace" :class="{ 'final-cut-stage': activeStage === 'final-cut' }">
       <div v-if="store.error" class="error-banner"><CircleAlert :size="15" />{{ store.error }}</div>
+      <div v-if="flowSyncNotice" class="info-banner">
+        <div><Check :size="15" /><span>{{ flowSyncNotice }}</span></div>
+        <button class="mini-icon" aria-label="Dismiss" @click="flowSyncNotice = ''"><X :size="14" /></button>
+      </div>
       <div v-if="store.draftAttention.length" class="error-banner">
         <CircleAlert :size="15" />
         <span>Needs attention: {{ store.draftAttention.map((item) => item.message).slice(0, 4).join(' · ') }}</span>
@@ -2170,6 +2191,17 @@ function formatRenderedAt(value: string) {
                 >
                   <Video :size="15" />
                   {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
+                </button>
+                <button
+                  v-if="store.videoProvider?.configured"
+                  type="button"
+                  class="secondary-button"
+                  :disabled="resettingFlow"
+                  title="Switched Google Flow accounts in your browser? Click to re-sync FlowKit session."
+                  @click="syncFlowAccount"
+                >
+                  <RefreshCw :class="{ spinning: resettingFlow }" :size="14" />
+                  {{ resettingFlow ? 'Syncing Flow…' : 'Sync Flow' }}
                 </button>
                 <a
                   v-if="selectedShotConversationUrl"

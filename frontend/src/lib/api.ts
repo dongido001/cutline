@@ -602,6 +602,11 @@ export const api = {
   providers: () => request<ProviderStatus[]>('/api/providers'),
   imageProviders: () => request<ImageProviderStatus[]>('/api/image-providers'),
   videoProvider: () => request<ProviderStatus>('/api/video-provider'),
+  resetFlowSession: () =>
+    request<{ status: string; message: string; session_project?: Record<string, any> }>(
+      '/api/video-provider/reset-flow-session',
+      { method: 'POST' }
+    ),
   audioProvider: () => request<ProviderStatus>('/api/audio-provider'),
   draftReadiness: (projectId: string) =>
     request<{
