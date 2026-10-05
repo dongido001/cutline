@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     flowkit_base_url: str = "http://127.0.0.1:8100/api/flow"
     flowkit_project_id: str = ""
     flowkit_root: Path = PROJECTS_ROOT / "flowkit"
-    flowkit_timeout_seconds: int = 900
+    flowkit_timeout_seconds: int = 360
     flowkit_model_family: str = "veo"
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_workflow_path: Path = BACKEND_ROOT / "data" / "comfyui_i2v_workflow.json"

@@ -208,6 +208,10 @@ def generate_flowkit_clip(
             for result in results:
                 if not isinstance(result, dict):
                     continue
+                status_val = str(result.get("status") or "").upper()
+                err_val = result.get("error") or result.get("complaint")
+                if "FAIL" in status_val:
+                    raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")
                 media_info = result.get("media") if isinstance(result.get("media"), dict) else {}
                 operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
                 metadata = operation.get("metadata") if isinstance(operation.get("metadata"), dict) else {}
