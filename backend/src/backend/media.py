@@ -1,4 +1,7 @@
+import logging
 import base64
+
+logger = logging.getLogger(__name__)
 import hashlib
 import html
 import re
@@ -474,6 +477,35 @@ def generate_storyboard_image(
             failures.append(failure)
             if progress:
                 progress({"provider": provider, "phase": "failed", "error": failure})
+    if references and not has_visual_reference:
+        for provider in providers:
+            status = statuses.get(provider, {})
+            if not status.get("available"):
+                continue
+            label = status.get("label", provider)
+            logger.warning(
+                "All reference-based attempts failed; retrying %s without binary attachments using prompt likeness.",
+                label,
+            )
+            if progress:
+                progress({"provider": provider, "phase": "submitting", "message": f"{label}: Retrying with prompt-described likeness..."})
+            try:
+                image, _model, metadata = _request_provider_image(
+                    provider,
+                    prompt,
+                    aspect_ratio,
+                    progress,
+                    references=[],
+                )
+                if progress:
+                    progress({"provider": provider, "phase": "saving", **metadata})
+                extension, mime_type = _image_format(image)
+                filename = f"generated-{uuid.uuid4()}{extension}"
+                (settings.media_dir / filename).write_bytes(image)
+                return filename, mime_type, provider
+            except Exception as retry_exc:
+                logger.warning("Retry without references on %s failed: %s", label, retry_exc)
+                break
     raise RuntimeError("Image generation failed. " + "; ".join(failures) + ". Refresh bridge sessions or upload an image manually.")
 
 

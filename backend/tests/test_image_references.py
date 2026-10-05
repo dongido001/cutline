@@ -225,3 +225,25 @@ def test_no_placeholder_for_visual_reference(monkeypatch):
     monkeypatch.setattr(settings, 'image_providers', '')
     with pytest.raises(RuntimeError, match='supports image references'):
         media.generate_storyboard_image('room', 'room', 'wide', '16:9', references=[media.VisualReferenceImage('image/png', png())])
+
+
+def test_face_reference_attachment_failure_falls_back_to_prompt_likeness(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, 'data_dir', tmp_path)
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    calls = []
+    def request(provider, prompt, aspect, progress=None, references=None):
+        calls.append({'provider': provider, 'has_refs': bool(references)})
+        if references:
+            raise RuntimeError('ChatGPT did not finish uploading the face reference image(s)')
+        return png(), 'test', {}
+    monkeypatch.setattr(media, '_request_provider_image', request)
+    filename, mime, provider = media.generate_storyboard_image(
+        'A portrait of Gabe', 'Room', 'Close-up', '16:9',
+        references=[media.FaceReferenceImage('GABE', 'image/png', png())],
+    )
+    assert provider == 'chatgpt_web'
+    assert len(calls) == 2
+    assert calls[0] == {'provider': 'chatgpt_web', 'has_refs': True}
+    assert calls[1] == {'provider': 'chatgpt_web', 'has_refs': False}
+    assert (tmp_path / 'media' / filename).exists()
