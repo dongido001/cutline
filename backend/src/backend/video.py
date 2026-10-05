@@ -268,6 +268,20 @@ def video_provider_status() -> tuple[str, str, bool, bool, str, str]:
     return "runway", "Runway", configured, available, settings.runway_model, detail
 
 
+def clip_source_image(shot, aspect_ratio: str):
+    """Choose an opening frame only from the requested output format."""
+    if aspect_ratio not in {"16:9", "9:16"}:
+        raise ValueError("Aspect ratio must be 16:9 or 9:16")
+    for items in (shot.continuity_frames, shot.image_references):
+        match = next((item for item in items if item.aspect_ratio == aspect_ratio), None)
+        if match:
+            return match
+    if aspect_ratio == shot.scene.script_version.project.aspect_ratio and shot.image:
+        return shot.image
+    return next((item for item in shot.media_variants
+                 if item.media_type == "image" and item.aspect_ratio == aspect_ratio), None)
+
+
 def generate_shot_clip(
     image_path: Path,
     prompt: str,

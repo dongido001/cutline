@@ -22,7 +22,7 @@ from .settings import settings
 from .timeline import append_missing_shots, ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .schemas import TimelineDocument
-from .video import generate_shot_clip as render_shot_clip
+from .video import generate_shot_clip as render_shot_clip, clip_source_image
 from uuid import uuid4
 from pathlib import Path
 import shutil
@@ -749,6 +749,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             return
         if job.status == "cancelled":
             return
+        filename = None
         try:
             raise_if_cancelled(db, job_id)
             job.status = "running"
@@ -764,7 +765,6 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
 
             project = shot.scene.script_version.project
             target_aspect = aspect_ratio or project.aspect_ratio
-            image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
             continuity_frame = next(
                 (
                     frame
@@ -781,13 +781,9 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 ),
                 None,
             )
-            source_image = (
-                continuity_frame
-                or image_ref
-                or (shot.image if target_aspect == project.aspect_ratio and shot.image else image_variant or shot.image)
-            )
+            source_image = clip_source_image(shot, target_aspect)
             if not source_image:
-                raise RuntimeError("Generate or upload a shot image first")
+                raise RuntimeError(f"Generate or upload a {target_aspect} shot image first")
             base_prompt = (prompt_override or shot.video_prompt).strip()
             if target_aspect == "9:16" and not prompt_override:
                 base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
@@ -833,6 +829,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 target_aspect,
                 scene_id=str(shot.scene.id),
             )
+            raise_if_cancelled(db, job_id)
             variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio
             previous_filename = (shot.clip.filename if shot.clip else None) if use_legacy else (variant.filename if variant else None)
@@ -893,6 +890,8 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
         except JobCancelled:
+            db.rollback()
+            delete_media_file(filename)
             return
         except Exception as exc:
             db.rollback()

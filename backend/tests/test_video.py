@@ -313,3 +313,31 @@ def test_flowkit_polling_retries_transient_503(monkeypatch, tmp_path):
 
     assert provider == "flowkit"
     assert mime == "video/mp4"
+
+
+def test_video_requires_a_frame_for_requested_format():
+    from types import SimpleNamespace as NS
+    from backend.video import clip_source_image
+    landscape = NS(filename='landscape.png')
+    portrait = NS(filename='portrait.png', media_type='image', aspect_ratio='9:16')
+    shot = NS(image=landscape, media_variants=[], continuity_frames=[], image_references=[],
+              scene=NS(script_version=NS(project=NS(aspect_ratio='16:9'))))
+    assert clip_source_image(shot, '16:9') is landscape
+    assert clip_source_image(shot, '9:16') is None
+    shot.media_variants.append(portrait)
+    assert clip_source_image(shot, '9:16') is portrait
+
+
+def test_runway_does_not_silently_shorten_authored_duration(monkeypatch):
+    import pytest
+    from backend.runway_video import _duration_seconds
+    from backend.settings import settings
+    monkeypatch.setattr(settings, 'runway_max_duration', 5)
+    assert _duration_seconds(5000) == 5
+    with pytest.raises(ValueError, match='Runway is capped at 5s'):
+        _duration_seconds(5001)
+    monkeypatch.setattr(settings, 'runway_max_duration', 10)
+    assert _duration_seconds(5001) == 10
+    assert _duration_seconds(9600) == 10
+    with pytest.raises(ValueError, match='Split the shot'):
+        _duration_seconds(10001)

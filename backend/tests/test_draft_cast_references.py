@@ -177,7 +177,7 @@ def test_video_worker_prefers_selected_continuity_frame(setup, monkeypatch):
     called = {}
 
     def render(image, prompt, duration, aspect, scene_id=None):
-        called.update(image=image, prompt=prompt)
+        called.update(image=image, prompt=prompt, scene_id=scene_id)
         (settings.media_dir / 'continuity-clip.mp4').write_bytes(b'clip')
         return 'continuity-clip.mp4', 'video/mp4', 'flowkit'
 
@@ -217,14 +217,15 @@ def test_draft_clip_uses_the_image_snapshot_for_video_prompt(setup, monkeypatch)
     db.commit()
     called = {}
 
-    def render(image, prompt, duration, aspect):
-        called.update(image=image, prompt=prompt)
+    def render(image, prompt, duration, aspect, scene_id=None):
+        called.update(image=image, prompt=prompt, scene_id=scene_id)
         (settings.media_dir / 'draft-clip.mp4').write_bytes(b'clip')
         return 'draft-clip.mp4', 'video/mp4', 'flowkit'
 
     monkeypatch.setattr(draft, 'video_provider_status', lambda: ('flowkit', 'FlowKit', True, True, 'veo', 'ready'))
     monkeypatch.setattr(draft, 'generate_shot_clip', render)
     assert draft._generate_missing_clips(db, project, job, [shot]) == []
+    assert called['scene_id'] == str(shot.scene.id)
     assert called['image'] == image_path
     assert 'exact opening frame and visual anchor' in called['prompt']
     assert 'Wardrobe continuity: Green coat.' in called['prompt']
@@ -246,14 +247,15 @@ def test_draft_clip_prefers_selected_continuity_frame(setup, monkeypatch):
     db.commit()
     called = {}
 
-    def render(image, prompt, duration, aspect):
-        called.update(image=image, prompt=prompt)
+    def render(image, prompt, duration, aspect, scene_id=None):
+        called.update(image=image, prompt=prompt, scene_id=scene_id)
         (settings.media_dir / 'draft-continuity-clip.mp4').write_bytes(b'clip')
         return 'draft-continuity-clip.mp4', 'video/mp4', 'flowkit'
 
     monkeypatch.setattr(draft, 'video_provider_status', lambda: ('flowkit', 'FlowKit', True, True, 'veo', 'ready'))
     monkeypatch.setattr(draft, 'generate_shot_clip', render)
     assert draft._generate_missing_clips(db, project, job, [shot]) == []
+    assert called['scene_id'] == str(shot.scene.id)
 
     assert called['image'] == frame_path
     assert 'Continue directly from the selected frame of the previous shot' in called['prompt']

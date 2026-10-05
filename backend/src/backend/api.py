@@ -8,7 +8,7 @@ import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -18,7 +18,7 @@ from .database import Base, engine, get_db
 from .final_cut import invalidate_final_cut
 from .media import delete_media_file, image_provider_statuses
 from .migrations import migrate_schema
-from .video import video_provider_status
+from .video import video_provider_status, clip_source_image
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
@@ -1735,32 +1735,27 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
             status_code=409, detail="Approve the script before generating clips"
         )
     target_aspect = aspect_ratio or project.aspect_ratio
-    image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
-    continuity_frame = next(
-        (
-            frame
-            for frame in shot.continuity_frames
-            if frame.aspect_ratio == target_aspect
-        ),
-        None,
-    )
-    image_ref = next(
-        (
-            ref
-            for ref in shot.image_references
-            if ref.aspect_ratio == target_aspect
-        ),
-        None,
-    )
-    if not continuity_frame and not shot.image and not image_variant and not image_ref:
-        raise HTTPException(
-            status_code=409, detail="Generate or upload a shot image first"
-        )
+    if target_aspect not in {"16:9", "9:16"}:
+        raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+    if not clip_source_image(shot, target_aspect):
+        raise HTTPException(status_code=409, detail=f"Generate or upload a {target_aspect} shot image first")
     if not shot.video_prompt.strip():
         raise HTTPException(status_code=409, detail="Add a video prompt first")
     _, _, configured, available, _, detail = video_provider_status()
     if not configured or not available:
         raise HTTPException(status_code=503, detail=detail)
+    # Acquire SQLite's write lock before checking/inserting, including concurrent requests.
+    db.execute(update(Project).where(Project.id == project.id).values(updated_at=Project.updated_at))
+    active_jobs = db.scalars(select(Job).where(
+        Job.project_id == project.id, Job.kind == "shot_clip",
+        Job.status.in_(["queued", "running"]),
+    )).all()
+    for existing in active_jobs:
+        if any(attempt.get("shot_id") == shot.id and
+               attempt.get("aspect_ratio", project.aspect_ratio) == target_aspect
+               for attempt in (existing.attempts or [])):
+            db.commit()
+            return existing
     job = Job(
         project_id=project.id,
         kind="shot_clip",

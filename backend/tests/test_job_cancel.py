@@ -60,3 +60,23 @@ def test_cancel_rejects_completed_job_quietly(tmp_path, monkeypatch) -> None:
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_worker_detects_cancellation_from_another_session(tmp_path):
+    import pytest
+    from backend.jobs import JobCancelled, raise_if_cancelled
+    engine = create_engine(f"sqlite:///{tmp_path / 'worker-cancel.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as worker:
+        project = Project(title='Cancel running clip')
+        worker.add(project)
+        worker.flush()
+        job = Job(project_id=project.id, kind='shot_clip', status='running')
+        worker.add(job)
+        worker.commit()
+        with Session(engine) as api:
+            api.get(Job, job.id).status = 'cancelled'
+            api.commit()
+        assert job.status == 'running'
+        with pytest.raises(JobCancelled):
+            raise_if_cancelled(worker, job.id)

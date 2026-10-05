@@ -53,10 +53,13 @@ def _ratio(aspect_ratio: str) -> str:
 
 
 def _duration_seconds(duration_ms: int) -> int:
-    return runway_clip_duration_seconds(
-        duration_ms,
-        max_seconds=max(5, min(10, int(settings.runway_max_duration or 5))),
-    )
+    cap = 5 if int(settings.runway_max_duration or 5) <= 5 else 10
+    if duration_ms > cap * 1000:
+        raise ValueError(
+            f"Shot needs {duration_ms / 1000:g}s, but Runway is capped at {cap}s. "
+            "Split the shot, increase MOVIE_RUNWAY_MAX_DURATION to 10, or use another provider."
+        )
+    return runway_clip_duration_seconds(duration_ms, max_seconds=cap)
 
 
 def _data_uri(image_path: Path) -> str:

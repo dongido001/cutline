@@ -153,16 +153,6 @@ def _normalize_primary(
     if not media:
         raise RuntimeError(f"{item.label} has no media")
 
-    if media.is_clip:
-        try:
-            actual_dur = probe_duration_ms(media.path) / 1000
-            trim_start = item.source_in_ms / 1000
-            available = max(0.1, actual_dur - trim_start)
-            if duration > available:
-                duration = available
-        except Exception:
-            pass
-
     command = ["ffmpeg", "-y"]
     if media.is_clip:
         command.extend(["-i", str(media.path)])
@@ -177,7 +167,7 @@ def _normalize_primary(
     trim = f"trim=start={trim_start}:duration={duration}," if media.is_clip else f"trim=duration={duration},"
     video = (
         f"[0:v]{trim}setpts=PTS-STARTPTS,{_video_filter(width, height, geometry)},"
-        f"setsar=1,fps=30,"
+        f"setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={duration},"
         f"trim=duration={duration}[v]"
     )
     mute_audio = getattr(item, "mute_audio", False)

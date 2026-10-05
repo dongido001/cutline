@@ -89,7 +89,7 @@ def runway_clip_duration_seconds(
     Map shot duration to Runway i2v buckets (5 or 10 seconds).
     Prefer the shorter bucket for long-form cost control.
     """
-    requested = max(1, round(duration_ms / 1000))
+    requested = max(1, (duration_ms + 999) // 1000)
     cap = 5 if max_seconds <= 5 else 10
     if requested <= 5 or cap <= 5:
         return 5

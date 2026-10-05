@@ -34,7 +34,7 @@ from .takes import record_take
 from .timeline import ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .timing import estimate_dialogue_duration_ms
-from .video import generate_shot_clip, video_provider_status
+from .video import generate_shot_clip, video_provider_status, clip_source_image
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
 
 
@@ -105,7 +105,7 @@ def _shot_image(shot: Shot, aspect: str) -> ShotImage | ShotMediaVariant | None:
             for item in shot.media_variants
             if item.media_type == "image" and item.aspect_ratio == aspect
         ),
-        shot.image,
+        None,
     )
 
 
@@ -359,7 +359,7 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
             ),
             None,
         )
-        source = continuity_frame or _shot_image(shot, aspect)
+        source = clip_source_image(shot, aspect)
         if not source:
             attention.append(f"{shot.title or shot.id}: needs an image before video")
             completed += 1
@@ -402,7 +402,14 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 prompt,
                 duration_ms,
                 aspect,
+                scene_id=str(shot.scene.id),
             )
+            try:
+                raise_if_cancelled(db, job.id)
+            except JobCancelled:
+                db.rollback()
+                delete_media_file(filename)
+                raise
             invalidate_final_cut(project, db)
             if shot.clip:
                 shot.clip.filename = filename
@@ -444,6 +451,8 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
             db.commit()
+        except JobCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             attention.append(f"{shot.title or shot.id}: clip failed ({exc})")
             db.rollback()

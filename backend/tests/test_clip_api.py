@@ -191,6 +191,12 @@ def test_continuity_frame_can_start_video_without_storyboard_image(tmp_path, mon
         assert response.status_code == 202
         assert response.json()["kind"] == "shot_clip"
         assert session.query(Job).filter_by(kind="shot_clip").count() == 1
+        duplicate = client.post(f"/api/shots/{shot.id}/clip/generate?aspect_ratio=16:9")
+        assert duplicate.status_code == 202
+        assert duplicate.json()["id"] == response.json()["id"]
+        assert session.query(Job).filter_by(kind="shot_clip").count() == 1
+        assert client.post(f"/api/shots/{shot.id}/clip/generate?aspect_ratio=9:16").status_code == 409
+        assert client.post(f"/api/shots/{shot.id}/clip/generate?aspect_ratio=1:1").status_code == 422
     finally:
         app.dependency_overrides.clear()
         session.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Job
@@ -13,8 +14,10 @@ class JobCancelled(Exception):
 
 
 def raise_if_cancelled(db: Session, job_id: str) -> None:
-    job = db.get(Job, job_id)
-    if job is not None and job.status == "cancelled":
+    # Read through the database: workers retain Job objects while providers run.
+    with db.no_autoflush:
+        status = db.scalar(select(Job.status).where(Job.id == job_id))
+    if status == "cancelled":
         raise JobCancelled()
 
 
