@@ -13,19 +13,137 @@ export const useStudioStore = defineStore('studio', () => {
   const providers = ref<ProviderStatus[]>([])
   const videoProvider = ref<ProviderStatus | null>(null)
   const imageProviders = ref<ImageProviderStatus[]>([])
-  const imageJobs = ref<Record<string, Job>>({})
-  const castJobs = ref<Record<string, Job>>({})
-  const clipJobs = ref<Record<string, Job>>({})
-  const processingLipsyncId = ref<string | null>(null)
-  const lipsyncJobs = ref<Record<string, Job>>({})
+  const imageJobsByProject = ref<Record<string, Record<string, Job>>>({})
+  const castJobsByProject = ref<Record<string, Record<string, Job>>>({})
+  const clipJobsByProject = ref<Record<string, Record<string, Job>>>({})
+  const lipsyncJobsByProject = ref<Record<string, Record<string, Job>>>({})
+  const processingShotIdsByProject = ref<Record<string, string[]>>({})
+  const processingClipIdsByProject = ref<Record<string, string[]>>({})
+  const processingLipsyncIdsByProject = ref<Record<string, string[]>>({})
+
+  const imageJobs = computed({
+    get: () => {
+      const pid = currentProject.value?.id
+      return pid ? (imageJobsByProject.value[pid] || {}) : {}
+    },
+    set: (val: Record<string, Job>) => {
+      const pid = currentProject.value?.id
+      if (pid) imageJobsByProject.value = { ...imageJobsByProject.value, [pid]: val }
+    },
+  })
+
+  const castJobs = computed({
+    get: () => {
+      const pid = currentProject.value?.id
+      return pid ? (castJobsByProject.value[pid] || {}) : {}
+    },
+    set: (val: Record<string, Job>) => {
+      const pid = currentProject.value?.id
+      if (pid) castJobsByProject.value = { ...castJobsByProject.value, [pid]: val }
+    },
+  })
+
+  const clipJobs = computed({
+    get: () => {
+      const pid = currentProject.value?.id
+      return pid ? (clipJobsByProject.value[pid] || {}) : {}
+    },
+    set: (val: Record<string, Job>) => {
+      const pid = currentProject.value?.id
+      if (pid) clipJobsByProject.value = { ...clipJobsByProject.value, [pid]: val }
+    },
+  })
+
+  const lipsyncJobs = computed({
+    get: () => {
+      const pid = currentProject.value?.id
+      return pid ? (lipsyncJobsByProject.value[pid] || {}) : {}
+    },
+    set: (val: Record<string, Job>) => {
+      const pid = currentProject.value?.id
+      if (pid) lipsyncJobsByProject.value = { ...lipsyncJobsByProject.value, [pid]: val }
+    },
+  })
+
+  const processingShotIds = computed({
+    get: () => {
+      const pid = currentProject.value?.id
+      return pid ? (processingShotIdsByProject.value[pid] || []) : []
+    },
+    set: (val: string[]) => {
+      const pid = currentProject.value?.id
+      if (pid) processingShotIdsByProject.value = { ...processingShotIdsByProject.value, [pid]: val }
+    },
+  })
+
+  const processingClipId = computed<string | null>({
+    get: () => {
+      const pid = currentProject.value?.id
+      if (!pid) return null
+      return (processingClipIdsByProject.value[pid] || [])[0] || null
+    },
+    set: (val: string | null) => {
+      const pid = currentProject.value?.id
+      if (pid) {
+        processingClipIdsByProject.value = {
+          ...processingClipIdsByProject.value,
+          [pid]: val ? [val] : [],
+        }
+      }
+    },
+  })
+
+  const processingLipsyncId = computed<string | null>({
+    get: () => {
+      const pid = currentProject.value?.id
+      if (!pid) return null
+      return (processingLipsyncIdsByProject.value[pid] || [])[0] || null
+    },
+    set: (val: string | null) => {
+      const pid = currentProject.value?.id
+      if (pid) {
+        processingLipsyncIdsByProject.value = {
+          ...processingLipsyncIdsByProject.value,
+          [pid]: val ? [val] : [],
+        }
+      }
+    },
+  })
+
+  const clipJob = computed<Job | null>(() => {
+    const pid = currentProject.value?.id
+    if (!pid) return null
+    const jobs = Object.values(clipJobsByProject.value[pid] || {})
+    const running = jobs.find((j) => j.status === 'running')
+    if (running) return running
+    const queued = jobs.find((j) => j.status === 'queued')
+    if (queued) return queued
+    return jobs.find((j) => j.status === 'completed') || null
+  })
+
+  const backgroundActiveJobsCount = computed(() => {
+    const currentPid = currentProject.value?.id
+    let count = 0
+    for (const [pid, jobs] of Object.entries(clipJobsByProject.value)) {
+      if (pid === currentPid) continue
+      for (const job of Object.values(jobs)) {
+        if (job.status === 'queued' || job.status === 'running') count++
+      }
+    }
+    for (const [pid, jobs] of Object.entries(imageJobsByProject.value)) {
+      if (pid === currentPid) continue
+      for (const job of Object.values(jobs)) {
+        if (job.status === 'queued' || job.status === 'running') count++
+      }
+    }
+    return count
+  })
+
   const currentJob = ref<Job | null>(null)
-  const clipJob = ref<Job | null>(null)
   const jobElapsedSeconds = ref(0)
   const busy = ref(false)
   const approvingScript = ref(false)
   const continuingScript = ref(false)
-  const processingShotIds = ref<string[]>([])
-  const processingClipId = ref<string | null>(null)
   const processingAudioId = ref<string | null>(null)
   const voiceProviders = ref<VoiceProviderInfo[]>([])
   const auditionAudio = ref<Record<string, string>>({})
@@ -61,25 +179,126 @@ export const useStudioStore = defineStore('studio', () => {
     () => currentProject.value?.current_version?.suggestions.filter((item) => item.status === 'pending') ?? [],
   )
 
-  function beginShotProcessing(id: string) {
-    if (!processingShotIds.value.includes(id)) processingShotIds.value = [...processingShotIds.value, id]
+  function setProjectClipJob(projectId: string, shotId: string, job: Job) {
+    const current = clipJobsByProject.value[projectId] || {}
+    clipJobsByProject.value = {
+      ...clipJobsByProject.value,
+      [projectId]: { ...current, [shotId]: job },
+    }
   }
 
-  function endShotProcessing(id: string) {
-    processingShotIds.value = processingShotIds.value.filter((shotId) => shotId !== id)
+  function setProjectImageJob(projectId: string, shotId: string, job: Job) {
+    const current = imageJobsByProject.value[projectId] || {}
+    imageJobsByProject.value = {
+      ...imageJobsByProject.value,
+      [projectId]: { ...current, [shotId]: job },
+    }
+  }
+
+  function setProjectCastJob(projectId: string, characterId: string, job: Job) {
+    const current = castJobsByProject.value[projectId] || {}
+    castJobsByProject.value = {
+      ...castJobsByProject.value,
+      [projectId]: { ...current, [characterId]: job },
+    }
+  }
+
+  function setProjectLipsyncJob(projectId: string, shotId: string, job: Job) {
+    const current = lipsyncJobsByProject.value[projectId] || {}
+    lipsyncJobsByProject.value = {
+      ...lipsyncJobsByProject.value,
+      [projectId]: { ...current, [shotId]: job },
+    }
+  }
+
+  function beginShotProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingShotIdsByProject.value[pid] || []
+    if (!list.includes(id)) {
+      processingShotIdsByProject.value = {
+        ...processingShotIdsByProject.value,
+        [pid]: [...list, id],
+      }
+    }
+  }
+
+  function endShotProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingShotIdsByProject.value[pid] || []
+    processingShotIdsByProject.value = {
+      ...processingShotIdsByProject.value,
+      [pid]: list.filter((shotId) => shotId !== id),
+    }
+  }
+
+  function beginClipProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingClipIdsByProject.value[pid] || []
+    if (!list.includes(id)) {
+      processingClipIdsByProject.value = {
+        ...processingClipIdsByProject.value,
+        [pid]: [...list, id],
+      }
+    }
+  }
+
+  function endClipProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingClipIdsByProject.value[pid] || []
+    processingClipIdsByProject.value = {
+      ...processingClipIdsByProject.value,
+      [pid]: list.filter((shotId) => shotId !== id),
+    }
+  }
+
+  function beginLipsyncProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingLipsyncIdsByProject.value[pid] || []
+    if (!list.includes(id)) {
+      processingLipsyncIdsByProject.value = {
+        ...processingLipsyncIdsByProject.value,
+        [pid]: [...list, id],
+      }
+    }
+  }
+
+  function endLipsyncProcessing(id: string, projectId?: string) {
+    const pid = projectId || currentProject.value?.id
+    if (!pid) return
+    const list = processingLipsyncIdsByProject.value[pid] || []
+    processingLipsyncIdsByProject.value = {
+      ...processingLipsyncIdsByProject.value,
+      [pid]: list.filter((shotId) => shotId !== id),
+    }
   }
 
   function isProcessingShot(id: string) {
-    return processingShotIds.value.includes(id)
+    const pid = currentProject.value?.id
+    if (!pid) return false
+    const list = processingShotIdsByProject.value[pid] || []
+    if (list.includes(id)) return true
+    const job = imageJobsByProject.value[pid]?.[id]
+    return Boolean(job && (job.status === 'queued' || job.status === 'running'))
   }
 
   function isGeneratingCast(id: string) {
-    const job = castJobs.value[id]
+    const pid = currentProject.value?.id
+    if (!pid) return false
+    const job = castJobsByProject.value[pid]?.[id]
     return Boolean(job && (job.status === 'queued' || job.status === 'running'))
   }
 
   function isProcessingClip(id: string) {
-    const job = clipJobs.value[id]
+    const pid = currentProject.value?.id
+    if (!pid) return false
+    const list = processingClipIdsByProject.value[pid] || []
+    if (list.includes(id)) return true
+    const job = clipJobsByProject.value[pid]?.[id]
     return Boolean(job && (job.status === 'queued' || job.status === 'running'))
   }
 
@@ -145,7 +364,12 @@ export const useStudioStore = defineStore('studio', () => {
             continue
           }
         }
-        if (options?.reloadOnComplete !== false && job.status === 'completed' && currentProject.value) {
+        if (
+          options?.reloadOnComplete !== false &&
+          job.status === 'completed' &&
+          currentProject.value &&
+          job.project_id === currentProject.value.id
+        ) {
           await loadProject(currentProject.value.id, { resumeJobs: false })
         }
         return job
@@ -167,13 +391,11 @@ export const useStudioStore = defineStore('studio', () => {
         if (job.kind === 'cast_reference') {
           const characterId = typeof meta.character_id === 'string' ? meta.character_id : null
           if (!characterId) continue
-          castJobs.value = { ...castJobs.value, [characterId]: job }
+          setProjectCastJob(projectId, characterId, job)
           void watchJob(job.id, (next) => {
-            if (currentProject.value?.id !== projectId) return
-            castJobs.value = { ...castJobs.value, [characterId]: next }
+            setProjectCastJob(projectId, characterId, next)
           }).then((finalJob) => {
-            if (currentProject.value?.id !== projectId) return
-            if (finalJob?.status === 'failed') {
+            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Face reference generation failed')
             }
           })
@@ -182,15 +404,13 @@ export const useStudioStore = defineStore('studio', () => {
         if (job.kind === 'shot_image') {
           const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
           if (!shotId) continue
-          beginShotProcessing(shotId)
-          imageJobs.value = { ...imageJobs.value, [shotId]: job }
+          beginShotProcessing(shotId, projectId)
+          setProjectImageJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
-            if (currentProject.value?.id !== projectId) return
-            imageJobs.value = { ...imageJobs.value, [shotId]: next }
+            setProjectImageJob(projectId, shotId, next)
           }).then((finalJob) => {
-            if (currentProject.value?.id !== projectId) return
-            endShotProcessing(shotId)
-            if (finalJob?.status === 'failed') {
+            endShotProcessing(shotId, projectId)
+            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Image generation failed')
             }
           })
@@ -199,22 +419,13 @@ export const useStudioStore = defineStore('studio', () => {
         if (job.kind === 'shot_clip') {
           const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
           if (!shotId) continue
-          processingClipId.value = shotId
-          clipJobs.value = { ...clipJobs.value, [shotId]: job }
-          if (!clipJob.value || clipJob.value.status !== 'running') {
-            clipJob.value = job
-          }
+          beginClipProcessing(shotId, projectId)
+          setProjectClipJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
-            if (currentProject.value?.id !== projectId) return
-            clipJobs.value = { ...clipJobs.value, [shotId]: next }
-            if (clipJob.value?.id === next.id || !clipJob.value || clipJob.value.status === 'completed') {
-              clipJob.value = next
-            }
+            setProjectClipJob(projectId, shotId, next)
           }).then((finalJob) => {
-            if (currentProject.value?.id !== projectId) return
-            if (processingClipId.value === shotId) processingClipId.value = null
-            if (clipJob.value?.id === finalJob?.id) clipJob.value = finalJob ?? null
-            if (finalJob?.status === 'failed') {
+            endClipProcessing(shotId, projectId)
+            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Could not generate video')
             }
           })
@@ -223,15 +434,13 @@ export const useStudioStore = defineStore('studio', () => {
         if (job.kind === 'shot_lipsync') {
           const shotId = typeof meta.shot_id === 'string' ? meta.shot_id : null
           if (!shotId) continue
-          processingLipsyncId.value = shotId
-          lipsyncJobs.value = { ...lipsyncJobs.value, [shotId]: job }
+          beginLipsyncProcessing(shotId, projectId)
+          setProjectLipsyncJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
-            if (currentProject.value?.id !== projectId) return
-            lipsyncJobs.value = { ...lipsyncJobs.value, [shotId]: next }
+            setProjectLipsyncJob(projectId, shotId, next)
           }).then((finalJob) => {
-            if (currentProject.value?.id !== projectId) return
-            if (processingLipsyncId.value === shotId) processingLipsyncId.value = null
-            if (finalJob?.status === 'failed') {
+            endLipsyncProcessing(shotId, projectId)
+            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
               error.value = String(finalJob.error || 'Dialogue lip-sync failed')
             }
           })
@@ -264,14 +473,23 @@ export const useStudioStore = defineStore('studio', () => {
     try {
       const job = await api.cancelJob(jobId)
       if (currentJob.value?.id === jobId) currentJob.value = job
-      if (clipJob.value?.id === jobId) clipJob.value = job
       if (finalCutJob.value?.id === jobId) finalCutJob.value = job
-      const shotId = Object.entries(imageJobs.value).find(([, item]) => item.id === jobId)?.[0]
-      if (shotId) imageJobs.value = { ...imageJobs.value, [shotId]: job }
-      const clipShotId = Object.entries(clipJobs.value).find(([, item]) => item.id === jobId)?.[0]
-      if (clipShotId) clipJobs.value = { ...clipJobs.value, [clipShotId]: job }
-      const characterId = Object.entries(castJobs.value).find(([, item]) => item.id === jobId)?.[0]
-      if (characterId) castJobs.value = { ...castJobs.value, [characterId]: job }
+      for (const [pid, pJobs] of Object.entries(imageJobsByProject.value)) {
+        const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
+        if (shotId) setProjectImageJob(pid, shotId, job)
+      }
+      for (const [pid, pJobs] of Object.entries(clipJobsByProject.value)) {
+        const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
+        if (shotId) setProjectClipJob(pid, shotId, job)
+      }
+      for (const [pid, pJobs] of Object.entries(castJobsByProject.value)) {
+        const charId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
+        if (charId) setProjectCastJob(pid, charId, job)
+      }
+      for (const [pid, pJobs] of Object.entries(lipsyncJobsByProject.value)) {
+        const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
+        if (shotId) setProjectLipsyncJob(pid, shotId, job)
+      }
       return job
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not cancel job'
@@ -311,12 +529,9 @@ export const useStudioStore = defineStore('studio', () => {
       } catch {}
     }
     if (options?.resumeJobs) {
-      imageJobs.value = {}
-      castJobs.value = {}
-      clipJobs.value = {}
-      clipJob.value = null
-      processingShotIds.value = []
-      processingClipId.value = null
+      processingShotIdsByProject.value = { ...processingShotIdsByProject.value, [id]: [] }
+      processingClipIdsByProject.value = { ...processingClipIdsByProject.value, [id]: [] }
+      processingLipsyncIdsByProject.value = { ...processingLipsyncIdsByProject.value, [id]: [] }
       void resumeActiveJobs(id)
     }
   }
@@ -524,22 +739,26 @@ export const useStudioStore = defineStore('studio', () => {
     imageReferenceId?: string | null,
   ) {
     if (!currentProject.value) return
+    const projectId = currentProject.value.id
     error.value = ''
-    beginShotProcessing(id)
+    beginShotProcessing(id, projectId)
     try {
       let job = await api.generateShotImage(id, aspectRatio, characterIds, refreshContinuity, imageReferenceId)
-      imageJobs.value = { ...imageJobs.value, [id]: withQueueLabel(job) }
+      const initialJob = withQueueLabel(job)
+      setProjectImageJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
-        imageJobs.value = { ...imageJobs.value, [id]: next }
+        setProjectImageJob(projectId, id, next)
       })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Image generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : 'Could not generate image'
+      if (currentProject.value?.id === projectId) {
+        error.value = cause instanceof Error ? cause.message : 'Could not generate image'
+      }
       throw cause
     } finally {
-      endShotProcessing(id)
+      endShotProcessing(id, projectId)
     }
   }
 
@@ -665,18 +884,22 @@ export const useStudioStore = defineStore('studio', () => {
 
   async function generateCharacterReference(id: string, look?: string) {
     if (!currentProject.value) return
+    const projectId = currentProject.value.id
     error.value = ''
     try {
       let job = await api.generateCharacterReference(id, look)
-      castJobs.value = { ...castJobs.value, [id]: withQueueLabel(job) }
+      const initialJob = withQueueLabel(job)
+      setProjectCastJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
-        castJobs.value = { ...castJobs.value, [id]: next }
+        setProjectCastJob(projectId, id, next)
       })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Face reference generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : 'Could not generate face reference'
+      if (currentProject.value?.id === projectId) {
+        error.value = cause instanceof Error ? cause.message : 'Could not generate face reference'
+      }
       throw cause
     }
   }
@@ -754,29 +977,39 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   function isProcessingLipsync(id: string) {
-    return processingLipsyncId.value === id || lipsyncJobs.value[id]?.status === 'running' || lipsyncJobs.value[id]?.status === 'queued'
+    const pid = currentProject.value?.id
+    if (!pid) return false
+    const list = processingLipsyncIdsByProject.value[pid] || []
+    if (list.includes(id)) return true
+    const job = lipsyncJobsByProject.value[pid]?.[id]
+    return Boolean(job && (job.status === 'queued' || job.status === 'running'))
   }
 
   async function lipsyncShot(id: string, aspectRatio?: AspectRatio) {
     if (!currentProject.value) return null
+    const projectId = currentProject.value.id
     error.value = ''
-    processingLipsyncId.value = id
+    beginLipsyncProcessing(id, projectId)
     try {
       let job = await api.lipsyncShot(id, aspectRatio)
       const initialJob = withQueueLabel(job)
-      lipsyncJobs.value = { ...lipsyncJobs.value, [id]: initialJob }
+      setProjectLipsyncJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
-        lipsyncJobs.value = { ...lipsyncJobs.value, [id]: next }
+        setProjectLipsyncJob(projectId, id, next)
       })
       job = finalJob ?? (await api.job(job.id))
-      await loadProject(currentProject.value.id)
+      if (currentProject.value?.id === projectId) {
+        await loadProject(currentProject.value.id)
+      }
       if (job.status === 'failed') throw new Error(job.error || 'Lip-sync generation failed')
       return job
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : 'Could not generate lip-sync'
+      if (currentProject.value?.id === projectId) {
+        error.value = cause instanceof Error ? cause.message : 'Could not generate lip-sync'
+      }
       throw cause
     } finally {
-      if (processingLipsyncId.value === id) processingLipsyncId.value = null
+      endLipsyncProcessing(id, projectId)
     }
   }
 
@@ -794,35 +1027,27 @@ export const useStudioStore = defineStore('studio', () => {
 
   async function generateShotClip(id: string, aspectRatio?: AspectRatio) {
     if (!currentProject.value) return
+    const projectId = currentProject.value.id
     error.value = ''
-    processingClipId.value = id
+    beginClipProcessing(id, projectId)
     let job: Job | null = null
     try {
       job = await api.generateShotClip(id, aspectRatio)
       const initialJob = withQueueLabel(job)
-      clipJobs.value = { ...clipJobs.value, [id]: initialJob }
-      if (!clipJob.value || clipJob.value.status !== 'running') {
-        clipJob.value = initialJob
-      }
+      setProjectClipJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
-        clipJobs.value = { ...clipJobs.value, [id]: next }
-        if (clipJob.value?.id === next.id || !clipJob.value || clipJob.value.status === 'completed') {
-          clipJob.value = next
-        }
+        setProjectClipJob(projectId, id, next)
       })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : 'Could not generate video'
+      if (currentProject.value?.id === projectId) {
+        error.value = cause instanceof Error ? cause.message : 'Could not generate video'
+      }
       throw cause
     } finally {
-      if (processingClipId.value === id) {
-        processingClipId.value = null
-      }
-      if (job && clipJob.value?.id === job.id) {
-        clipJob.value = null
-      }
+      endClipProcessing(id, projectId)
     }
   }
 
@@ -1012,6 +1237,7 @@ export const useStudioStore = defineStore('studio', () => {
     processingLipsyncId,
     lipsyncJobs,
     isProcessingLipsync,
+    backgroundActiveJobsCount,
     lipsyncShot,
     selectShotTake,
     generateShotClip,

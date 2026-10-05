@@ -1666,6 +1666,10 @@ function formatRenderedAt(value: string) {
           <h1 class="project-stage-heading">{{ stageTitle }}</h1>
         </div>
         <div class="header-actions">
+          <span v-if="store.backgroundActiveJobsCount > 0" class="background-jobs-badge" title="Active generations running in other projects">
+            <RefreshCw :size="12" class="spinning" />
+            {{ store.backgroundActiveJobsCount }} background {{ store.backgroundActiveJobsCount === 1 ? 'job' : 'jobs' }}
+          </span>
           <span class="save-state"><Check :size="14" /> Saved</span>
           <button class="secondary-button format-guide-trigger" title="Script format guide" @click="showScriptGuide = true"><BookOpen :size="15" /><span>Script format</span></button>
           <button class="secondary-button preview-trigger" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
@@ -3193,6 +3197,19 @@ input::placeholder { color: #68716c; }
 }
 
 .project-copy small,
+.background-jobs-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent, #ea580c);
+  background: rgba(234, 88, 12, 0.1);
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(234, 88, 12, 0.2);
+}
+
 .save-state,
 .provider-state {
   color: var(--text-tertiary);

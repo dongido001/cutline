@@ -200,3 +200,99 @@ def test_continuity_frame_can_start_video_without_storyboard_image(tmp_path, mon
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_cross_project_video_queue_positions(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'cross_project.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+
+    # Project 1
+    p1 = Project(title="Project 1", status="shot_plan")
+    v1 = ScriptVersion(project=p1, source_text="test1")
+    s1 = Scene(script_version=v1, order_index=0, title="SCENE 1")
+    shot1 = Shot(scene=s1, order_index=0, title="Shot 1", video_prompt="Action 1")
+    shot1.continuity_frames.append(
+        ShotContinuityFrame(
+            aspect_ratio="16:9",
+            filename="frame1.png",
+            mime_type="image/png",
+            source_shot_id="prev",
+            source_shot_title="Prev",
+            source_time_ms=0,
+        )
+    )
+
+    # Project 2
+    p2 = Project(title="Project 2", status="shot_plan")
+    v2 = ScriptVersion(project=p2, source_text="test2")
+    s2 = Scene(script_version=v2, order_index=0, title="SCENE 2")
+    shot2 = Shot(scene=s2, order_index=0, title="Shot 2", video_prompt="Action 2")
+    shot2.continuity_frames.append(
+        ShotContinuityFrame(
+            aspect_ratio="16:9",
+            filename="frame2.png",
+            mime_type="image/png",
+            source_shot_id="prev",
+            source_shot_title="Prev",
+            source_time_ms=0,
+        )
+    )
+
+    session.add_all([p1, p2])
+    session.commit()
+
+    def override_db():
+        yield session
+
+    class DummyTask:
+        def __init__(self, tid):
+            self.id = tid
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr("backend.api.video_provider_status", lambda: ("test", "Test", True, True, "model", "ready"))
+    task_counter = 0
+    def dummy_enqueue(*args):
+        nonlocal task_counter
+        task_counter += 1
+        return DummyTask(f"task-{task_counter}")
+
+    monkeypatch.setattr("backend.api.enqueue_shot_clip", dummy_enqueue)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        # Queue video in Project 1
+        res1 = client.post(f"/api/shots/{shot1.id}/clip/generate?aspect_ratio=16:9")
+        assert res1.status_code == 202
+        job1_id = res1.json()["id"]
+
+        # Queue video in Project 2
+        res2 = client.post(f"/api/shots/{shot2.id}/clip/generate?aspect_ratio=16:9")
+        assert res2.status_code == 202
+        job2_id = res2.json()["id"]
+
+        # Verify Job 1 queue position is 1
+        j1 = client.get(f"/api/jobs/{job1_id}").json()
+        assert j1["project_id"] == p1.id
+        assert j1["status"] == "queued"
+        assert j1["queue_position"] == 1
+
+        # Verify Job 2 queue position is 2 across projects
+        j2 = client.get(f"/api/jobs/{job2_id}").json()
+        assert j2["project_id"] == p2.id
+        assert j2["status"] == "queued"
+        assert j2["queue_position"] == 2
+
+        # Verify list_project_jobs returns proper positions per project
+        p1_jobs = client.get(f"/api/projects/{p1.id}/jobs").json()
+        assert len(p1_jobs) == 1
+        assert p1_jobs[0]["id"] == job1_id
+        assert p1_jobs[0]["queue_position"] == 1
+
+        p2_jobs = client.get(f"/api/projects/{p2.id}/jobs").json()
+        assert len(p2_jobs) == 1
+        assert p2_jobs[0]["id"] == job2_id
+        assert p2_jobs[0]["queue_position"] == 2
+    finally:
+        app.dependency_overrides.clear()
+        session.close()

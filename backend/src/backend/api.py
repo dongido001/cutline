@@ -690,19 +690,30 @@ def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
         delete_media_file(filename)
 
 
+def compute_queue_position(db: Session, job: Job) -> int | None:
+    if job.status != "queued":
+        return None
+    kinds: set[str] = set()
+    if job.kind in {"shot_image", "cast_reference"}:
+        kinds = {"shot_image", "cast_reference"}
+    elif job.kind in {"shot_clip", "shot_lipsync"}:
+        kinds = {"shot_clip", "shot_lipsync"}
+    if not kinds:
+        return None
+    pending = db.scalars(
+        select(Job)
+        .where(Job.kind.in_(kinds), Job.status == "queued")
+        .order_by(Job.created_at, Job.id)
+    ).all()
+    return next((index for index, item in enumerate(pending, start=1) if item.id == job.id), None)
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobRead)
 def get_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    queue_position = None
-    if job.kind in {"shot_image", "cast_reference"} and job.status == "queued":
-        pending = db.scalars(
-            select(Job)
-            .where(Job.kind.in_(["shot_image", "cast_reference"]), Job.status == "queued")
-            .order_by(Job.created_at, Job.id)
-        ).all()
-        queue_position = next((index for index, item in enumerate(pending, start=1) if item.id == job.id), None)
+    queue_position = compute_queue_position(db, job)
     result = JobRead.model_validate(job)
     return result.model_copy(update={"queue_position": queue_position})
 
@@ -1341,20 +1352,7 @@ def list_project_jobs(
     jobs = list(db.scalars(query).all())
     results: list[JobRead] = []
     for job in jobs:
-        queue_position = None
-        if job.kind in {"shot_image", "cast_reference"} and job.status == "queued":
-            pending = db.scalars(
-                select(Job)
-                .where(
-                    Job.kind.in_(["shot_image", "cast_reference"]),
-                    Job.status == "queued",
-                )
-                .order_by(Job.created_at, Job.id)
-            ).all()
-            queue_position = next(
-                (index for index, item in enumerate(pending, start=1) if item.id == job.id),
-                None,
-            )
+        queue_position = compute_queue_position(db, job)
         results.append(JobRead.model_validate(job).model_copy(update={"queue_position": queue_position}))
     return results
 
