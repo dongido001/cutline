@@ -170,65 +170,6 @@ Video prompt:
 
 Continue with SHOT 2 and the same fields until the declared duration is reached.`
 const shotDraft = reactive({ framing: 'Medium', duration_ms: 5000, image_prompt: '', video_prompt: '', title_card_text: '' })
-const demoSuggestions = ref<DisplaySuggestion[]>([
-  {
-    id: 1,
-    severity: 'blocking',
-    title: "Clarify Mara's physical action",
-    reason: 'The dialogue has no visible action to drive the shot.',
-    change: 'Mara grips the counter, then turns toward the dark hallway.',
-    status: 'pending',
-  },
-  {
-    id: 2,
-    severity: 'warning',
-    title: 'Extend the opening beat',
-    reason: 'The current dialogue reads longer than the assigned timing.',
-    change: '00:00-00:14',
-    status: 'pending',
-  },
-  {
-    id: 3,
-    severity: 'optional',
-    title: 'Add a room-tone cue',
-    reason: 'A quiet appliance hum will anchor the interior atmosphere.',
-    change: 'SFX: refrigerator hum, distant traffic',
-    status: 'pending',
-  },
-])
-
-const demoScenes: Scene[] = [
-  {
-    id: 'demo-1',
-    order_index: 0,
-    title: 'INT. KITCHEN - NIGHT',
-    location: 'INT. KITCHEN',
-    time_of_day: 'NIGHT',
-    start_ms: 0,
-    end_ms: 12000,
-    action: 'Rain presses against the black kitchen windows. The only light comes from the open refrigerator.',
-    dialogue: [
-      { character: 'MARA', text: 'We should leave before he comes back.' },
-      { character: 'ELIAS', text: 'And go where?' },
-    ],
-    shots: [
-      { id: 'shot-1', order_index: 0, title: 'Kitchen wide', start_ms: 0, end_ms: 6000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Medium', image_prompt: '', video_prompt: '', title_card_text: '', character_ids: [], status: 'planned', image: null, clip: null, media_variants: [] },
-      { id: 'shot-2', order_index: 1, title: 'Mara reacts', start_ms: 6000, end_ms: 12000, action: '', dialogue: [], sound: '', duration_ms: 6000, framing: 'Close-up', image_prompt: '', video_prompt: '', title_card_text: '', character_ids: [], status: 'planned', image: null, clip: null, media_variants: [] },
-    ],
-  },
-  {
-    id: 'demo-2', order_index: 1, title: 'INT. HALLWAY - NIGHT', location: 'INT. HALLWAY', time_of_day: 'NIGHT', start_ms: 12000, end_ms: 28000,
-    action: 'Mara leads Elias through the narrow hallway as headlights sweep across the walls.', dialogue: [], shots: [],
-  },
-  {
-    id: 'demo-3', order_index: 2, title: 'EXT. DRIVEWAY - NIGHT', location: 'EXT. DRIVEWAY', time_of_day: 'NIGHT', start_ms: 28000, end_ms: 46000,
-    action: 'They run toward an idling car through the hard rain.', dialogue: [], shots: [],
-  },
-  {
-    id: 'demo-4', order_index: 3, title: 'EXT. NIGHT ROAD - NIGHT', location: 'EXT. NIGHT ROAD', time_of_day: 'NIGHT', start_ms: 46000, end_ms: 62000,
-    action: 'The car disappears into the unlit road.', dialogue: [], shots: [],
-  },
-]
 
 const form = reactive<ProjectInput>({
   title: 'Untitled short',
@@ -248,11 +189,11 @@ EXT. DRIVEWAY - NIGHT
 They run toward an idling car through the hard rain.`,
 })
 
-const scenes = computed(() => store.currentProject?.current_version?.scenes ?? demoScenes)
+const scenes = computed(() => store.currentProject?.current_version?.scenes ?? [])
 const selectedScene = computed(() => scenes.value[activeScene.value] ?? scenes.value[0])
 const suggestions = computed<DisplaySuggestion[]>(() => {
   const source = store.currentProject?.current_version?.suggestions
-  if (!source) return demoSuggestions.value
+  if (!source) return []
   return source.map((item: Suggestion) => ({
     id: item.id,
     severity: item.severity,
@@ -263,7 +204,7 @@ const suggestions = computed<DisplaySuggestion[]>(() => {
   }))
 })
 const pendingCount = computed(() => suggestions.value.filter((item) => item.status === 'pending').length)
-const projectTitle = computed(() => store.currentProject?.title ?? 'Glass House')
+const projectTitle = computed(() => store.currentProject?.title ?? 'New project')
 const projectDuration = computed(() => {
   const end = Math.max(...scenes.value.map((scene) => scene.end_ms ?? 0), 0)
   return formatTime(end)
@@ -290,6 +231,11 @@ const previousShotId = computed(() => {
   const shots = allShots.value
   const idx = shots.findIndex((s) => s.id === selectedShot.value!.id)
   return idx > 0 ? shots[idx - 1]?.id : undefined
+})
+const previousShot = computed(() => allShots.value.find((shot) => shot.id === previousShotId.value))
+const skipDefaultImageReference = ref(false)
+watch(() => selectedShot.value?.id, () => {
+  skipDefaultImageReference.value = false
 })
 const selectedAspectImage = computed(() => {
   const shot = selectedShot.value
@@ -494,8 +440,10 @@ watch(() => route.query.episode, async (newQueryEp) => {
 })
 watch(() => store.currentProject?.id, () => {
   mediaAspect.value = (store.currentProject?.aspect_ratio as AspectRatio | undefined) ?? '16:9'
-  produceDetailOpen.value = false
-  showPromptEditor.value = false
+  if (!route.params.shotId) {
+    produceDetailOpen.value = false
+    showPromptEditor.value = false
+  }
 }, { immediate: true })
 watch(
   () => scenes.value.map((scene) => `${scene.id}:${scene.shots[0]?.id || ''}:${scene.set_notes || ''}:${scene.lighting_notes || ''}:${scene.wardrobe_notes || ''}:${scene.props_notes || ''}`).join('|'),
@@ -517,14 +465,17 @@ watch(() => route.query.scene, (sceneId) => {
   activeScene.value = index >= 0 ? index : 0
 }, { immediate: true })
 watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage]) => {
-  const requestedShot = typeof shotId === 'string' ? shots.find((shot) => shot.id === shotId) : undefined
-  activeShotId.value = requestedShot?.id ?? shots[0]?.id ?? null
-  if (typeof shotId === 'string' && shotId) {
+  const hasShotParam = typeof shotId === 'string' && shotId.length > 0
+  const requestedShot = hasShotParam ? shots.find((shot) => shot.id === shotId) : undefined
+  if (hasShotParam) {
+    activeShotId.value = requestedShot?.id ?? (shots.length === 0 ? shotId : shots[0]?.id ?? null)
     produceDetailOpen.value = true
-    if (requestedShot?.id !== shotId && activeShotId.value && store.currentProject) {
+    // Only replace route if shots have loaded and the project is initialized, and the requested shot is truly missing
+    if (shots.length > 0 && requestedShot?.id !== shotId && activeShotId.value && store.currentProject) {
       void router.replace(projectRoute(store.currentProject.id, stage, activeShotId.value))
     }
   } else {
+    activeShotId.value = shots[0]?.id ?? null
     produceDetailOpen.value = false
   }
 }, { immediate: true })
@@ -888,10 +839,7 @@ function setFinalCutVariant(variant: OutputVariant) {
 async function decide(id: string | number, decision: 'accepted' | 'rejected') {
   if (typeof id === 'string' && store.currentProject) {
     await store.decideSuggestion(id, decision)
-    return
   }
-  const suggestion = demoSuggestions.value.find((item) => item.id === id)
-  if (suggestion) suggestion.status = decision
 }
 
 async function submitProject() {
@@ -999,7 +947,14 @@ async function generateShotImage() {
   if (!selectedShot.value) return
   try {
     await saveShot()
-    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value, false, selectedAspectReference.value?.id)
+    await store.generateShotImage(
+      selectedShot.value.id,
+      mediaAspect.value,
+      selectedCharacterIds.value,
+      false,
+      selectedAspectReference.value?.id,
+      !skipDefaultImageReference.value,
+    )
   } catch {
     // The store exposes the provider or validation error in the workspace.
   }
@@ -1469,10 +1424,15 @@ function chooseClipUpload() {
 }
 
 async function generateShotClip() {
-  if (!selectedShot.value) return
+  if (!selectedShot.value || !store.currentProject) return
+  const shotId = selectedShot.value.id
+  const projectId = store.currentProject.id
+  const episodeId = store.currentEpisodeId
+  const aspectRatio = mediaAspect.value
+  const input = { ...shotDraft, character_ids: [...selectedCharacterIds.value] }
   try {
-    await saveShot()
-    await store.generateShotClip(selectedShot.value.id, mediaAspect.value)
+    await store.updateShot(shotId, input)
+    await store.generateShotClip(shotId, aspectRatio, projectId, episodeId)
   } catch {
     // The store exposes the provider or workflow error in the workspace.
   }
@@ -1523,7 +1483,14 @@ async function generateVariantFrame() {
   if (!selectedShot.value) return
   try {
     await saveShot()
-    await store.generateShotImage(selectedShot.value.id, mediaAspect.value, selectedCharacterIds.value, true, selectedAspectReference.value?.id)
+    await store.generateShotImage(
+      selectedShot.value.id,
+      mediaAspect.value,
+      selectedCharacterIds.value,
+      true,
+      selectedAspectReference.value?.id,
+      !skipDefaultImageReference.value,
+    )
   } catch {
     // The store exposes the provider error in the workspace.
   }
@@ -1599,10 +1566,9 @@ function formatRenderedAt(value: string) {
             <button @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
           </div>
         </div>
-        <button v-if="!store.projects.length" class="project-item active" @click="showCreate = true">
+        <button v-if="!store.projects.length" class="project-item" @click="showCreate = true">
           <span class="project-thumb"><Film :size="17" /></span>
-          <span class="project-copy"><strong>Glass House</strong><small>Demo workspace</small></span>
-          <MoreHorizontal :size="16" />
+          <span class="project-copy"><strong>Create a project</strong><small>Import a screenplay</small></span>
         </button>
       </div>
 
@@ -1660,7 +1626,7 @@ function formatRenderedAt(value: string) {
             <ChevronRight :size="13" class="breadcrumb-separator" />
             <EpisodeSwitcher
               @open-settings="openProjectSettings"
-              @open-new-episode="showNewEpisodeModal = true"
+              @open-new-episode="openNewEpisodeModal"
             />
           </div>
           <h1 class="project-stage-heading">{{ stageTitle }}</h1>
@@ -1670,7 +1636,7 @@ function formatRenderedAt(value: string) {
             <RefreshCw :size="12" class="spinning" />
             {{ store.backgroundActiveJobsCount }} background {{ store.backgroundActiveJobsCount === 1 ? 'job' : 'jobs' }}
           </span>
-          <span class="save-state"><Check :size="14" /> Saved</span>
+          <span v-if="store.currentProject" class="save-state"><Check :size="14" /> Saved</span>
           <button class="secondary-button format-guide-trigger" title="Script format guide" @click="showScriptGuide = true"><BookOpen :size="15" /><span>Script format</span></button>
           <button class="secondary-button preview-trigger" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
           <button
@@ -2294,7 +2260,9 @@ function formatRenderedAt(value: string) {
               v-if="selectedShot"
               :shot="selectedShot"
               :aspect="mediaAspect"
-              :previous-shot-id="previousShotId"
+              :previous-shot="previousShot"
+              :project-aspect="(store.currentProject?.aspect_ratio as AspectRatio | undefined)"
+              v-model:skip-default="skipDefaultImageReference"
             />
 
             <form class="shot-fields" @submit.prevent="saveShot">

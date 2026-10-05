@@ -74,7 +74,18 @@ function mountPanel(shot = makeShot()) {
   store.currentProject = { id: 'project-1' } as typeof store.currentProject
   store.loadProject = vi.fn<typeof store.loadProject>()
   return mount(ImageReferencePanel, {
-    props: { shot, aspect: '16:9', previousShotId: 'shot-2' },
+    props: {
+      shot,
+      aspect: '16:9',
+      previousShot: {
+        id: 'shot-2',
+        title: 'Shot 2',
+        image: { id: 'image-2', url: '/media/shot-2.png', mime_type: 'image/png', source: 'generated', provider: 'test', prompt: '', created_at: new Date().toISOString() },
+        media_variants: [],
+      } as unknown as Shot,
+      projectAspect: '16:9',
+      canReferenceEarlier: true,
+    },
     global: {
       plugins: [pinia],
       stubs: {
@@ -154,5 +165,11 @@ describe('ImageReferencePanel', () => {
     await flushPromises()
 
     expect(api.removeImageReference).toHaveBeenCalledWith('shot-3', '16:9')
+  })
+
+  it('previews the previous shot still as the automatic reference', () => {
+    const wrapper = mountPanel()
+    expect(wrapper.get('img').attributes('alt')).toBe('Default previous-shot reference')
+    expect(wrapper.text()).toContain('Attached automatically on generate')
   })
 })
