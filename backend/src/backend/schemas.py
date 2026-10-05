@@ -1,7 +1,15 @@
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def validate_single_episode(script: str) -> str:
+    headings = re.findall(r"(?im)^\s*(?:#{1,6}\s*)?EPISODE\s+\d+\s*[—–:-]", script)
+    if len(headings) > 1:
+        raise ValueError("Import one episode at a time. Split the season document and use New Episode for each episode.")
+    return script
 
 
 class EpisodeCreate(BaseModel):
@@ -9,6 +17,8 @@ class EpisodeCreate(BaseModel):
     script: str = Field(min_length=1)
     target_duration_seconds: int = Field(default=60, ge=0, le=1800)
 
+
+    _single_episode = field_validator("script")(validate_single_episode)
 
 class EpisodeUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
@@ -47,10 +57,14 @@ class ProjectCreate(BaseModel):
     script: str = Field(min_length=1)
 
 
+    _single_episode = field_validator("script")(validate_single_episode)
+
 class ProjectContinuationCreate(BaseModel):
     script: str = Field(min_length=1)
     target_duration_seconds: int = Field(default=30, ge=5, le=1800)
 
+
+    _single_episode = field_validator("script")(validate_single_episode)
 
 class ProjectSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
