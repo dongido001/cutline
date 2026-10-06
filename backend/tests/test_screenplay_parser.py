@@ -147,3 +147,96 @@ Subtle head movement.
     assert shot["start_ms"] == 0
     assert shot["end_ms"] == shot["duration_ms"]
     assert any("Estimated timing" in item["title"] for item in result["suggestions"])
+
+
+def test_interleaved_stage_directions_and_transitions_do_not_leak_into_dialogue() -> None:
+    script = """WHEN THE TIDE RETURNS
+
+Duration: 18 seconds
+Format: 2 shots x 9 seconds
+Aspect ratio: 9:16
+
+Character consistency
+
+MAYA SANTOS, 25 — Filipina woman in pale-yellow blouse.
+GABRIEL “GABE” DE LEON, 29 — Filipino man in white rolled-sleeve shirt.
+ROSA SANTOS, 52 — Maya's mother in floral house dress.
+
+Location: Santos Seaside Café.
+
+SHOT 1 - BACK TO MAYA
+
+Scene: CAFÉ RETURN
+Time: 00:00-00:09
+Framing: Medium counter two-shot
+
+Action:
+Gabe returns to the café.
+
+MAYA:
+“Busy morning?”
+
+GABE:
+“Work.”
+
+Maya picks up the seventy pesos and places them into the cash drawer.
+
+Sound: Dialogue and cash drawer movement.
+
+Image prompt:
+Medium frame inside Santos Seaside Café.
+
+Video prompt:
+Maya asks a question and stores the cash.
+
+SHOT 2 - ROSA LEARNS THE TRUTH
+
+Scene: HIDDEN CALL
+Time: 00:09-00:18
+Framing: Layered suspense shot
+
+Action:
+Rosa approaches the doorway.
+
+GABE:
+“Maya doesn’t know I’m involved in this project.”
+
+A beat.
+
+GABE:
+“I need time to tell her myself.”
+
+Rosa freezes.
+
+Recognition becomes hurt.
+
+CUT TO BLACK.
+
+Sound: Gabe's dialogue and rising tension.
+
+Image prompt:
+Rosa in corridor, Gabe outside.
+
+Video prompt:
+Rosa overhears Gabe and freezes.
+"""
+    result = parse_structured_screenplay(script)
+    assert result is not None
+    assert [c["name"] for c in result["characters"]] == ["MAYA", "GABE", "ROSA"]
+
+    shot1 = result["scenes"][0]["shots"][0]
+    assert shot1["dialogue"] == [
+        {"character": "MAYA", "text": "Busy morning?"},
+        {"character": "GABE", "text": "Work."},
+    ]
+    assert "Maya picks up the seventy pesos" in shot1["action"]
+
+    shot2 = result["scenes"][1]["shots"][0]
+    assert shot2["dialogue"] == [
+        {"character": "GABE", "text": "Maya doesn’t know I’m involved in this project."},
+        {"character": "GABE", "text": "I need time to tell her myself."},
+    ]
+    assert "A beat." in shot2["action"]
+    assert "Rosa freezes." in shot2["action"]
+    assert "CUT TO BLACK." in shot2["action"]
+

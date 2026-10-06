@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from typing import Any
 
@@ -23,10 +25,16 @@ CHARACTER_SECTION_STOP = re.compile(
     r"(?im)^(?:#{1,6}\s*)?(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+|SCENE|OPENING|---)\b"
 )
 CHARACTER_LINE = re.compile(
-    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-,/\"\(\)]{0,80}?)(?:\*\*)?"
+    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-,/\"\u201c\u201d\u2018\u2019\(\)]{0,80}?)(?:\*\*)?"
     r"(?:\s*\((?P<role>[^)]+)\))?"
     r"\s*[—–\-:]\s*(?P<notes>.+)$"
 )
+TRANSITION_LINE = re.compile(
+    r"^(?:CUT TO|FADE IN|FADE OUT|FADE TO|SMASH CUT|MATCH CUT|DISSOLVE TO|WIPE TO|END OF\b|THE END\b)",
+    re.IGNORECASE,
+)
+OPEN_QUOTES = ('"', "'", "\u201c", "\u2018")
+CLOSE_QUOTES = ('"', "'", "\u201d", "\u2019")
 
 
 def canonical_character_name(name: str) -> str:
@@ -49,6 +57,28 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
     if start is None:
         return []
 
+    dialogue_cues = {
+        canonical_character_name(line.strip().rstrip(":"))
+        for line in lines[start:]
+        if line.strip().endswith(":") and _is_character_cue(line)
+    }
+    first_shot_match = SHOT_HEADING.search(script)
+    shots_text = script[first_shot_match.start() :] if first_shot_match else ""
+
+    def _resolve_base_name(base: str) -> str:
+        parts = base.split()
+        if len(parts) <= 1 or base in dialogue_cues:
+            return base
+        if parts[0] in dialogue_cues:
+            return parts[0]
+        if shots_text and re.search(
+            rf"\b{re.escape(parts[0])}\b(?!\s+{re.escape(parts[1])})",
+            shots_text,
+            re.IGNORECASE,
+        ):
+            return parts[0]
+        return base
+
     found: list[dict[str, str]] = []
     seen: set[str] = set()
     blank_streak = 0
@@ -70,16 +100,18 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
                 break
             continue
         raw_name = match.group("name").strip()
-        nickname_match = re.search(r'["\']([^"\']+)["\']', raw_name)
+        nickname_match = re.search(
+            r'["\'\u201c\u2018]([^"\'\u201d\u2019]+)["\'\u201d\u2019]', raw_name
+        )
         if nickname_match:
             name = canonical_character_name(nickname_match.group(1))
         elif "," in raw_name:
             # Drop trailing age e.g. "MAYA SANTOS, 25" -> "MAYA SANTOS"
-            base = raw_name.split(",")[0].strip()
-            # If multi-word, check if first word is the character name
-            name = canonical_character_name(base)
+            base = canonical_character_name(raw_name.split(",")[0].strip())
+            name = _resolve_base_name(base)
         else:
-            name = canonical_character_name(raw_name)
+            base = canonical_character_name(raw_name)
+            name = _resolve_base_name(base)
         if not name or name in seen:
             continue
         role = (match.group("role") or "").strip()
@@ -101,7 +133,14 @@ def _timecode_to_ms(value: str) -> int:
 
 
 def _is_character_cue(value: str) -> bool:
-    candidate = value.strip().rstrip(":").strip()
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if not stripped.endswith(":") and stripped.endswith((".", "!")):
+        return False
+    candidate = stripped.rstrip(":").strip()
+    if TRANSITION_LINE.match(candidate):
+        return False
     letters = [character for character in candidate if character.isalpha()]
     return bool(letters) and all(character.isupper() for character in letters)
 
@@ -110,27 +149,65 @@ def _clean_dialogue_text(value: str) -> str:
     return value.strip().strip('"\'\u201c\u201d\u2018\u2019').strip()
 
 
-def _extract_dialogue(lines: list[str]) -> list[dict[str, str]]:
-    if not lines or " ".join(lines).strip().lower().rstrip(".") == "none":
-        return []
+def _is_none_marker(value: str) -> bool:
+    return value.strip().lower().rstrip(".") == "none"
+
+
+def _split_dialogue_and_interleaved_action(
+    lines: list[str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    if not lines or _is_none_marker(" ".join(lines)):
+        return [], []
     dialogue: list[dict[str, str]] = []
+    extra_action: list[str] = []
     character: str | None = None
     text_lines: list[str] = []
+    in_quoted_dialogue = False
 
     def flush() -> None:
-        nonlocal text_lines
+        nonlocal character, text_lines, in_quoted_dialogue
         text_value = _clean_dialogue_text(" ".join(text_lines))
-        if character and text_value:
+        if character and text_value and not _is_none_marker(text_value):
             dialogue.append({"character": character, "text": text_value})
+        character = None
         text_lines = []
+        in_quoted_dialogue = False
 
-    for line in lines:
-        if _is_character_cue(line):
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            if character and text_lines and not in_quoted_dialogue:
+                flush()
+            continue
+        if _is_none_marker(stripped):
+            continue
+        if _is_character_cue(stripped):
             flush()
-            character = line.strip().rstrip(":").strip()
-        elif line.strip():
-            text_lines.append(line.strip())
+            character = stripped.rstrip(":").strip()
+            continue
+        if character is not None:
+            starts_quoted = stripped.startswith(OPEN_QUOTES)
+            ends_quoted = stripped.endswith(CLOSE_QUOTES) and len(stripped) > 1
+            if not text_lines:
+                in_quoted_dialogue = starts_quoted
+                text_lines.append(stripped)
+                if in_quoted_dialogue and ends_quoted:
+                    flush()
+            elif in_quoted_dialogue:
+                text_lines.append(stripped)
+                if ends_quoted:
+                    flush()
+            else:
+                text_lines.append(stripped)
+        else:
+            extra_action.append(stripped)
+
     flush()
+    return dialogue, extra_action
+
+
+def _extract_dialogue(lines: list[str]) -> list[dict[str, str]]:
+    dialogue, _ = _split_dialogue_and_interleaved_action(lines)
     return dialogue
 
 
@@ -142,10 +219,21 @@ def _split_action_and_dialogue(
         None,
     )
     if first_cue is not None:
-        dialogue_lines = action_lines[first_cue:] + dialogue_lines
-        action_lines = action_lines[:first_cue]
-    action = "\n".join(line for line in action_lines if line.strip()).strip()
-    return action, _extract_dialogue(dialogue_lines)
+        combined_dialogue_lines = action_lines[first_cue:] + dialogue_lines
+        leading_action_lines = action_lines[:first_cue]
+    else:
+        combined_dialogue_lines = dialogue_lines
+        leading_action_lines = action_lines
+    dialogue, interleaved_action = _split_dialogue_and_interleaved_action(
+        combined_dialogue_lines
+    )
+    all_action = [
+        line.strip()
+        for line in [*leading_action_lines, *interleaved_action]
+        if line.strip() and not _is_none_marker(line)
+    ]
+    action = "\n".join(all_action).strip()
+    return action, dialogue
 
 
 def _field_text(fields: dict[str, list[str]], name: str) -> str:

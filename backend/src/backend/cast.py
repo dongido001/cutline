@@ -109,22 +109,55 @@ def match_character_ids(
     dialogue_names: list[str],
     haystack: str,
 ) -> list[str]:
+    char_list = list(characters)
     dialogue_set = {canonical_character_name(name) for name in dialogue_names}
+    first_word_counts: dict[str, int] = {}
+    for character in char_list:
+        key = canonical_character_name(character.name)
+        parts = key.split()
+        if parts:
+            first_word_counts[parts[0]] = first_word_counts.get(parts[0], 0) + 1
+
     matched: list[str] = []
-    for character in characters:
+    for character in char_list:
         key = canonical_character_name(character.name)
         if not key:
             continue
-        if key in dialogue_set:
+        parts = key.split()
+        first_word = parts[0] if len(parts) > 1 and first_word_counts.get(parts[0]) == 1 else None
+        if key in dialogue_set or (first_word and first_word in dialogue_set):
             matched.append(character.id)
             continue
         pattern = rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])"
+        first_pattern = (
+            rf"(?<![A-Z0-9]){re.escape(first_word)}(?![A-Z0-9])" if first_word else None
+        )
         aliases = CHARACTER_MENTION_ALIASES.get(key, ())
-        if re.search(pattern, haystack) or any(
-            re.search(alias, haystack) for alias in aliases
+        if (
+            re.search(pattern, haystack)
+            or (first_pattern and re.search(first_pattern, haystack))
+            or any(re.search(alias, haystack) for alias in aliases)
         ):
             matched.append(character.id)
     return matched
+
+
+def _find_first_name_alias(
+    by_name: dict[str, Character], key: str
+) -> Character | None:
+    parts = key.split()
+    if len(parts) == 1:
+        matches = [
+            char
+            for existing_key, char in by_name.items()
+            if existing_key.split() and existing_key.split()[0] == key
+        ]
+        unique = {char.id: char for char in matches}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+    elif len(parts) > 1 and parts[0] in by_name:
+        return by_name[parts[0]]
+    return None
 
 
 def _ensure_character(
@@ -135,11 +168,12 @@ def _ensure_character(
     notes: str = "",
 ) -> Character:
     key = canonical_character_name(name)
-    existing = by_name.get(key)
+    existing = by_name.get(key) or _find_first_name_alias(by_name, key)
     if existing:
         if notes and (not existing.notes or len(notes) > len(existing.notes)):
             existing.notes = notes
             existing.name = key
+        by_name[key] = existing
         return existing
     character = Character(project_id=project_id, name=key, notes=notes or "")
     db.add(character)
@@ -187,6 +221,8 @@ def sync_project_cast(
     for entry in parse_character_consistency(source_text or ""):
         _ensure_character(db, project.id, by_name, entry["name"], entry["notes"])
 
+    unique_chars = lambda: list({char.id: char for char in by_name.values()}.values())
+
     for scene in _latest_version_scenes(project, db):
         for shot in scene.shots:
             dialogue_names, haystack = shot_mentioned_names(shot)
@@ -194,11 +230,11 @@ def sync_project_cast(
                 _ensure_character(db, project.id, by_name, name)
             if tag_shots:
                 shot.character_ids = match_character_ids(
-                    by_name.values(), dialogue_names, haystack
+                    unique_chars(), dialogue_names, haystack
                 )
 
     db.flush()
-    return list(by_name.values())
+    return unique_chars()
 
 
 def load_cast_references(

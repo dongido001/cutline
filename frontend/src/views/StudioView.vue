@@ -532,8 +532,27 @@ watch([previewShot, previewPlaying], () => {
   void nextTick(syncPreviewVideo)
 })
 
-onUnmounted(stopPreviewTimer)
+function handleGlobalPointerDown(event: PointerEvent) {
+  if (!projectMenuId.value) return
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('.project-menu, .project-menu-trigger')) return
+  projectMenuId.value = null
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && projectMenuId.value) {
+    projectMenuId.value = null
+  }
+}
+
+onUnmounted(() => {
+  stopPreviewTimer()
+  document.removeEventListener('pointerdown', handleGlobalPointerDown)
+  document.removeEventListener('keydown', handleGlobalKeydown)
+})
 onMounted(async () => {
+  document.addEventListener('pointerdown', handleGlobalPointerDown)
+  document.addEventListener('keydown', handleGlobalKeydown)
   const projectId = typeof route.params.projectId === 'string' ? route.params.projectId : undefined
   const queryEpisode = typeof route.query.episode === 'string' ? route.query.episode : undefined
   await store.initialize(projectId, queryEpisode)
@@ -880,6 +899,31 @@ async function submitContinuation() {
   } catch {
     // The store exposes the actionable error in the modal.
   }
+}
+
+function projectStatusTone(status: string): 'review' | 'produce' | 'complete' {
+  const normalized = (status || '').toLowerCase()
+  if (normalized === 'final_cut' || normalized === 'completed' || normalized === 'complete') {
+    return 'complete'
+  }
+  if (normalized === 'shot_plan' || normalized === 'shots' || normalized === 'storyboards' || normalized === 'clips') {
+    return 'produce'
+  }
+  return 'review'
+}
+
+function formatProjectMeta(project: ProjectSummary): string {
+  const parts: string[] = []
+  if (project.aspect_ratio) parts.push(project.aspect_ratio)
+  if (project.updated_at) {
+    const date = new Date(project.updated_at)
+    if (!Number.isNaN(date.getTime())) {
+      parts.push(
+        new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date),
+      )
+    }
+  }
+  return parts.join(' · ')
 }
 
 function openDeleteConfirmation(project: ProjectSummary) {
@@ -1554,42 +1598,61 @@ function formatRenderedAt(value: string) {
 </script>
 
 <template>
-  <main class="studio-layout">
+  <main class="studio-layout" :class="{ 'assembling': activeStage === 'final-cut' }">
     <aside class="project-rail">
       <div class="rail-section rail-projects">
-        <div class="section-label-row">
-          <span class="section-label">Projects</span>
-          <button class="mini-icon" title="New project" aria-label="Create project" @click="showCreate = true"><Plus :size="15" /></button>
-        </div>
-        <div
-          v-for="project in store.projects"
-          :key="project.id"
-          class="project-item"
-          :class="{ active: store.currentProject?.id === project.id }"
-        >
-          <button class="project-select" @click="selectProject(project.id)">
-            <span class="project-thumb"><Film :size="17" /></span>
-            <span class="project-copy"><strong>{{ project.title }}</strong><small>{{ project.status.replace('_', ' ') }}</small></span>
-          </button>
-          <button
-            class="project-menu-trigger"
-            :aria-label="`Project actions for ${project.title}`"
-            :aria-expanded="projectMenuId === project.id"
-            title="Project actions"
-            @click="projectMenuId = projectMenuId === project.id ? null : project.id"
-          ><MoreHorizontal :size="16" /></button>
-          <div v-if="projectMenuId === project.id" class="project-menu">
-            <button @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
+        <div class="section-label-row rail-projects-header">
+          <div class="rail-projects-title">
+            <span class="section-label">Projects</span>
+            <span v-if="store.projects.length" class="rail-projects-count">{{ store.projects.length }}</span>
           </div>
+          <button class="mini-icon rail-new-project-btn" title="New project" aria-label="Create project" @click="showCreate = true"><Plus :size="15" /></button>
         </div>
-        <button v-if="!store.projects.length" class="project-item" :disabled="store.busy" @click="loadDemoProject">
-          <span class="project-thumb"><Play :size="17" /></span>
-          <span class="project-copy"><strong>{{ store.busy ? 'Loading…' : 'Load demo project' }}</strong><small>Jasmine &amp; Skylar · 16 shots</small></span>
-        </button>
-        <button v-if="!store.projects.length" class="project-item" @click="showCreate = true">
-          <span class="project-thumb"><Film :size="17" /></span>
-          <span class="project-copy"><strong>Create a project</strong><small>Import a screenplay</small></span>
-        </button>
+        <div class="project-list">
+          <div
+            v-for="project in store.projects"
+            :key="project.id"
+            class="project-item"
+            :class="[
+              `tone-${projectStatusTone(project.status)}`,
+              { active: store.currentProject?.id === project.id, 'menu-open': projectMenuId === project.id },
+            ]"
+          >
+            <button class="project-select" :title="project.title" @click="selectProject(project.id)">
+              <span class="project-thumb" :class="`tone-${projectStatusTone(project.status)}`">
+                <Clapperboard v-if="projectStatusTone(project.status) === 'produce'" :size="14" />
+                <MessageSquareText v-else-if="projectStatusTone(project.status) === 'review'" :size="14" />
+                <Film v-else :size="14" />
+              </span>
+              <span class="project-copy">
+                <strong>{{ project.title }}</strong>
+                <small class="project-meta">
+                  <span class="project-status-dot" :class="`tone-${projectStatusTone(project.status)}`"></span>
+                  <span class="project-status-label">{{ project.status.replace('_', ' ') }}</span>
+                  <span v-if="formatProjectMeta(project)" class="project-meta-extra">· {{ formatProjectMeta(project) }}</span>
+                </small>
+              </span>
+            </button>
+            <button
+              class="project-menu-trigger"
+              :aria-label="`Project actions for ${project.title}`"
+              :aria-expanded="projectMenuId === project.id"
+              title="Project actions"
+              @click.stop="projectMenuId = projectMenuId === project.id ? null : project.id"
+            ><MoreHorizontal :size="15" /></button>
+            <div v-if="projectMenuId === project.id" class="project-menu" @click.stop>
+              <button @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
+            </div>
+          </div>
+          <button v-if="!store.projects.length" class="project-item project-empty-action" :disabled="store.busy" @click="loadDemoProject">
+            <span class="project-thumb tone-produce"><Play :size="14" /></span>
+            <span class="project-copy"><strong>{{ store.busy ? 'Loading…' : 'Load demo project' }}</strong><small class="project-meta"><span class="project-status-label">Jasmine &amp; Skylar · 16 shots</span></small></span>
+          </button>
+          <button v-if="!store.projects.length" class="project-item project-empty-action" @click="showCreate = true">
+            <span class="project-thumb tone-review"><Film :size="14" /></span>
+            <span class="project-copy"><strong>Create a project</strong><small class="project-meta"><span class="project-status-label">Import a screenplay</span></small></span>
+          </button>
+        </div>
       </div>
 
       <div class="rail-section stage-list">
@@ -3115,6 +3178,7 @@ input::placeholder { color: #68716c; }
 <style scoped>
 /* Final Studio workspace polish: preserve all behavior, modernize hierarchy. */
 .studio-layout {
+  grid-template-columns: 256px minmax(0, 1fr);
   background: var(--workspace-bg);
   color: var(--text-primary);
 }
@@ -3135,8 +3199,65 @@ input::placeholder { color: #68716c; }
 .rail-projects {
   flex: 1 1 auto;
   min-height: 0;
+  padding: 0 8px 10px;
   overflow-y: auto;
   overflow-x: hidden;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.rail-projects-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 12px 6px 8px;
+  margin-bottom: 2px;
+  background: rgba(11, 14, 17, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.rail-projects-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rail-projects-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-tertiary, #8c9590);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-new-project-btn {
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  color: #cbd2ce;
+}
+
+.rail-new-project-btn:hover:not(:disabled) {
+  background: var(--accent, #eb6554);
+  border-color: var(--accent, #eb6554);
+  color: #ffffff;
+}
+
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .stage-list {
@@ -3156,39 +3277,236 @@ input::placeholder { color: #68716c; }
   backdrop-filter: blur(18px);
 }
 
-.project-select,
-.project-menu-trigger,
 .project-item {
-  border-color: transparent;
-  border-radius: 9px;
+  position: relative;
+  width: 100%;
+  margin-top: 0;
+  padding-right: 4px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  transition: background-color 140ms ease, border-color 140ms ease;
 }
 
-.project-select:hover,
-.project-menu-trigger:hover,
-.project-item:hover {
-  background: rgba(255,255,255,.045);
-  border-color: var(--line-subtle);
+.project-item.project-empty-action {
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-item:hover,
+.project-item.menu-open {
+  background: rgba(255, 255, 255, 0.042);
+  border-color: rgba(255, 255, 255, 0.065);
 }
 
 .project-item.active {
-  background: rgba(255,255,255,.075);
-  border-color: var(--line-default);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: rgba(255, 255, 255, 0.072);
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow: none;
+}
+
+.project-item.active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent, #eb6554);
+  box-shadow: 0 0 10px rgba(235, 101, 84, 0.45);
+}
+
+.project-select {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 4px 7px 8px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 9px;
+  border: 0 !important;
+  border-radius: 7px;
+  background: transparent !important;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-select:hover {
+  background: transparent !important;
+  border-color: transparent !important;
 }
 
 .project-thumb {
-  border: 1px solid var(--line-subtle);
-  background: linear-gradient(145deg, #20252c, #12161b);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  flex-shrink: 0;
+}
+
+.project-thumb.tone-produce {
+  background: rgba(235, 101, 84, 0.11);
+  border-color: rgba(235, 101, 84, 0.22);
+  color: #ff9485;
+}
+
+.project-thumb.tone-complete {
+  background: rgba(84, 185, 130, 0.12);
+  border-color: rgba(84, 185, 130, 0.25);
+  color: #6cd39b;
+}
+
+.project-thumb.tone-review {
+  background: rgba(122, 162, 255, 0.11);
+  border-color: rgba(122, 162, 255, 0.22);
+  color: #9bb6ff;
+}
+
+.project-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 
 .project-copy strong {
-  color: var(--text-primary);
-  font-weight: 630;
-  letter-spacing: -.01em;
+  width: 100%;
+  color: #e4e9e6;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-word;
 }
 
-.project-copy small,
+.project-item.active .project-copy strong {
+  color: #ffffff;
+  font-weight: 650;
+}
+
+.project-copy small.project-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #8c9590;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #8c9590;
+}
+
+.project-status-dot.tone-produce {
+  background: #eb6554;
+}
+
+.project-status-dot.tone-complete {
+  background: #54b982;
+}
+
+.project-status-dot.tone-review {
+  background: #7aa2ff;
+}
+
+.project-status-label {
+  text-transform: capitalize;
+  color: #9ea7a2;
+}
+
+.project-item.tone-complete .project-status-label {
+  color: #79cfa0;
+}
+
+.project-meta-extra {
+  color: #6c7570;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-menu-trigger {
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #8c9590;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.project-item:hover .project-menu-trigger,
+.project-item:focus-within .project-menu-trigger,
+.project-item.active .project-menu-trigger,
+.project-menu-trigger[aria-expanded='true'] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .project-menu-trigger {
+    opacity: 1;
+  }
+}
+
+.project-menu-trigger:hover,
+.project-menu-trigger[aria-expanded='true'] {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.project-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  right: 4px;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #14181b;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(16px);
+}
+
 .background-jobs-badge {
   display: inline-flex;
   align-items: center;
@@ -3532,5 +3850,15 @@ input::placeholder { color: #68716c; }
 .episode-setting-title-input:focus {
   border-color: var(--line-default);
   outline: none;
+}
+
+@media (max-width: 640px) {
+  .studio-layout.assembling { display:flex; flex-direction:column; height:auto; min-height:calc(100dvh - 60px); }
+  .assembling .project-rail { width:100%; min-height:0; padding:8px 12px; }
+  .assembling .rail-projects, .assembling .provider-panel { display:none; }
+  .assembling .stage-list { display:flex; flex-direction:row; gap:8px; padding:0; }
+  .assembling .stage-list > .section-label { display:none; }
+  .assembling .stage { flex:1; justify-content:center; }
+  .assembling .workspace { min-width:0; overflow:visible; }
 }
 </style>

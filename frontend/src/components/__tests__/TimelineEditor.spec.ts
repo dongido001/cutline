@@ -209,4 +209,73 @@ describe('TimelineEditor state persistence', () => {
     const savedArg = vi.mocked(api.saveTimeline).mock.calls[0]?.[1]
     expect(savedArg?.document.primary[0]?.mute_audio).toBe(true)
   })
+  it('fits the available workspace and ignores edit shortcuts while a dialog is open', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    const scroll = wrapper.find('.timeline-scroll').element
+    Object.defineProperty(scroll, 'clientWidth', { configurable: true, value: 600 })
+    window.dispatchEvent(new Event('resize'))
+    await flushPromises()
+    expect(wrapper.find('.timeline-scroll').attributes('style')).toContain('--track-width: 490px')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?' }))
+    await flushPromises()
+    expect(wrapper.find('.shortcuts-card').exists()).toBe(true)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete' }))
+    await flushPromises()
+    expect(wrapper.findAll('.timeline-block')).toHaveLength(2)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(wrapper.find('.shortcuts-card').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('supports transport clip jump/frame step, drag-and-drop clip reordering, and auto-closing add menu', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    // Jump to next clip via transport button
+    await wrapper.get('button[aria-label="Next clip"]').trigger('click')
+    expect(wrapper.find('.playhead-time').text()).toBe('2.00s')
+    expect(wrapper.findAll('.timeline-block')[1]!.classes()).toContain('selected')
+
+    // Step forward 1 frame (50ms)
+    await wrapper.get('button[aria-label="Step forward"]').trigger('click')
+    expect(wrapper.find('.playhead-time').text()).toBe('2.05s')
+
+    // Drag first clip onto second clip to reorder
+    const blocks = wrapper.findAll('.timeline-block')
+    await blocks[0]!.trigger('dragstart')
+    await blocks[1]!.trigger('dragover')
+    await blocks[1]!.trigger('drop')
+    await flushPromises()
+
+    const reorderedLabels = wrapper.findAll('.timeline-block b').map((node) => node.text())
+    expect(reorderedLabels).toEqual(['Shot 2', 'Shot 1'])
+
+    // Open Add media & text menu and verify it closes when adding a title card
+    const addMenu = wrapper.get('details.add-menu').element as HTMLDetailsElement
+    addMenu.open = true
+    await wrapper.get('button[title="Add title card"]').trigger('click')
+    expect(addMenu.open).toBe(false)
+    expect(wrapper.findAll('.timeline-block')).toHaveLength(3)
+
+    // Seek via timeline range input and verify Spacebar immediately toggles playback while range input is the event target
+    const rangeInput = wrapper.get('input.timeline-input')
+    await rangeInput.setValue('1000')
+    const spaceOnRange = new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })
+    Object.defineProperty(spaceOnRange, 'target', { value: rangeInput.element })
+    window.dispatchEvent(spaceOnRange)
+    await flushPromises()
+    expect(wrapper.find('button[aria-label="Pause timeline"]').exists()).toBe(true)
+
+    // Pressing Spacebar while a timeline clip block is the event target also toggles playback
+    const firstBlock = wrapper.get('.timeline-block')
+    const spaceOnBlock = new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })
+    Object.defineProperty(spaceOnBlock, 'target', { value: firstBlock.element })
+    window.dispatchEvent(spaceOnBlock)
+    await flushPromises()
+    expect(wrapper.find('button[aria-label="Play timeline"]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
 })
