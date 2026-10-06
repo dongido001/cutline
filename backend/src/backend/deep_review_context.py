@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import Character, Episode, Scene, ScriptVersion
-from .screenplay_parser import SHOT_HEADING, TRANSITION_LINE, canonical_character_name
+from .screenplay_parser import SHOT_HEADING, TRANSITION_LINE, canonical_character_name, expand_character_cue_names
 from .timing import estimate_dialogue_duration_ms
 
 
@@ -321,11 +321,16 @@ def preflight(context: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(line, dict):
                 continue
             cue = str(line.get("character") or line.get("speaker") or "")
-            name = canonical_character_name(cue)
-            if name:
-                speakers.add(name)
-                matches = [item for item in cast if item == name or (" " not in name and item.split()[0] == name)]
-                if len(matches) != 1:
+            cue_parts = expand_character_cue_names(cue)
+            names = [canonical_character_name(part) for part in (cue_parts or [cue])]
+            names = [n for n in names if n]
+            if names:
+                for name in names:
+                    speakers.add(name)
+                if any(
+                    len([item for item in cast if item == name or (" " not in name and item.split()[0] == name)]) != 1
+                    for name in names
+                ):
                     add(shot, "cast", f"Check dialogue speaker {cue}",
                         "The cue has no unique canonical cast match; first-name aliases are allowed when unambiguous.",
                         "Confirm the intended speaker and update the cast or cue.", "dialogue", cue)
