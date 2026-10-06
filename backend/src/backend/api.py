@@ -68,7 +68,7 @@ from .oauth import (
     handle_youtube_callback, handle_facebook_callback,
     disconnect_platform, all_token_statuses, token_status as oauth_token_status,
 )
-from .image_references import earlier_shots, media_sources, reference_snapshot, release_reference_asset, snapshot_filenames, validate_reference_bytes
+from .image_references import default_visual_reference, earlier_shots, freeze_visual_reference, media_sources, reference_snapshot, release_reference_asset, snapshot_filenames, validate_reference_bytes
 from .jobs import mark_job_cancelled, revoke_job_task
 from .tasks import (
     enqueue_cast_reference,
@@ -80,6 +80,8 @@ from .tasks import (
     enqueue_shot_image,
     enqueue_publish_project,
 )
+from .queue_admin import job_matches_queue
+from .system_guard import require_local_system
 from .timeline import append_missing_shots, ensure_timeline, initial_document, latest_shots, promote_available_clips, validate_timeline
 
 
@@ -94,7 +96,15 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.mount("/media", StaticFiles(directory=settings.media_dir), name="media")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=list(
+        dict.fromkeys(
+            [
+                settings.frontend_origin.rstrip("/"),
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+            ]
+        )
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -535,10 +545,13 @@ def get_project(
         )
         .order_by(ScriptVersion.version_number.desc())
     )
-    if not version and active_episode.episode_number == 1:
+    if not version and active_episode:
         version = db.scalar(
             select(ScriptVersion)
-            .where(ScriptVersion.project_id == project_id)
+            .where(
+                ScriptVersion.project_id == project_id,
+                ScriptVersion.episode_id.is_(None),
+            )
             .options(
                 selectinload(ScriptVersion.scenes)
                 .selectinload(Scene.shots)
@@ -784,7 +797,7 @@ def list_all_jobs(
     return results
 
 
-@app.get("/api/system/queues")
+@app.get("/api/system/queues", dependencies=[Depends(require_local_system)])
 def system_queue_status(db: Session = Depends(get_db)) -> dict:
     from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
     queues = [
@@ -954,7 +967,7 @@ def delete_single_job(job_id: str, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
-@app.post("/api/system/queues/{queue_name}/flush")
+@app.post("/api/system/queues/{queue_name}/flush", dependencies=[Depends(require_local_system)])
 def flush_queue(queue_name: str, db: Session = Depends(get_db)) -> dict:
     from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
     queue_map = {
@@ -969,21 +982,12 @@ def flush_queue(queue_name: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="Queue not found")
     target.flush()
 
-    # Cancel phantom/orphaned jobs in DB corresponding to this queue
-    kind_map = {
-        "image": ["shot_image", "cast_reference"],
-        "video": ["shot_clip", "shot_lipsync", "final_cut"],
-        "chatgpt": ["create_draft"],
-        "gemini": ["create_draft"],
-        "general": ["create_draft", "export"],
-    }
-    kinds = kind_map.get(queue_name, [])
     queued_jobs = list(db.scalars(
         select(Job).where(Job.status == "queued")
     ).all())
     cancelled_count = 0
     for job in queued_jobs:
-        if not kinds or any(job.kind == k or job.kind.startswith(f"{k}:") for k in kinds):
+        if job_matches_queue(job.kind, queue_name):
             job.status = "cancelled"
             job.message = f"Cancelled: queue '{queue_name}' was flushed"
             cancelled_count += 1
@@ -992,13 +996,13 @@ def flush_queue(queue_name: str, db: Session = Depends(get_db)) -> dict:
     return {"status": "ok", "message": f"Queue {queue_name} flushed ({cancelled_count} queued jobs cancelled)"}
 
 
-@app.get("/api/system/services")
+@app.get("/api/system/services", dependencies=[Depends(require_local_system)])
 def get_system_services() -> list[dict]:
     from .services_manager import list_services
     return list_services()
 
 
-@app.post("/api/system/services/{service_id}/start")
+@app.post("/api/system/services/{service_id}/start", dependencies=[Depends(require_local_system)])
 def start_system_service(service_id: str) -> dict:
     from .services_manager import get_service
     svc = get_service(service_id)
@@ -1010,7 +1014,7 @@ def start_system_service(service_id: str) -> dict:
     return result
 
 
-@app.post("/api/system/services/{service_id}/stop")
+@app.post("/api/system/services/{service_id}/stop", dependencies=[Depends(require_local_system)])
 def stop_system_service(service_id: str) -> dict:
     from .services_manager import get_service
     svc = get_service(service_id)
@@ -1019,7 +1023,7 @@ def stop_system_service(service_id: str) -> dict:
     return svc.stop()
 
 
-@app.post("/api/system/services/{service_id}/restart")
+@app.post("/api/system/services/{service_id}/restart", dependencies=[Depends(require_local_system)])
 def restart_system_service(service_id: str) -> dict:
     from .services_manager import get_service
     svc = get_service(service_id)
@@ -1031,7 +1035,7 @@ def restart_system_service(service_id: str) -> dict:
     return result
 
 
-@app.get("/api/system/services/{service_id}/logs")
+@app.get("/api/system/services/{service_id}/logs", dependencies=[Depends(require_local_system)])
 def get_system_service_logs(service_id: str, lines: int = 80) -> dict:
     from .services_manager import get_service
     svc = get_service(service_id)
@@ -1268,6 +1272,19 @@ def queue_shot_image(
             status_code=409, detail="Add an image prompt before generating"
         )
     target_aspect = payload.aspect_ratio or aspect_ratio or project.aspect_ratio
+    db.execute(update(Project).where(Project.id == project.id).values(updated_at=Project.updated_at))
+    active_image_jobs = db.scalars(select(Job).where(
+        Job.project_id == project.id, Job.kind == "shot_image",
+        Job.status.in_(["queued", "running"]),
+    )).all()
+    for existing in active_image_jobs:
+        if any(
+            attempt.get("shot_id") == shot.id
+            and attempt.get("aspect_ratio", project.aspect_ratio) == target_aspect
+            for attempt in (existing.attempts or [])
+        ):
+            db.commit()
+            return existing
     if target_aspect not in {"16:9", "9:16"}:
         raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
     requested_ids = (
@@ -1300,8 +1317,14 @@ def queue_shot_image(
         if active_ref:
             image_reference = reference_snapshot(shot, target_aspect, active_ref.id)
             image_reference_id = active_ref.id
+        elif payload.use_default_image_reference:
+            image_reference = default_visual_reference(shot, target_aspect)
+            image_reference_id = image_reference["id"] if image_reference else None
         else:
             image_reference = None
+            image_reference_id = None
+    if image_reference:
+        image_reference = freeze_visual_reference(image_reference)
     try:
         snapshot = get_or_create_shot_snapshot(
             db, project, shot, target_aspect,
@@ -1325,6 +1348,7 @@ def queue_shot_image(
                 "continuity_snapshot": snapshot,
                 "image_reference_id": image_reference_id,
                 "image_reference": image_reference,
+                "use_default_image_reference": payload.use_default_image_reference,
             }
         ],
     )
@@ -2165,11 +2189,11 @@ def queue_final_cut(
 
 
 @app.get("/api/projects/{project_id}/draft/readiness")
-def draft_readiness(project_id: str, db: Session = Depends(get_db)) -> dict:
+def draft_readiness(project_id: str, episode_id: str | None = None, db: Session = Depends(get_db)) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project_readiness(project, db)
+    return project_readiness(project, db, episode_id=episode_id)
 
 
 @app.post(
@@ -2180,6 +2204,7 @@ def draft_readiness(project_id: str, db: Session = Depends(get_db)) -> dict:
 def create_draft(
     project_id: str,
     payload: CreateDraftRequest = Body(default_factory=CreateDraftRequest),
+    episode_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> Job:
     project = db.get(Project, project_id)
@@ -2187,21 +2212,24 @@ def create_draft(
         raise HTTPException(status_code=404, detail="Project not found")
     if project.status != "shot_plan":
         raise HTTPException(status_code=409, detail="Approve the script before creating a draft")
-    active = db.scalar(
-        select(Job).where(
-            Job.project_id == project.id,
-            Job.kind == "create_draft",
-            Job.status.in_(["queued", "running"]),
-        )
+    active_query = select(Job).where(
+        Job.project_id == project.id,
+        Job.kind == "create_draft",
+        Job.status.in_(["queued", "running"]),
     )
+    if episode_id:
+        active_query = active_query.where(Job.episode_id == episode_id)
+    active = db.scalar(active_query)
     if active:
         return active
+    draft_shots = latest_shots(project.id, db, episode_id=episode_id)
     job = Job(
         project_id=project.id,
+        episode_id=episode_id,
         kind="create_draft",
         attempts=[{"variant": payload.variant, "retry_failed_only": payload.retry_failed_only,
                    "image_references": {shot.id: reference_snapshot(shot, "9:16" if payload.variant == "shorts" else "16:9")
-                       for version in project.versions for scene in version.scenes for shot in scene.shots}}],
+                       for shot in draft_shots}}],
     )
     db.add(job)
     db.commit()
@@ -2463,7 +2491,7 @@ def project_publish_plan(project_id: str, variant: str = "landscape", db: Sessio
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     try:
-        return build_publish_plan(project, variant)
+        return build_publish_plan(project, variant, db)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2487,11 +2515,13 @@ def queue_publish(project_id: str, payload: PublishCreate, db: Session = Depends
     data = payload.model_dump(mode="json")
     try:
         validate_publish_request(data)
-        plan = build_publish_plan(project, payload.variant)
+        plan = build_publish_plan(project, payload.variant, db)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     available_ids = {item["id"] for group in ("final", "scenes", "shots") for item in plan[group] if item.get("ready")}
     requested_ids = set(payload.selected_asset_ids or [])
+    if payload.scope != "final" and not requested_ids:
+        raise HTTPException(status_code=422, detail="Select at least one asset to publish")
     if requested_ids and not requested_ids <= available_ids:
         raise HTTPException(status_code=409, detail="One or more selected publish assets are not ready")
     job = Job(project_id=project.id, kind="publish", message="Queued publish", attempts=[data])
@@ -2527,8 +2557,19 @@ def queue_publish(project_id: str, payload: PublishCreate, db: Session = Depends
     "/api/projects/{project_id}/final-cut",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def delete_final_cut(project_id: str, variant: str = "landscape", db: Session = Depends(get_db)) -> None:
-    final_cut = db.scalar(select(ProjectVariantExport).where(ProjectVariantExport.project_id == project_id, ProjectVariantExport.variant == variant))
+def delete_final_cut(
+    project_id: str,
+    variant: str = "landscape",
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> None:
+    query = select(ProjectVariantExport).where(
+        ProjectVariantExport.project_id == project_id,
+        ProjectVariantExport.variant == variant,
+    )
+    if episode_id:
+        query = query.where(ProjectVariantExport.episode_id == episode_id)
+    final_cut = db.scalar(query)
     if not final_cut:
         raise HTTPException(status_code=404, detail="Final cut not found")
     filename = final_cut.filename
@@ -2762,6 +2803,7 @@ def decide_suggestion(
 
         new_version = ScriptVersion(
             project_id=source_version.project_id,
+            episode_id=source_version.episode_id,
             version_number=source_version.version_number + 1,
             source_text=source_version.source_text,
             structured_data=updated_data,
@@ -2795,6 +2837,16 @@ def decide_suggestion(
                 shot_data.setdefault("action", scene_data.get("action", ""))
                 shot_data.setdefault("dialogue", [])
                 shot_data.setdefault("sound", "")
+                original = next(
+                    (
+                        item
+                        for existing in source_version.scenes
+                        if existing.order_index == index
+                        for item in existing.shots
+                        if item.order_index == shot_data.get("order_index", shot_index)
+                    ),
+                    None,
+                )
                 db.add(
                     Shot(
                         scene_id=scene.id,
@@ -2810,6 +2862,13 @@ def decide_suggestion(
                         image_prompt=shot_data.get("image_prompt", ""),
                         video_prompt=shot_data.get("video_prompt", ""),
                         title_card_text=shot_data.get("title_card_text", ""),
+                        character_ids=list(shot_data.get("character_ids") or (original.character_ids if original else [])),
+                        continuity_snapshot=(
+                            shot_data.get("continuity_snapshot")
+                            if isinstance(shot_data.get("continuity_snapshot"), dict)
+                            else (original.continuity_snapshot if original else None)
+                        ),
+                        conversation_url=original.conversation_url if original else None,
                     )
                 )
                 shot_cursor = end_ms
@@ -2870,7 +2929,7 @@ def approve_project(
     if not version and episode_id:
         version = db.scalar(
             select(ScriptVersion)
-            .where(ScriptVersion.project_id == project_id)
+            .where(ScriptVersion.project_id == project_id, ScriptVersion.episode_id.is_(None))
             .order_by(ScriptVersion.version_number.desc())
         )
     if not version:

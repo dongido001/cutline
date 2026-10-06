@@ -61,20 +61,31 @@ else
 fi
 
 set -a
-# shellcheck disable=SC1091
-source "$ROOT/bridges/chatgpt.env"
+if [[ -f "$ROOT/bridges/chatgpt.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/bridges/chatgpt.env"
+else
+  log "bridges/chatgpt.env is missing; ChatGPT Web bridge will be skipped"
+fi
 set +a
 
-if ! port_open 8791; then
-  start_process "ChatGPT Web bridge" "$ROOT/bridges/chatgpt-web-provider" "chatgpt.log" \
-    env PLAYWRIGHT_BROWSERS_PATH="$ROOT/bridges/.playwright" .venv/bin/chatgpt-web-provider
+if [[ -f "$ROOT/bridges/chatgpt.env" ]] && ! port_open 8791; then
+  if [[ -x "$ROOT/bridges/chatgpt-web-provider/.venv/bin/chatgpt-web-provider" ]]; then
+    start_process "ChatGPT Web bridge" "$ROOT/bridges/chatgpt-web-provider" "chatgpt.log" \
+      env PLAYWRIGHT_BROWSERS_PATH="$ROOT/bridges/.playwright" .venv/bin/chatgpt-web-provider
+  else
+    log "ChatGPT Web bridge is not installed; continuing with mock/Ollama"
+  fi
 fi
-wait_url "ChatGPT Web" "http://127.0.0.1:8791/health" 60
-
-if ! curl --silent --fail --max-time 4 -H "Authorization: Bearer ${CHATGPT_WEB_API_KEYS%%,*}" \
-  "http://127.0.0.1:8791/v1/provider/capabilities" | grep -q 'status_endpoint'; then
-  log "Port 8791 is running stale bridge code without image monitoring. Stop that process and run ./scripts/dev again."
-  exit 1
+if port_open 8791; then
+  wait_url "ChatGPT Web" "http://127.0.0.1:8791/health" 60
+  if ! curl --silent --fail --max-time 4 -H "Authorization: Bearer ${CHATGPT_WEB_API_KEYS%%,*}" \
+    "http://127.0.0.1:8791/v1/provider/capabilities" | grep -q 'status_endpoint'; then
+    log "Port 8791 is running stale bridge code without image monitoring. Stop that process and run ./scripts/dev again."
+    exit 1
+  fi
+else
+  log "ChatGPT Web is offline; prototype parser remains available"
 fi
 
 if ! port_open 8000; then

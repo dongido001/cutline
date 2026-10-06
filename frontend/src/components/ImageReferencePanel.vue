@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { Image as ImageIcon } from '@lucide/vue'
 import { api, type AspectRatio, type ImageReferenceSource, type ImageReferenceSourceShot, type Shot } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
 import Dialog from '@/components/ui/Dialog.vue'
@@ -8,12 +9,35 @@ import VideoFramePicker from '@/components/VideoFramePicker.vue'
 const props = defineProps<{
   shot: Shot
   aspect: AspectRatio
-  previousShotId?: string
+  previousShot?: Shot
+  projectAspect?: AspectRatio
   canReferenceEarlier?: boolean
 }>()
-const canBrowse = computed(() => props.canReferenceEarlier ?? !!props.previousShotId)
+const skipDefault = defineModel<boolean>('skipDefault', { default: false })
+const previousShotId = computed(() => props.previousShot?.id)
+const canBrowse = computed(() => props.canReferenceEarlier ?? !!previousShotId.value)
 const store = useStudioStore()
 const active = computed(() => props.shot.image_references?.find((item) => item.aspect_ratio === props.aspect))
+const defaultPreview = computed(() => {
+  const frame = props.shot.continuity_frames?.find((item) => item.aspect_ratio === props.aspect)
+  if (frame) {
+    return {
+      url: frame.url,
+      title: frame.source_shot_title || 'Continuity frame',
+      detail: `Video frame at ${(frame.source_time_ms / 1000).toFixed(3)} s · ${frame.aspect_ratio}`,
+    }
+  }
+  const source = props.previousShot
+  if (!source) return null
+  const variant = source.media_variants?.find((item) => item.media_type === 'image' && item.aspect_ratio === props.aspect)
+  const still = variant ?? (props.projectAspect === props.aspect ? source.image : null)
+  if (!still) return null
+  return {
+    url: still.url,
+    title: source.title || 'Previous shot',
+    detail: `Still image · ${props.aspect}`,
+  }
+})
 const history = computed(() => props.shot.takes?.filter((take) => take.media_type === 'image' && take.aspect_ratio === props.aspect && take.settings.image_reference) || [])
 const sources = ref<ImageReferenceSourceShot[]>([])
 const sourceShotId = ref('')
@@ -32,7 +56,7 @@ async function browse(previous = false) {
   loading.value = true
   try {
     sources.value = await api.imageReferenceSources(props.shot.id)
-    sourceShotId.value = (previous && props.previousShotId ? props.previousShotId : active.value?.source_shot_id) || sources.value[sources.value.length - 1]?.id || ''
+    sourceShotId.value = (previous && previousShotId.value ? previousShotId.value : active.value?.source_shot_id) || sources.value[sources.value.length - 1]?.id || ''
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load sources' }
   finally { loading.value = false }
 }
@@ -67,15 +91,19 @@ async function remove() {
 
 <template>
   <section class="image-reference-panel" aria-label="Image reference">
-    <div>
-      <strong>Visual & Video Frame Reference</strong>
-      <p>Visual continuity · Grab a frame from an earlier video clip or select a still image to preserve identity, wardrobe, setting, and lighting.</p>
+    <div class="reference-header">
+      <div class="reference-heading">
+        <ImageIcon :size="16" class="reference-icon" />
+        <strong class="reference-title">Visual & Video Frame Reference</strong>
+        <span class="aspect-badge">{{ aspect }}</span>
+      </div>
+      <p class="reference-subhead">Visual continuity · Grab a frame from an earlier video clip or select a still image to preserve identity, wardrobe, setting, and lighting.</p>
     </div>
     <div v-if="active" class="reference-preview">
       <img :src="active.url" alt="Selected image reference" />
       <div><strong>{{ active.source_shot_title }}</strong><p>{{ describe(active) }} · {{ active.source_aspect_ratio }}</p></div>
     </div>
-    <p v-else>None — generate using this shot's prompt and selected cast.</p>
+    <p v-else>No reference selected. Generate using this shot's prompt and selected cast, or click "Previous shot" or "Choose reference shot" to manually attach a reference.</p>
     <div class="reference-actions">
       <button v-if="previousShotId" class="secondary-button" :disabled="busy" @click="browse(true)">Previous shot</button>
       <button class="secondary-button" :disabled="busy || !canBrowse" @click="browse()">{{ active ? 'Change' : 'Choose reference shot' }}</button>
@@ -117,12 +145,51 @@ async function remove() {
 </template>
 
 <style scoped>
-.image-reference-panel { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line-default); border-radius: 12px; }
+.image-reference-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  margin: 16px 0;
+  background: var(--surface-1, #131514);
+  border: 1px solid var(--line-default, #2a2e2b);
+  border-radius: 12px;
+}
+.reference-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.reference-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary, #e2e8f0);
+}
+.reference-icon {
+  color: #38bdf8;
+}
+.aspect-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary, #94a3b8);
+}
+.reference-subhead {
+  margin: 0;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 12px;
+  line-height: 1.5;
+}
 p { margin: 4px 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
 .reference-preview { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
 .reference-preview img { width: 88px; height: 66px; object-fit: contain; border-radius: 7px; background: #111; }
 .reference-preview strong, .reference-preview a { font-size: 13px; }
 .reference-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.skip-default { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
 .source-select { display: grid; gap: 8px; margin-bottom: 16px; }
 .source-select select { padding: 10px; border: 1px solid var(--line-default); border-radius: 8px; background: var(--surface-2); }
 .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }

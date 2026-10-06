@@ -85,9 +85,7 @@ const activeAssets = computed(() => {
 })
 const readyAssets = computed(() => activeAssets.value.filter((item) => item.ready))
 const selectedAssets = computed(() =>
-  selected.value.length
-    ? readyAssets.value.filter((item) => selected.value.includes(item.id))
-    : readyAssets.value
+  readyAssets.value.filter((item) => selected.value.includes(item.id)),
 )
 const providerMap = computed(
   () => new Map((plan.value?.providers || []).map((item) => [item.id, item]))
@@ -166,7 +164,7 @@ async function loadPlan() {
   error.value = ''
   try {
     plan.value = await api.publishPlan(props.project.id, props.variant)
-    selected.value = []
+    selected.value = readyAssets.value.map((item) => item.id)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not load publish plan'
   } finally {

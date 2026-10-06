@@ -10,6 +10,8 @@ import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
 import time
 
 import httpx
@@ -58,6 +60,26 @@ _ADULT_TERMS = re.compile(r"(?i)\b(?:adult|woman|women|man|men|mother|father|mam
 _MINOR_TERMS = re.compile(r"(?i)\b(?:baby|babies|child|children|kid|kids|teen|teenager|boy|girl|minor|schoolchild)\b")
 _MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\((https?://[^)\s]+)\)")
 _BARE_IMAGE_URL = re.compile(r"(https?://[^\s)]+\.(?:png|jpe?g|webp)(?:\?[^\s)]*)?)", re.I)
+_ALLOWED_IMAGE_HOST_SUFFIXES = (
+    "googleusercontent.com",
+    "ggpht.com",
+    "google.com",
+    "gstatic.com",
+)
+
+
+def _gemini_headers() -> dict[str, str]:
+    key = (settings.gemini_web_api_key or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _assert_safe_image_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("Image URL is not allowed")
+    host = (parsed.hostname or "").lower()
+    if not any(host == suffix or host.endswith(f".{suffix}") for suffix in _ALLOWED_IMAGE_HOST_SUFFIXES):
+        raise RuntimeError("Image URL host is not allowed")
 
 
 def prepare_image_prompt(prompt: str, aspect_ratio: str) -> str:
@@ -144,7 +166,7 @@ def image_provider_statuses() -> list[dict]:
         else:
             base_url = settings.gemini_web_base_url
             model = settings.gemini_web_image_model
-            headers = {}
+            headers = _gemini_headers()
             label = "Gemini Web"
             configured = True
             capability_url = None
@@ -233,6 +255,7 @@ def _extract_image_url(content: str) -> str | None:
 
 
 def _download_image_bytes(url: str, headers: dict | None = None) -> bytes:
+    _assert_safe_image_url(url)
     response = httpx.get(url, headers=headers or {}, timeout=httpx.Timeout(60, connect=5), follow_redirects=True)
     response.raise_for_status()
     return response.content
@@ -271,6 +294,7 @@ def _request_gemini_with_references(
         progress({"provider": "gemini_web", "phase": "submitting"})
     response = httpx.post(
         f"{base_url.rstrip('/')}/chat/completions",
+        headers=_gemini_headers(),
         json={
             "model": model,
             "messages": [{"role": "user", "content": content}],
@@ -335,7 +359,7 @@ def _request_provider_image(
             return _request_gemini_with_references(prompt, aspect_ratio, references, progress)
         base_url = settings.gemini_web_base_url
         model = settings.gemini_web_image_model
-        headers = {}
+        headers = _gemini_headers()
     else:
         raise RuntimeError(f"Unsupported image provider: {provider}")
     request_id = str(uuid.uuid4())
@@ -510,7 +534,7 @@ def generate_storyboard_image(
 
 
 def delete_media_file(filename: str | None, db: object = None) -> None:
-    if not filename:
+    if not filename or Path(filename).is_absolute() or ".." in Path(filename).parts:
         return
     if db is not None:
         try:
@@ -521,6 +545,9 @@ def delete_media_file(filename: str | None, db: object = None) -> None:
                 return
         except Exception:
             pass
-    path = settings.media_dir / filename
+    media_root = settings.media_dir.resolve()
+    path = (settings.media_dir / filename).resolve()
+    if not path.is_relative_to(media_root):
+        return
     if path.is_file():
         path.unlink()

@@ -23,6 +23,13 @@ const store = useStudioStore()
 const activeTab = ref<'clip' | 'image'>('clip')
 const selectingTakeId = ref<string | null>(null)
 const previewHoverTakeId = ref<string | null>(null)
+const brokenTakeIds = ref<Set<string>>(new Set())
+
+function markBrokenTake(takeId: string) {
+  const next = new Set(brokenTakeIds.value)
+  next.add(takeId)
+  brokenTakeIds.value = next
+}
 
 // Sort takes chronologically ascending to assign stable "Take 1, Take 2..." numbers
 const matchingTakesAscending = computed(() => {
@@ -48,6 +55,7 @@ const imageTakes = computed(() => {
 watch(
   () => [props.shot.id, props.aspect],
   () => {
+    brokenTakeIds.value = new Set()
     if (videoTakes.value.length > 0) {
       activeTab.value = 'clip'
     } else if (imageTakes.value.length > 0) {
@@ -183,7 +191,9 @@ async function handleSelectTake(take: ShotTake) {
             :src="take.url"
             alt="Take thumbnail"
             class="take-media"
+            @error="markBrokenTake(take.id)"
           />
+          <div v-if="brokenTakeIds.has(take.id)" class="take-missing-thumb">Preview unavailable</div>
 
           <span v-if="take.selected" class="take-active-badge">
             <Check :size="11" /> Active
@@ -361,17 +371,29 @@ async function handleSelectTake(take: ShotTake) {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  background: #000;
+  background: #111;
   overflow: hidden;
-  display: grid;
-  place-items: center;
 }
 
 .take-media {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  display: block;
+  object-fit: contain;
+  background: #111;
   transition: transform 0.2s ease;
+}
+
+.take-missing-thumb {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: #94a3b8;
+  background: #181a19;
 }
 
 .take-card:hover .take-media {

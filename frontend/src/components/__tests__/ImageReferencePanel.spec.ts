@@ -167,9 +167,10 @@ describe('ImageReferencePanel', () => {
     expect(api.removeImageReference).toHaveBeenCalledWith('shot-3', '16:9')
   })
 
-  it('previews the previous shot still as the automatic reference', () => {
+  it('does not automatically attach or preview a default reference', () => {
     const wrapper = mountPanel()
-    expect(wrapper.get('img').attributes('alt')).toBe('Default previous-shot reference')
-    expect(wrapper.text()).toContain('Attached automatically on generate')
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.text()).toContain('No reference selected')
+    expect(wrapper.text()).not.toContain('Attached automatically on generate')
   })
 })

@@ -13,41 +13,41 @@ def _id() -> str:
     return str(uuid.uuid4())
 
 
-def latest_shots(project_id: str, db: Session, episode_id: str | None = None) -> list[Shot]:
-    stmt = select(ScriptVersion).where(ScriptVersion.project_id == project_id)
-    if episode_id:
-        stmt = stmt.where(ScriptVersion.episode_id == episode_id)
-    version = db.scalar(
-        stmt.options(
-            selectinload(ScriptVersion.scenes)
-            .selectinload(Scene.shots)
-            .selectinload(Shot.image),
-            selectinload(ScriptVersion.scenes)
-            .selectinload(Scene.shots)
-            .selectinload(Shot.clip),
-            selectinload(ScriptVersion.scenes)
-            .selectinload(Scene.shots)
-            .selectinload(Shot.media_variants),
-        )
-        .order_by(ScriptVersion.version_number.desc())
+def latest_script_version(
+    db: Session,
+    project_id: str,
+    episode_id: str | None = None,
+    extra_options: tuple = (),
+):
+    options = (
+        selectinload(ScriptVersion.scenes)
+        .selectinload(Scene.shots)
+        .selectinload(Shot.image),
+        selectinload(ScriptVersion.scenes)
+        .selectinload(Scene.shots)
+        .selectinload(Shot.clip),
+        selectinload(ScriptVersion.scenes)
+        .selectinload(Scene.shots)
+        .selectinload(Shot.media_variants),
+        *extra_options,
     )
-    if not version and episode_id:
-        version = db.scalar(
-            select(ScriptVersion)
-            .where(ScriptVersion.project_id == project_id)
-            .options(
-                selectinload(ScriptVersion.scenes)
-                .selectinload(Scene.shots)
-                .selectinload(Shot.image),
-                selectinload(ScriptVersion.scenes)
-                .selectinload(Scene.shots)
-                .selectinload(Shot.clip),
-                selectinload(ScriptVersion.scenes)
-                .selectinload(Scene.shots)
-                .selectinload(Shot.media_variants),
-            )
-            .order_by(ScriptVersion.version_number.desc())
-        )
+
+    def _load(constraint):
+        stmt = select(ScriptVersion).where(ScriptVersion.project_id == project_id)
+        if constraint is not None:
+            stmt = stmt.where(constraint)
+        return db.scalar(stmt.options(*options).order_by(ScriptVersion.version_number.desc()))
+
+    if episode_id:
+        version = _load(ScriptVersion.episode_id == episode_id)
+        if version:
+            return version
+        return _load(ScriptVersion.episode_id.is_(None))
+    return _load(None)
+
+
+def latest_shots(project_id: str, db: Session, episode_id: str | None = None) -> list[Shot]:
+    version = latest_script_version(db, project_id, episode_id=episode_id)
     return [shot for scene in version.scenes for shot in scene.shots] if version else []
 
 
@@ -123,8 +123,14 @@ def ensure_timeline(project: Project, db: Session, episode_id: str | None = None
         db.flush()
         return timeline
 
-    if project.timeline:
-        return project.timeline
+    timeline = db.scalar(
+        select(ProjectTimeline).where(
+            ProjectTimeline.project_id == project.id,
+            ProjectTimeline.episode_id.is_(None),
+        )
+    )
+    if timeline:
+        return timeline
     timeline = ProjectTimeline(
         project_id=project.id,
         revision=1,

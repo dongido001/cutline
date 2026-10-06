@@ -20,6 +20,28 @@ describe('image generation API', () => {
         character_ids: ['character-1'],
         refresh_continuity: true,
         image_reference_id: 'reference-2',
+        use_default_image_reference: false,
+      }),
+    })
+  })
+
+  it('can skip the automatic previous-shot still', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'job-2' }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.generateShotImage('shot-3', '16:9', [], false, null, false)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/shots/shot-3/image/generate?aspect_ratio=16%3A9', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        character_ids: [],
+        refresh_continuity: false,
+        image_reference_id: null,
+        use_default_image_reference: false,
       }),
     })
   })

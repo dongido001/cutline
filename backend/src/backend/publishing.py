@@ -212,7 +212,7 @@ def _asset_dict(item: PublishAsset) -> dict[str, Any]:
     }
 
 
-def build_publish_plan(project: Project, variant: str) -> dict[str, Any]:
+def build_publish_plan(project: Project, variant: str, db: Session | None = None) -> dict[str, Any]:
     if variant not in {"landscape", "shorts"}:
         raise RuntimeError("variant must be landscape or shorts")
     final = final_asset(project, variant)
@@ -220,7 +220,7 @@ def build_publish_plan(project: Project, variant: str) -> dict[str, Any]:
     return {
         "variant": variant,
         "aspect_ratio": publish_variant_to_aspect(variant),
-        "providers": provider_statuses(),
+        "providers": provider_statuses(db),
         "final": [_asset_dict(final)] if final else [],
         "scenes": scene_asset_plan(project, variant),
         "shots": [_asset_dict(item) for item in shots],
@@ -252,7 +252,9 @@ def validate_publish_request(payload: dict[str, Any]) -> None:
 
 def _selected_ids(payload: dict[str, Any]) -> set[str] | None:
     selected = payload.get("selected_asset_ids")
-    return {str(item) for item in selected} if selected else None
+    if not selected:
+        return None
+    return {str(item) for item in selected}
 
 
 def _timeline_for_scene(project: Project, scene_id: str, variant: str, db: Session) -> TimelineDocument:
@@ -300,9 +302,9 @@ def collect_publish_assets(project: Project, payload: dict[str, Any], db: Sessio
     elif scope == "shots":
         assets = shot_assets(project, variant)
     else:
-        scene_ids = [scene.id for version in project.versions for scene in version.scenes]
-        if selected:
-            scene_ids = [item.removeprefix("scene:") for item in selected if item.startswith("scene:")]
+        if not selected:
+            raise RuntimeError("Select at least one scene to publish")
+        scene_ids = [item.removeprefix("scene:") for item in selected if item.startswith("scene:")]
         assets = [_render_scene_asset(project, scene_id, variant, db) for scene_id in scene_ids]
     if selected and scope != "scenes":
         assets = [item for item in assets if item.id in selected]

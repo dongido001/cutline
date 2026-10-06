@@ -1,9 +1,9 @@
-from .image_references import load_visual_reference, queued_reference
+from .image_references import default_visual_reference, freeze_visual_reference, load_visual_reference, queued_reference, should_use_default_reference
 from .media import prepare_visual_reference_prompt
 from copy import deepcopy
 import re
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -447,6 +447,8 @@ def _generate_shot_image(
             shot.character_ids = list(snapshot.get("character_ids") or [])
             prompt = snapshot["effective_image_prompt"]
             image_reference = queued_reference(job, shot)
+            if not image_reference and should_use_default_reference(job, shot):
+                image_reference = freeze_visual_reference(default_visual_reference(shot, target_aspect))
             visual_reference = load_visual_reference(image_reference)
             references = load_cast_references(
                 db, project.id, shot.character_ids,
@@ -822,6 +824,13 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                     )
                     if part
                 )
+            take_settings = {
+                "continuity_frame": {
+                    "source_shot_id": continuity_frame.source_shot_id,
+                    "source_shot_title": continuity_frame.source_shot_title,
+                    "source_time_ms": continuity_frame.source_time_ms,
+                }
+            } if continuity_frame else None
             filename, mime_type, provider = render_shot_clip(
                 settings.media_dir / source_image.filename,
                 effective_prompt,
@@ -829,6 +838,12 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 target_aspect,
                 scene_id=str(shot.scene.id),
             )
+            # Release the render-time read snapshot, then serialize result writes.
+            # ponytail: serialize SQLite writes; use server-database row locks for higher throughput.
+            project_id = project.id
+            db.rollback()
+            db.execute(update(Project).where(Project.id == project_id).values(updated_at=Project.updated_at))
+            db.expire_all()
             raise_if_cancelled(db, job_id)
             variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio
@@ -841,15 +856,13 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 shot.clip.provider = provider
                 shot.clip.prompt = effective_prompt
             elif use_legacy:
-                db.add(
-                    ShotClip(
-                        shot_id=shot.id,
-                        filename=filename,
-                        mime_type=mime_type,
-                        source="generated",
-                        provider=provider,
-                        prompt=effective_prompt,
-                    )
+                shot.clip = ShotClip(
+                    shot_id=shot.id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    source="generated",
+                    provider=provider,
+                    prompt=effective_prompt,
                 )
             elif variant:
                 variant.filename = filename
@@ -859,7 +872,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 variant.prompt = effective_prompt
                 variant.created_at = now()
             else:
-                db.add(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
+                shot.media_variants.append(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
             record_take(
                 db,
                 shot,
@@ -870,13 +883,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 source="generated",
                 provider=provider,
                 prompt=effective_prompt,
-                settings={
-                    "continuity_frame": {
-                        "source_shot_id": continuity_frame.source_shot_id,
-                        "source_shot_title": continuity_frame.source_shot_title,
-                        "source_time_ms": continuity_frame.source_time_ms,
-                    }
-                } if continuity_frame else None,
+                settings=take_settings,
             )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1

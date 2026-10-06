@@ -35,6 +35,7 @@ def _client(tmp_path, monkeypatch):
         yield session
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "system_token", "")
     app.dependency_overrides[get_db] = override_db
     return TestClient(app), session, project, shot
 

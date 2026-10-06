@@ -2,8 +2,24 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .token_cipher import decrypt_secret, encrypt_secret
+
+
+class EncryptedText(TypeDecorator):
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return encrypt_secret(value)
+
+    def process_result_value(self, value, dialect):
+        try:
+            return decrypt_secret(value)
+        except ValueError:
+            return None
 
 from .database import Base
 
@@ -561,8 +577,8 @@ class SocialToken(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     platform: Mapped[str] = mapped_column(String(32), unique=True, index=True)  # 'youtube' | 'facebook'
-    access_token: Mapped[str] = mapped_column(Text)
-    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_token: Mapped[str] = mapped_column(EncryptedText)
+    refresh_token: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     token_type: Mapped[str] = mapped_column(String(32), default="Bearer")
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Channel / page metadata shown in the UI

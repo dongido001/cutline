@@ -7,6 +7,9 @@ const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(reso
 export const useStudioStore = defineStore('studio', () => {
   const projects = ref<ProjectSummary[]>([])
   const currentProject = ref<ProjectDetail | null>(null)
+  let projectLoadSequence = 0
+  let requestedProjectId: string | null = null
+  let requestedEpisodeId: string | null = null
   const currentEpisodeId = ref<string | null>(null)
   const creatingEpisode = ref(false)
   const updatingProject = ref(false)
@@ -321,7 +324,7 @@ export const useStudioStore = defineStore('studio', () => {
   async function watchJob(
     jobId: string,
     onUpdate: (job: Job) => void,
-    options?: { reloadOnComplete?: boolean },
+    options?: { reloadOnComplete?: boolean; episodeId?: string | null },
   ): Promise<Job | null> {
     if (!jobId) return null
     const existing = watchers.get(jobId)
@@ -354,8 +357,14 @@ export const useStudioStore = defineStore('studio', () => {
       try {
         let job = await fetchJob()
         emit(job)
+        let delayMs = 800
+        const deadline = Date.now() + 15 * 60 * 1000
         while (job.status === 'queued' || job.status === 'running') {
-          await delay(500)
+          if (Date.now() > deadline) {
+            throw new Error('Timed out waiting for job status')
+          }
+          await delay(delayMs)
+          delayMs = Math.min(4000, Math.round(delayMs * 1.35))
           try {
             job = await fetchJob()
             emit(job)
@@ -367,8 +376,11 @@ export const useStudioStore = defineStore('studio', () => {
         if (
           options?.reloadOnComplete !== false &&
           job.status === 'completed' &&
+          (options?.episodeId === undefined || options.episodeId === currentEpisodeId.value) &&
           currentProject.value &&
-          job.project_id === currentProject.value.id
+          job.project_id === currentProject.value.id &&
+          (!requestedProjectId || requestedProjectId === job.project_id) &&
+          (!requestedEpisodeId || requestedEpisodeId === currentEpisodeId.value)
         ) {
           await loadProject(currentProject.value.id, { resumeJobs: false })
         }
@@ -514,14 +526,25 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   async function loadProject(id: string, options?: { resumeJobs?: boolean; episodeId?: string }) {
-    let epId = options?.episodeId || currentEpisodeId.value || undefined
+    const sequence = ++projectLoadSequence
+    requestedProjectId = id
+    let epId = options?.episodeId || (currentProject.value?.id === id ? currentEpisodeId.value : undefined) || undefined
     if (!epId) {
       try {
         const saved = localStorage.getItem(`cutline:active-episode:${id}`)
         if (saved) epId = saved
       } catch {}
     }
-    currentProject.value = await api.project(id, epId)
+    requestedEpisodeId = epId || null
+    let project: ProjectDetail
+    try {
+      project = await api.project(id, epId)
+    } catch (cause) {
+      if (sequence !== projectLoadSequence) return
+      throw cause
+    }
+    if (sequence !== projectLoadSequence) return
+    currentProject.value = project
     currentEpisodeId.value = currentProject.value.current_episode_id || null
     if (currentEpisodeId.value) {
       try {
@@ -706,12 +729,20 @@ export const useStudioStore = defineStore('studio', () => {
 
   async function updateShot(id: string, input: ShotUpdate) {
     if (!currentProject.value) return
+    const projectId = currentProject.value.id
+    const episodeId = currentEpisodeId.value
     error.value = ''
     try {
       await api.updateShot(id, input)
-      await loadProject(currentProject.value.id)
+      if (currentProject.value?.id === projectId && currentEpisodeId.value === episodeId &&
+          (!requestedProjectId || requestedProjectId === projectId) &&
+          (!requestedEpisodeId || requestedEpisodeId === episodeId)) {
+        await loadProject(projectId, { episodeId: episodeId || undefined })
+      }
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : 'Could not update shot'
+      if (currentProject.value?.id === projectId) {
+        error.value = cause instanceof Error ? cause.message : 'Could not update shot'
+      }
       throw cause
     }
   }
@@ -737,13 +768,21 @@ export const useStudioStore = defineStore('studio', () => {
     characterIds?: string[],
     refreshContinuity = false,
     imageReferenceId?: string | null,
+    useDefaultImageReference = false,
   ) {
     if (!currentProject.value) return
     const projectId = currentProject.value.id
     error.value = ''
     beginShotProcessing(id, projectId)
     try {
-      let job = await api.generateShotImage(id, aspectRatio, characterIds, refreshContinuity, imageReferenceId)
+      let job = await api.generateShotImage(
+        id,
+        aspectRatio,
+        characterIds,
+        refreshContinuity,
+        imageReferenceId,
+        useDefaultImageReference,
+      )
       const initialJob = withQueueLabel(job)
       setProjectImageJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
@@ -1025,10 +1064,11 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function generateShotClip(id: string, aspectRatio?: AspectRatio) {
-    if (!currentProject.value) return
-    const projectId = currentProject.value.id
-    error.value = ''
+  async function generateShotClip(id: string, aspectRatio?: AspectRatio, originatingProjectId?: string, originatingEpisodeId?: string | null) {
+    const projectId = originatingProjectId || currentProject.value?.id
+    if (!projectId) return
+    const episodeId = originatingEpisodeId === undefined ? currentEpisodeId.value : originatingEpisodeId
+    if (currentProject.value?.id === projectId) error.value = ''
     beginClipProcessing(id, projectId)
     let job: Job | null = null
     try {
@@ -1037,12 +1077,12 @@ export const useStudioStore = defineStore('studio', () => {
       setProjectClipJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
         setProjectClipJob(projectId, id, next)
-      })
+      }, { episodeId })
       job = finalJob ?? (await api.job(job.id))
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
-      if (currentProject.value?.id === projectId) {
+      if (currentProject.value?.id === projectId && currentEpisodeId.value === episodeId) {
         error.value = cause instanceof Error ? cause.message : 'Could not generate video'
       }
       throw cause
@@ -1110,10 +1150,10 @@ export const useStudioStore = defineStore('studio', () => {
     creatingDraft.value = true
     draftAttention.value = []
     try {
-      const readiness = await api.draftReadiness(currentProject.value.id)
+      const readiness = await api.draftReadiness(currentProject.value.id, currentEpisodeId.value || undefined)
       draftAttention.value = readiness.attention
       draftScenes.value = readiness.scenes || []
-      draftJob.value = await api.createDraft(currentProject.value.id, options)
+      draftJob.value = await api.createDraft(currentProject.value.id, options, currentEpisodeId.value || undefined)
       let pollTicks = 0
       const finalJob = await watchJob(draftJob.value.id, (next) => {
         draftJob.value = next
@@ -1153,7 +1193,7 @@ export const useStudioStore = defineStore('studio', () => {
     if (!currentProject.value) return
     error.value = ''
     try {
-      await api.deleteFinalCut(currentProject.value.id, variant)
+      await api.deleteFinalCut(currentProject.value.id, variant, currentEpisodeId.value || undefined)
       await loadProject(currentProject.value.id)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not delete final cut'

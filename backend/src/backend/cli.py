@@ -2,6 +2,8 @@ import subprocess
 import sys
 import time
 
+from .settings import settings
+
 
 def run_api() -> None:
     subprocess.run(
@@ -28,7 +30,7 @@ def run_worker() -> None:
                 "-k",
                 "thread",
                 "-w",
-                "1",
+                str(settings.video_worker_concurrency) if queue == "backend.tasks.video_huey" else "1",
             ]
         )
         for queue in queues

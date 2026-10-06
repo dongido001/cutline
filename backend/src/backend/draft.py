@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .image_references import load_visual_reference, queued_reference
+from .image_references import default_visual_reference, freeze_visual_reference, load_visual_reference, queued_reference
 from .media import prepare_visual_reference_prompt
 
 from copy import deepcopy
@@ -38,10 +38,28 @@ from .video import generate_shot_clip, video_provider_status, clip_source_image
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
 
 
-def _latest_version(db: Session, project_id: str) -> ScriptVersion | None:
-    return db.scalar(
+def _latest_version(db: Session, project_id: str, episode_id: str | None = None) -> ScriptVersion | None:
+    stmt = (
         select(ScriptVersion)
         .where(ScriptVersion.project_id == project_id)
+    )
+    if episode_id:
+        stmt = stmt.where(ScriptVersion.episode_id == episode_id)
+    version = db.scalar(
+        stmt.options(
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.image),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.clip),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.media_variants),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.takes),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.scene),
+        )
+        .order_by(ScriptVersion.version_number.desc())
+    )
+    if version or not episode_id:
+        return version
+    return db.scalar(
+        select(ScriptVersion)
+        .where(ScriptVersion.project_id == project_id, ScriptVersion.episode_id.is_(None))
         .options(
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.image),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.clip),
@@ -53,8 +71,8 @@ def _latest_version(db: Session, project_id: str) -> ScriptVersion | None:
     )
 
 
-def _latest_shots(db: Session, project_id: str) -> list[Shot]:
-    version = _latest_version(db, project_id)
+def _latest_shots(db: Session, project_id: str, episode_id: str | None = None) -> list[Shot]:
+    version = _latest_version(db, project_id, episode_id=episode_id)
     if not version:
         return []
     return [shot for scene in version.scenes for shot in scene.shots]
@@ -122,8 +140,8 @@ def _shot_clip(shot: Shot, aspect: str) -> ShotClip | ShotMediaVariant | None:
     )
 
 
-def project_readiness(project: Project, db: Session) -> dict[str, Any]:
-    shots = _latest_shots(db, project.id)
+def project_readiness(project: Project, db: Session, episode_id: str | None = None) -> dict[str, Any]:
+    shots = _latest_shots(db, project.id, episode_id=episode_id)
     aspect = project.aspect_ratio
     video_id, video_label, video_configured, video_available, _, video_detail = video_provider_status()
     vv_configured, vv_available, vv_detail = vibevoice_status()
@@ -156,7 +174,7 @@ def project_readiness(project: Project, db: Session) -> dict[str, Any]:
             missing_audio.append(shot.id)
 
     scenes_progress: list[dict[str, Any]] = []
-    version = _latest_version(db, project.id)
+    version = _latest_version(db, project.id, episode_id=episode_id)
     if version:
         for index, scene in enumerate(version.scenes):
             scene_shots = list(scene.shots)
@@ -259,7 +277,9 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
         job.progress = 0.05 + (completed / total) * 0.30
         db.commit()
         try:
-            image_reference = queued_reference(job, shot)
+            image_reference = queued_reference(job, shot) or freeze_visual_reference(
+                default_visual_reference(shot, aspect)
+            )
             visual_reference = load_visual_reference(image_reference)
             references = load_cast_references(
                 db, project.id, shot.character_ids or [],
@@ -588,7 +608,7 @@ def run_create_draft(project_id: str, job_id: str, variant: str = "landscape", r
             db.commit()
 
             failed = _failed_steps(job) if retry_failed_only else set()
-            shots = _latest_shots(db, project_id)
+            shots = _latest_shots(db, project_id, episode_id=job.episode_id)
             attention: list[str] = []
 
             steps = [

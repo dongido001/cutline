@@ -113,7 +113,10 @@ def test_queue_snapshot_provider_bytes_and_historical_take(setup, monkeypatch, p
     if path == 'manual':
         response = client.post(
             f'/api/shots/{target.id}/image/generate',
-            json={'image_reference_id': first['id'] if with_reference else None},
+            json={
+                'image_reference_id': first['id'] if with_reference else None,
+                'use_default_image_reference': not with_reference,
+            },
         )
     else:
         response = client.post(f'/api/projects/{project.id}/draft', json={'variant': 'landscape'})
@@ -148,16 +151,45 @@ def test_queue_snapshot_provider_bytes_and_historical_take(setup, monkeypatch, p
         assert (settings.media_dir / first['filename']).is_file()
         assert 'Visual continuity reference' in take.prompt
     else:
-        assert references == []
-        assert 'Visual continuity reference' not in prompt
-        assert 'image_reference' not in take.settings
+        assert references[0].data == png('blue')
+        assert 'composition remain authoritative' in prompt
+        assert take.settings['image_reference']['source_shot_id'] == shots[1].id
+        assert take.settings['image_reference']['filename'].startswith('image-reference-')
+        assert (settings.media_dir / take.settings['image_reference']['filename']).is_file()
+        assert 'Visual continuity reference' in take.prompt
     choose(client, target, shots[1])
     client.delete(f'/api/shots/{target.id}/image-reference?aspect_ratio=16:9')
     db.refresh(take)
     if with_reference:
         assert take.settings.get('image_reference') == first
     else:
-        assert 'image_reference' not in take.settings
+        assert take.settings['image_reference']['source_shot_id'] == shots[1].id
+
+
+def test_skip_default_previous_shot_still(setup, monkeypatch):
+    db, client, _, shots = setup
+    target = shots[2]
+    response = client.post(
+        f'/api/shots/{target.id}/image/generate',
+        json={'use_default_image_reference': False},
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()['id']
+    calls = []
+
+    def request(provider, prompt, aspect, progress=None, references=None):
+        calls.append((prompt, aspect, references))
+        return png(), 'test', {}
+
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    monkeypatch.setattr(media, '_request_provider_image', request)
+    tasks._generate_shot_image(target.id, job_id)
+    prompt, aspect, references = calls[0]
+    assert references == []
+    assert 'Visual continuity reference' not in prompt
+    take = db.scalar(select(ShotTake).where(ShotTake.shot_id == target.id))
+    assert 'image_reference' not in take.settings
 
 
 def test_selected_reference_must_exist_at_queue_time(setup):

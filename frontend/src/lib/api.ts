@@ -580,9 +580,16 @@ export interface ProjectContinuationInput {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData
+  const systemToken = import.meta.env.VITE_CUTLINE_SYSTEM_TOKEN
   const response = await fetch(path, {
     ...init,
-    headers: isFormData ? init?.headers : { 'Content-Type': 'application/json', ...init?.headers },
+    headers: isFormData
+      ? { ...(systemToken ? { 'X-Cutline-System-Token': systemToken } : {}), ...init?.headers }
+      : {
+          'Content-Type': 'application/json',
+          ...(systemToken ? { 'X-Cutline-System-Token': systemToken } : {}),
+          ...init?.headers,
+        },
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
@@ -608,7 +615,7 @@ export const api = {
       { method: 'POST' }
     ),
   audioProvider: () => request<ProviderStatus>('/api/audio-provider'),
-  draftReadiness: (projectId: string) =>
+  draftReadiness: (projectId: string, episodeId?: string) =>
     request<{
       attention: Array<{ code: string; message: string; shot_id?: string }>
       missing_images: string[]
@@ -630,9 +637,9 @@ export const api = {
       }>
       video_provider: ProviderStatus
       vibevoice: { configured: boolean; available: boolean; detail: string }
-    }>(`/api/projects/${projectId}/draft/readiness`),
-  createDraft: (projectId: string, input?: { variant?: 'landscape' | 'shorts'; retry_failed_only?: boolean }) =>
-    request<Job>(`/api/projects/${projectId}/draft`, {
+    }>(`/api/projects/${projectId}/draft/readiness${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`),
+  createDraft: (projectId: string, input?: { variant?: 'landscape' | 'shorts'; retry_failed_only?: boolean }, episodeId?: string) =>
+    request<Job>(`/api/projects/${projectId}/draft${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`, {
       method: 'POST',
       body: JSON.stringify({
         variant: input?.variant || 'landscape',
@@ -717,6 +724,7 @@ export const api = {
     characterIds?: string[],
     refreshContinuity = false,
     imageReferenceId?: string | null,
+    useDefaultImageReference = false,
   ) =>
     request<Job>(`/api/shots/${id}/image/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, {
       method: 'POST',
@@ -724,6 +732,7 @@ export const api = {
         character_ids: characterIds,
         refresh_continuity: refreshContinuity,
         image_reference_id: imageReferenceId ?? null,
+        use_default_image_reference: useDefaultImageReference,
       }),
     }),
   createCharacter: (projectId: string, input: { name: string; notes?: string }) =>
@@ -807,8 +816,11 @@ export const api = {
     if (episodeId) qs.set('episode_id', episodeId)
     return request<Job>(`/api/projects/${id}/final-cut/render?${qs.toString()}`, { method: 'POST' })
   },
-  deleteFinalCut: (id: string, variant: OutputVariant = 'landscape') =>
-    request<void>(`/api/projects/${id}/final-cut?variant=${variant}`, { method: 'DELETE' }),
+  deleteFinalCut: (id: string, variant: OutputVariant = 'landscape', episodeId?: string) => {
+    const qs = new URLSearchParams({ variant })
+    if (episodeId) qs.set('episode_id', episodeId)
+    return request<void>(`/api/projects/${id}/final-cut?${qs.toString()}`, { method: 'DELETE' })
+  },
   timeline: (id: string, edit: OutputVariant = 'landscape', episodeId?: string) => {
     const qs = new URLSearchParams({ edit })
     if (episodeId) qs.set('episode_id', episodeId)

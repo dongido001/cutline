@@ -23,7 +23,7 @@ class EpisodeCreate(BaseModel):
 class EpisodeUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     synopsis: str | None = None
-    status: str | None = None
+    status: Literal["draft", "review", "shot_plan", "approved", "archived"] | None = None
 
 
 class EpisodeSummary(BaseModel):
@@ -398,6 +398,7 @@ class ShotImageGenerateRequest(BaseModel):
     refresh_continuity: bool = False
     image_reference_id: str | None = Field(default=None, min_length=1)
     aspect_ratio: str | None = None
+    use_default_image_reference: bool = False
 
 
 class PublishProviderStatus(BaseModel):

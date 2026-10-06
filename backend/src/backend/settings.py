@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     chatgpt_web_model: str = "chatgpt-5.6-sol-high-web"
     chatgpt_web_api_key: str = ""
     video_provider: str = "runway"
+    video_worker_concurrency: int = Field(default=1, ge=1)
     flowkit_base_url: str = "http://127.0.0.1:8100/api/flow"
     flowkit_project_id: str = ""
     flowkit_root: Path = PROJECTS_ROOT / "flowkit"
@@ -76,6 +78,9 @@ class Settings(BaseSettings):
     public_base_url: str = "http://127.0.0.1:8000"
     frontend_origin: str = "http://127.0.0.1:5173"
     oauth_state_ttl_seconds: int = 600
+    system_token: str = ""
+    token_secret: str = ""
+    gemini_web_api_key: str = ""
 
     @property
     def database_url(self) -> str:
