@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from .cast import load_cast_references
 from .models import Character, Project, Scene, Shot
-from .screenplay_parser import canonical_character_name, infer_voice_description
+from .screenplay_parser import (
+    canonical_character_name,
+    expand_character_cue_names,
+    infer_voice_description,
+)
 from .settings import settings
 import re
 
@@ -253,19 +257,21 @@ def _collect_voice_entries(
         for line in dialogue:
             if not isinstance(line, dict):
                 continue
-            speaker = _text(line.get("character") or line.get("speaker"))
-            if not speaker:
+            raw_speaker = _text(line.get("character") or line.get("speaker"))
+            if not raw_speaker:
                 continue
-            canon = canonical_character_name(speaker)
-            item = char_by_canon.get(canon) or {}
-            char_id = _text(item.get("id"))
-            sv = snapshot_voices.get(char_id) or snapshot_voices.get(canon) or snapshot_voices.get(speaker) or {}
-            add_voice(
-                speaker,
-                char_id=char_id or None,
-                fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
-                fallback_notes=_text(item.get("notes") or sv.get("notes")),
-            )
+            speaker_parts = expand_character_cue_names(raw_speaker)
+            for speaker in (speaker_parts if len(speaker_parts) > 1 else [raw_speaker]):
+                canon = canonical_character_name(speaker)
+                item = char_by_canon.get(canon) or {}
+                char_id = _text(item.get("id"))
+                sv = snapshot_voices.get(char_id) or snapshot_voices.get(canon) or snapshot_voices.get(speaker) or {}
+                add_voice(
+                    speaker,
+                    char_id=char_id or None,
+                    fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
+                    fallback_notes=_text(item.get("notes") or sv.get("notes")),
+                )
     else:
         for item in characters:
             if not isinstance(item, dict):

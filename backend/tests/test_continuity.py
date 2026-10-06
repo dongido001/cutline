@@ -114,3 +114,64 @@ def test_video_prompt_includes_flowkit_character_voices_and_phone_call_routing()
         in prompt
     )
 
+
+def test_child_voices_and_duet_cue_expansion():
+    from backend.cast import cast_portrait_prompt, shot_mentioned_names
+    from backend.screenplay_parser import parse_character_consistency
+
+    script = (
+        "Character consistency\n\n"
+        "JASMINE: Older sister, approximately 6 years old, warm brown skin, cheerful, confident, patient, and encouraging.\n\n"
+        "SKYLAR: Younger sister, approximately 4 years old, warm brown skin, curious, playful, energetic.\n\n"
+        "RAINBOW: Small magical animated rainbow character with six rounded bands.\n\n"
+        "JASMINE AND SKYLAR: When this cue appears, it means the existing two sisters sing together as a duet. It is not a separate voice or character.\n\n"
+        "SHOT 1 - WHERE DID THE COLORS GO?\n"
+    )
+    parsed = parse_character_consistency(script)
+    assert [c["name"] for c in parsed] == ["JASMINE", "SKYLAR", "RAINBOW"]
+    by_name = {c["name"]: c for c in parsed}
+    assert "6-year-old young girl voice" in by_name["JASMINE"]["voice_description"]
+    assert "contralto" not in by_name["JASMINE"]["voice_description"]
+    assert "4-year-old young girl voice" in by_name["SKYLAR"]["voice_description"]
+    assert "animated character voice" in by_name["RAINBOW"]["voice_description"]
+
+    jasmine_char = Character(name="JASMINE", notes=by_name["JASMINE"]["notes"])
+    assert "adults age 18 or older" not in cast_portrait_prompt(jasmine_char)
+
+    duet_shot = {
+        "title": "RED SONG BEAT",
+        "action": "Jasmine and Skylar sing together.",
+        "dialogue": [{"character": "JASMINE AND SKYLAR", "text": "Red, red, bright and fun!"}],
+        "image_prompt": "Jasmine and Skylar in the playroom.",
+        "video_prompt": "Both sisters sing together.",
+    }
+    mentioned_names, _ = shot_mentioned_names(duet_shot)
+    assert mentioned_names == ["JASMINE", "SKYLAR"]
+
+    snapshot = {
+        "framing": "Medium two-shot",
+        "action": "Jasmine and Skylar sing together.",
+        "characters": [
+            {"id": "c-jasmine", "name": "JASMINE"},
+            {"id": "c-skylar", "name": "SKYLAR"},
+        ],
+        "character_voices": [
+            {
+                "id": "c-jasmine",
+                "name": "JASMINE",
+                "voice_description": by_name["JASMINE"]["voice_description"],
+            },
+            {
+                "id": "c-skylar",
+                "name": "SKYLAR",
+                "voice_description": by_name["SKYLAR"]["voice_description"],
+            },
+        ],
+        "dialogue": [{"character": "JASMINE AND SKYLAR", "text": "Red, red, bright and fun!"}],
+        "scene": {"location": "Playroom", "time_of_day": "Morning"},
+    }
+    prompt = video_continuity_prompt(snapshot, "Both sisters sing.", "9:16")
+    assert "JASMINE: Bright, cheerful 6-year-old young girl voice" in prompt
+    assert "SKYLAR: Bright, cheerful 4-year-old young girl voice" in prompt
+
+

@@ -43,6 +43,18 @@ def canonical_character_name(name: str) -> str:
     return cleaned.upper()
 
 
+def expand_character_cue_names(name: str) -> list[str]:
+    """Expand compound dialogue cues like 'JASMINE AND SKYLAR' into individual canonical character names."""
+    canon = canonical_character_name(name)
+    if not canon:
+        return []
+    if " AND " in canon:
+        parts = [part.strip() for part in re.split(r"\s+AND\s+", canon) if part.strip()]
+        if len(parts) >= 2 and all(len(part) >= 2 for part in parts):
+            return parts
+    return [canon]
+
+
 def infer_voice_description(name: str, notes: str, age: int | None = None) -> str:
     """Extract an explicit Voice: clause or synthesize a deterministic Veo voice profile from character notes."""
     cleaned_notes = (notes or "").strip()
@@ -59,13 +71,26 @@ def infer_voice_description(name: str, notes: str, age: int | None = None) -> st
 
     lower = cleaned_notes.lower()
     if age is None:
-        age_match = re.search(r"\b(\d{2})\s*(?:years?\s*old|yo|y/o)\b", lower)
+        age_match = re.search(r"\b(\d{1,2})\s*(?:years?\s*old|yo|y/o)\b", lower)
         if age_match:
             age = int(age_match.group(1))
 
+    is_child = (age is not None and age < 13) or bool(
+        re.search(
+            r"\b(child|childlike|toddler|preschool(?:er)?|little\s+girl|little\s+boy|young\s+girl|young\s+boy|kid)\b",
+            lower,
+        )
+    )
+    is_non_human_mascot = bool(
+        re.search(
+            r"\b(magical\s+animated|rainbow\s+character|talking\s+rainbow|animated\s+character|talking\s+animal)\b",
+            lower,
+        )
+    )
+
     is_female = bool(
         re.search(
-            r"\b(woman|female|mother|matriarch|sister|daughter|girl|wife|widow|aunt|grandmother|blouse|ponytail|bun|she|her)\b",
+            r"\b(woman|female|mother|matriarch|sister|daughter|girl|wife|widow|aunt|grandmother|blouse|ponytail|ponytails|dress|bun|she|her)\b",
             lower,
         )
     )
@@ -76,11 +101,26 @@ def infer_voice_description(name: str, notes: str, age: int | None = None) -> st
         )
     )
 
-    is_older = (age is not None and age >= 50) or bool(
-        re.search(r"\b(older|elderly|matriarch|patriarch|50s|60s|70s|silver|graying|grey)\b", lower)
+    is_older = not is_child and (
+        (age is not None and age >= 50)
+        or bool(
+            re.search(
+                r"\b(older\s+(?:man|woman|adult|person)|elderly|matriarch|patriarch|50s|60s|70s|silver|graying|grey)\b",
+                lower,
+            )
+        )
     )
 
-    if is_female and not is_male:
+    if is_non_human_mascot:
+        register = "Bright, friendly, musical animated character voice"
+    elif is_child:
+        if is_female and not is_male:
+            register = f"Bright, cheerful {f'{age}-year-old ' if age else ''}young girl voice"
+        elif is_male and not is_female:
+            register = f"Bright, cheerful {f'{age}-year-old ' if age else ''}young boy voice"
+        else:
+            register = f"Bright, cheerful {f'{age}-year-old ' if age else ''}child voice"
+    elif is_female and not is_male:
         if is_older:
             register = f"Firm, seasoned {f'{age}-year-old ' if age else ''}contralto"
         else:
@@ -108,6 +148,10 @@ def infer_voice_description(name: str, notes: str, age: int | None = None) -> st
         delivery.append("authoritative, measured delivery")
     elif re.search(r"\b(weathered|salt-aged|quiet|observant|working-class|rough)\b", lower):
         delivery.append("low-key, weathered, unhurried delivery")
+    elif re.search(r"\b(curious|playful|energetic|giggle|bubbly)\b", lower):
+        delivery.append("playful, curious, expressive delivery")
+    elif re.search(r"\b(cheerful|encouraging|patient|friendly|musical)\b", lower):
+        delivery.append("warm, cheerful, encouraging delivery")
     elif re.search(r"\b(practical|alert|determined|capable|direct|focused)\b", lower):
         delivery.append("clear, natural, earnest delivery")
     else:
@@ -174,6 +218,13 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
                 break
             continue
         raw_name = match.group("name").strip()
+        notes = match.group("notes").strip()
+        if re.search(
+            r"\bnot\s+a\s+separate\s+(?:voice\s+or\s+)?character\b|\bwhen\s+this\s+cue\s+appears\b",
+            notes,
+            re.IGNORECASE,
+        ):
+            continue
         age_match = re.search(r",\s*(\d{1,3})\b", raw_name)
         age = int(age_match.group(1)) if age_match else None
         nickname_match = re.search(
@@ -188,10 +239,9 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
         else:
             base = canonical_character_name(raw_name)
             name = _resolve_base_name(base)
-        if not name or name in seen:
+        if not name or name in seen or len(expand_character_cue_names(name)) > 1:
             continue
         role = (match.group("role") or "").strip()
-        notes = match.group("notes").strip()
         if age is not None and not re.search(rf"\b{age}\b", notes):
             notes = f"{age} years old. {notes}".strip()
         if role:

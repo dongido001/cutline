@@ -44,15 +44,20 @@ export function buildShotVideoPrompt(
   }
   if (shot.dialogue && shot.dialogue.length > 0) {
     for (const line of shot.dialogue) {
-      const speaker = (line.character || line.speaker || '').trim()
-      if (!speaker) continue
-      const speakerUpper = speaker.toUpperCase()
-      const current = characters.find(
-        (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
-      )
-      const snapChar = snapshot?.characters.find((c) => c.name.toUpperCase() === speakerUpper)
-      const snapVoice = snapshot?.character_voices?.find((v) => v.name.toUpperCase() === speakerUpper)?.voice_description
-      addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice)
+      const rawSpeaker = (line.character || line.speaker || '').trim()
+      if (!rawSpeaker) continue
+      const parts = rawSpeaker.toUpperCase().includes(' AND ')
+        ? rawSpeaker.split(/\s+AND\s+/i).map((part) => part.trim()).filter(Boolean)
+        : [rawSpeaker]
+      for (const speaker of parts) {
+        const speakerUpper = speaker.toUpperCase()
+        const current = characters.find(
+          (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
+        )
+        const snapChar = snapshot?.characters.find((c) => c.name.toUpperCase() === speakerUpper)
+        const snapVoice = snapshot?.character_voices?.find((v) => v.name.toUpperCase() === speakerUpper)?.voice_description
+        addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice)
+      }
     }
   } else if (snapshot?.characters.length) {
     for (const item of snapshot.characters) {

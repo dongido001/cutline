@@ -16,6 +16,7 @@ from .settings import settings
 from .models import Character, Project, Scene, ScriptVersion, Shot
 from .screenplay_parser import (
     canonical_character_name,
+    expand_character_cue_names,
     infer_voice_description,
     parse_character_consistency,
 )
@@ -67,7 +68,19 @@ def cast_portrait_prompt(character: Character, *, look: str | None = None) -> st
             "If the notes describe multiple wardrobe looks, use a neutral plain shirt and "
             "focus only on locking the face, hair, skin, and distinguishing features."
         )
+    lower_notes = notes.lower()
+    age_match = re.search(r"\b(\d{1,2})\s*(?:years?\s*old|yo|y/o)\b", lower_notes)
+    is_minor_or_mascot = (
+        (age_match is not None and int(age_match.group(1)) < 18)
+        or bool(
+            re.search(
+                r"\b(child|childlike|toddler|preschool(?:er)?|magical\s+animated|rainbow\s+character|animated\s+character)\b",
+                lower_notes,
+            )
+        )
+    )
     appearance = notes or f"Adult character named {name}."
+    adult_clause = "" if is_minor_or_mascot else "All people are adults age 18 or older. "
     return (
         f"Character identity reference sheet for {name}. "
         "Head-and-shoulders portrait, front-facing, neutral calm expression, eyes toward camera, "
@@ -75,7 +88,7 @@ def cast_portrait_prompt(character: Character, *, look: str | None = None) -> st
         "photoreal cinematic still, no crop through the chin or forehead. "
         f"{look_instruction} "
         f"Appearance notes: {appearance} "
-        "All people are adults age 18 or older. No text, no logos, no watermark, no extra people."
+        f"{adult_clause}No text, no logos, no watermark, no extra people."
     )
 
 
@@ -117,10 +130,10 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
         if not isinstance(line, dict):
             continue
         raw = str(line.get("character") or line.get("speaker") or "").strip()
-        key = canonical_character_name(raw)
-        if key and key not in seen:
-            seen.add(key)
-            names.append(key)
+        for key in expand_character_cue_names(raw):
+            if key and key not in seen:
+                seen.add(key)
+                names.append(key)
 
     visual_text = "\n".join(
         (
