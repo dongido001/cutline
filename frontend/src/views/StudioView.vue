@@ -3126,6 +3126,8 @@ input::placeholder { color: #68716c; }
 }
 
 .project-header {
+  position: relative;
+  z-index: 60;
   min-height: 56px;
   border-bottom: 1px solid var(--line-subtle);
   background: rgba(11, 14, 17, .88);

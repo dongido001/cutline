@@ -101,7 +101,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="dropdownRef" class="episode-switcher">
+  <div ref="dropdownRef" class="episode-switcher" :class="{ 'is-open': isOpen }">
     <button
       type="button"
       class="episode-switcher-trigger"
@@ -212,6 +212,11 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+  z-index: 10;
+}
+
+.episode-switcher.is-open {
+  z-index: 1000;
 }
 
 .episode-switcher-trigger {
@@ -272,7 +277,7 @@ onUnmounted(() => {
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 12px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-  z-index: 200;
+  z-index: 1000;
   overflow: hidden;
   animation: dropIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
