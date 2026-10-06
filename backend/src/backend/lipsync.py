@@ -344,6 +344,7 @@ def execute_shot_lipsync(
             shot.clip.mime_type = "video/mp4"
             shot.clip.source = "lipsync"
             shot.clip.provider = engine.id
+            shot.clip.created_at = take.created_at or now()
         else:
             shot_clip = ShotClip(
                 shot_id=shot.id,
@@ -354,11 +355,12 @@ def execute_shot_lipsync(
                 prompt="dialogue-lipsync",
             )
             db.add(shot_clip)
-    elif variant_clip:
+    if variant_clip:
         variant_clip.filename = output_filename
         variant_clip.mime_type = "video/mp4"
         variant_clip.source = "lipsync"
         variant_clip.provider = engine.id
+        variant_clip.created_at = take.created_at or now()
 
     # Update shot duration to match speech duration
     speech_duration_ms = probe_duration_ms(audio_path)

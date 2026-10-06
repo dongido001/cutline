@@ -296,3 +296,102 @@ def test_cross_project_video_queue_positions(tmp_path, monkeypatch) -> None:
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_select_take_syncs_variant_and_subsequent_upload_or_delete(tmp_path, monkeypatch) -> None:
+    from backend.takes import record_take
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'take_sync.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Take sync test", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. ROOM - DAY")
+    shot = Shot(scene=scene, order_index=0, title="Shot 1", video_prompt="Push in")
+    session.add(project)
+    session.flush()
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    (media_dir / "take1.mp4").write_bytes(b"video-take-1")
+    (media_dir / "take2.mp4").write_bytes(b"video-take-2")
+
+    t1 = record_take(
+        session,
+        shot,
+        media_type="clip",
+        aspect_ratio="16:9",
+        filename="take1.mp4",
+        mime_type="video/mp4",
+        source="generated",
+        provider="flowkit",
+        prompt="Push in 1",
+    )
+    t2 = record_take(
+        session,
+        shot,
+        media_type="clip",
+        aspect_ratio="16:9",
+        filename="take2.mp4",
+        mime_type="video/mp4",
+        source="generated",
+        provider="flowkit",
+        prompt="Push in 2",
+    )
+    shot.clip = ShotClip(
+        shot_id=shot.id,
+        filename="take2.mp4",
+        mime_type="video/mp4",
+        source="generated",
+        provider="flowkit",
+        prompt="Push in 2",
+    )
+    session.commit()
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        # Select Take 1: both shot.clip and shot.media_variants should point to take1.mp4
+        res = client.post(f"/api/shots/{shot.id}/takes/select", json={"take_id": t1.id})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["selected_clip_take_id"] == t1.id
+        assert body["clip"]["url"] == "/media/take1.mp4"
+        clip_variants = [v for v in body["media_variants"] if v["media_type"] == "clip" and v["aspect_ratio"] == "16:9"]
+        assert len(clip_variants) == 1
+        take1_entry = next(t for t in body["takes"] if t["id"] == t1.id)
+        assert clip_variants[0]["url"] == take1_entry["url"]
+
+        # Select Take 2: both shot.clip and shot.media_variants should update to take2.mp4
+        res2 = client.post(f"/api/shots/{shot.id}/takes/select", json={"take_id": t2.id})
+        assert res2.status_code == 200
+        body2 = res2.json()
+        assert body2["selected_clip_take_id"] == t2.id
+        assert body2["clip"]["url"] == "/media/take2.mp4"
+        clip_variants2 = [v for v in body2["media_variants"] if v["media_type"] == "clip" and v["aspect_ratio"] == "16:9"]
+        take2_entry = next(t for t in body2["takes"] if t["id"] == t2.id)
+        assert clip_variants2[0]["url"] == take2_entry["url"]
+
+        # Upload a new clip: both shot.clip and shot.media_variants must update to the uploaded file
+        up = client.post(
+            f"/api/shots/{shot.id}/clip/upload",
+            files={"file": ("custom.mp4", b"custom-video", "video/mp4")},
+        )
+        assert up.status_code == 200
+        up_body = up.json()
+        uploaded_filename = up_body["clip"]["url"].removeprefix("/media/")
+        clip_variants_up = [v for v in up_body["media_variants"] if v["media_type"] == "clip" and v["aspect_ratio"] == "16:9"]
+        assert len(clip_variants_up) == 1
+        assert clip_variants_up[0]["url"].startswith(f"/media/{uploaded_filename}")
+        assert up_body["selected_clip_take_id"] is None
+        # Generated take files on disk must be preserved
+        assert (media_dir / "take1.mp4").exists()
+        assert (media_dir / "take2.mp4").exists()
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+

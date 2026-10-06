@@ -37,7 +37,7 @@ import {
   Volume2,
   X,
 } from '@lucide/vue'
-import { api, type AspectRatio, type Character, type OutputVariant, type ProjectInput, type ProjectSummary, type Scene, type Shot, type Suggestion } from '@/lib/api'
+import { api, type AspectRatio, type Character, type OutputVariant, type ProjectInput, type ProjectSummary, type Scene, type Shot, type ShotTake, type Suggestion } from '@/lib/api'
 import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
@@ -114,6 +114,7 @@ const continuitySavingIds = ref<string[]>([])
 const mediaAspect = ref<AspectRatio>('16:9')
 const finalCutAspect = ref<AspectRatio>('16:9')
 const previewVideo = ref<HTMLVideoElement | null>(null)
+const storyboardVideo = ref<HTMLVideoElement | null>(null)
 const continuationForm = reactive({ script: '', target_duration_seconds: 30 })
 const SCRIPT_GENERATION_PROMPT = `Create a production-ready AI short-film screenplay.
 
@@ -246,12 +247,22 @@ const skipDefaultImageReference = ref(false)
 watch(() => selectedShot.value?.id, () => {
   skipDefaultImageReference.value = false
 })
-const selectedAspectImage = computed(() => {
-  const shot = selectedShot.value
+function resolveActiveShotMedia(shot: Shot | null | undefined, mediaType: 'image' | 'clip', aspect: AspectRatio) {
   if (!shot) return null
-  return shot.media_variants.find((item) => item.media_type === 'image' && item.aspect_ratio === mediaAspect.value)
-    ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? shot.image : null)
-})
+  const variant = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === aspect)
+  const legacy = store.currentProject?.aspect_ratio === aspect ? (mediaType === 'clip' ? shot.clip : shot.image) : null
+  const hasSlot = Boolean(variant || legacy)
+  if (!hasSlot) return null
+  const selectedId = mediaType === 'clip' ? shot.selected_clip_take_id : shot.selected_image_take_id
+  const activeTake = shot.takes?.find(
+    (t) =>
+      t.media_type === mediaType &&
+      t.aspect_ratio === aspect &&
+      (t.selected || (selectedId && t.id === selectedId))
+  )
+  return activeTake ?? variant ?? legacy
+}
+const selectedAspectImage = computed(() => resolveActiveShotMedia(selectedShot.value, 'image', mediaAspect.value))
 const selectedAspectReference = computed(() => {
   const shot = selectedShot.value
   if (!shot) return null
@@ -259,12 +270,7 @@ const selectedAspectReference = computed(() => {
     ?? shot.continuity_frames?.find((item) => item.aspect_ratio === mediaAspect.value)
     ?? null
 })
-const selectedAspectClip = computed(() => {
-  const shot = selectedShot.value
-  if (!shot) return null
-  return shot.media_variants.find((item) => item.media_type === 'clip' && item.aspect_ratio === mediaAspect.value)
-    ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? shot.clip : null)
-})
+const selectedAspectClip = computed(() => resolveActiveShotMedia(selectedShot.value, 'clip', mediaAspect.value))
 const selectedShotScene = computed(() => scenes.value.find((scene) => scene.shots.some((shot) => shot.id === selectedShot.value?.id)))
 const selectedShotConversationUrl = computed(() => {
   const shot = selectedShot.value
@@ -294,7 +300,7 @@ const nextPreviewShot = computed(() => allShots.value[previewShotIndex.value + 1
 const previewAspect = computed<AspectRatio>(() => activeStage.value === 'final-cut' ? finalCutAspect.value : mediaAspect.value)
 function previewMedia(shot: Shot | null | undefined, mediaType: 'image' | 'clip') {
   if (!shot) return null
-  const exact = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === previewAspect.value)
+  const exact = resolveActiveShotMedia(shot, mediaType, previewAspect.value)
   if (exact) return exact
   const legacy = mediaType === 'clip' ? shot.clip : shot.image
   if (legacy) return legacy
@@ -609,10 +615,23 @@ function sceneDurationLabel(scene: Scene) {
 }
 
 function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
-  return shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === mediaAspect.value)
+  return resolveActiveShotMedia(shot, mediaType, mediaAspect.value)
     ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? (mediaType === 'clip' ? shot.clip : shot.image) : null)
     ?? shot.media_variants.find((item) => item.media_type === mediaType)
     ?? null
+}
+
+async function handlePlaySelectedTake(take: ShotTake) {
+  if (take.media_type !== 'clip') return
+  await nextTick()
+  const video = storyboardVideo.value
+  if (!video) return
+  try {
+    video.currentTime = 0
+    await video.play()
+  } catch {
+    // Browser autoplay policy fallback: try muted playback if unmuted play was blocked
+  }
 }
 
 function shotThumbUrl(shot: Shot): string | null {
@@ -2293,7 +2312,7 @@ function formatRenderedAt(value: string) {
 
             <div class="storyboard-area">
               <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
-                <video v-if="selectedAspectClip" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
+                <video v-if="selectedAspectClip" ref="storyboardVideo" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
                 <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
                 <img v-else-if="selectedAspectReference" :src="selectedAspectReference.url" :alt="`${mediaAspect} reference frame for ${selectedShotLabel}`" />
                 <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} media yet</strong><span>Generate a frame, then a clip — or run Create draft from the story view.</span></div>
@@ -2439,6 +2458,7 @@ function formatRenderedAt(value: string) {
               v-if="selectedShot"
               :shot="selectedShot"
               :aspect="mediaAspect"
+              @play-take="handlePlaySelectedTake"
             />
 
             <ImageReferencePanel
@@ -2904,7 +2924,7 @@ function formatRenderedAt(value: string) {
       <div class="preview-stage" :class="{ portrait: previewAspect === '9:16' }">
         <Transition name="preview-media">
           <div v-if="previewShot" :key="previewShot.id" class="preview-media">
-            <video v-if="previewClip" ref="previewVideo" :src="previewClip.url" playsinline preload="auto" @loadedmetadata="syncPreviewVideo" @canplay="syncPreviewVideo"></video>
+            <video v-if="previewClip" :key="previewClip.url" ref="previewVideo" :src="previewClip.url" playsinline preload="auto" @loadedmetadata="syncPreviewVideo" @canplay="syncPreviewVideo"></video>
             <img v-else-if="previewImage" :src="previewImage.url" :alt="previewShot.title || 'Storyboard frame'" />
             <div v-else class="preview-missing"><Image :size="42" /><strong>Storyboard frame unavailable</strong><span>{{ previewShot.title || 'No shots in this project' }}</span></div>
           </div>

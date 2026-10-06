@@ -1064,8 +1064,18 @@ export const useStudioStore = defineStore('studio', () => {
     if (!currentProject.value) return
     error.value = ""
     try {
-      await api.selectTake(shotId, takeId)
-      await loadProject(currentProject.value.id)
+      const updatedShot = await api.selectTake(shotId, takeId)
+      if (currentProject.value?.current_version?.scenes) {
+        for (const scene of currentProject.value.current_version.scenes) {
+          const idx = scene.shots.findIndex((s) => s.id === shotId)
+          if (idx !== -1) {
+            scene.shots[idx] = updatedShot
+            break
+          }
+        }
+      }
+      await loadProject(currentProject.value.id, { episodeId: currentEpisodeId.value || undefined })
+      return updatedShot
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : "Could not select take"
       throw cause

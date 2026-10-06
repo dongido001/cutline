@@ -235,4 +235,102 @@ describe('StudioView', () => {
 
     wrapper.unmount()
   })
+
+  it('updates storyboard video source and starts playback when selecting a video take', async () => {
+    const projectWithTakes = JSON.parse(JSON.stringify(fixture)) as ProjectDetail
+    projectWithTakes.status = 'shot_plan'
+    const shot = projectWithTakes.current_version!.scenes[0]!.shots[0]!
+    shot.status = 'clip_ready'
+    shot.selected_clip_take_id = 'take-2'
+    shot.clip = {
+      id: 'clip-1',
+      url: '/media/clip-take-2.mp4',
+      mime_type: 'video/mp4',
+      source: 'generated',
+      provider: 'flowkit',
+      prompt: 'Push in',
+      created_at: '2026-10-06T10:05:00Z',
+    }
+    shot.media_variants = [
+      {
+        id: 'var-1',
+        media_type: 'clip',
+        aspect_ratio: '16:9',
+        url: '/media/clip-take-1.mp4?v=100',
+        mime_type: 'video/mp4',
+        source: 'generated',
+        provider: 'flowkit',
+        prompt: 'Push in',
+        created_at: '2026-10-06T10:00:00Z',
+      },
+    ]
+    shot.takes = [
+      {
+        id: 'take-1',
+        media_type: 'clip',
+        aspect_ratio: '16:9',
+        url: '/media/clip-take-1.mp4?v=100',
+        mime_type: 'video/mp4',
+        source: 'generated',
+        provider: 'flowkit',
+        prompt: 'Push in',
+        selected: false,
+        settings: {},
+        created_at: '2026-10-06T10:00:00Z',
+      },
+      {
+        id: 'take-2',
+        media_type: 'clip',
+        aspect_ratio: '16:9',
+        url: '/media/clip-take-2.mp4?v=200',
+        mime_type: 'video/mp4',
+        source: 'generated',
+        provider: 'flowkit',
+        prompt: 'Push in',
+        selected: true,
+        settings: {},
+        created_at: '2026-10-06T10:05:00Z',
+      },
+    ]
+
+    vi.spyOn(api, 'project').mockImplementation(async () => JSON.parse(JSON.stringify(projectWithTakes)) as ProjectDetail)
+    const selectTakeSpy = vi.spyOn(api, 'selectTake').mockImplementation(async (_shotId, takeId) => {
+      shot.selected_clip_take_id = takeId
+      for (const t of shot.takes!) {
+        t.selected = t.id === takeId
+      }
+      const chosen = shot.takes!.find((t) => t.id === takeId)!
+      shot.clip!.url = chosen.url.split('?')[0]!
+      shot.media_variants[0]!.url = chosen.url
+      return JSON.parse(JSON.stringify(shot))
+    })
+
+    const playSpy = vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockResolvedValue()
+
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-1')
+    await router.isReady()
+
+    const wrapper = mount(StudioView, {
+      global: { plugins: [createPinia(), router] },
+    })
+    await flushPromises()
+
+    // Even if media_variants had a stale URL from take-1, active take-2 is resolved
+    const mainVideoBefore = wrapper.get('.storyboard-frame video')
+    expect(mainVideoBefore.attributes('src')).toBe('/media/clip-take-2.mp4?v=200')
+
+    // Click "Select take" on Take 1 card
+    const selectBtn = wrapper.findAll('.take-select-btn').find((b) => b.text().includes('Select take'))
+    expect(selectBtn).toBeDefined()
+    await selectBtn!.trigger('click')
+    await flushPromises()
+
+    expect(selectTakeSpy).toHaveBeenCalledWith('shot-1', 'take-1')
+    const mainVideoAfter = wrapper.get('.storyboard-frame video')
+    expect(mainVideoAfter.attributes('src')).toBe('/media/clip-take-1.mp4?v=100')
+    expect(playSpy).toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
 })

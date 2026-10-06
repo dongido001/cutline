@@ -1752,6 +1752,7 @@ async def upload_shot_image(
         shot.image.source = "uploaded"
         shot.image.provider = "manual-upload"
         shot.image.prompt = shot.image_prompt
+        shot.image.created_at = now()
     elif use_legacy:
         db.add(
             ShotImage(
@@ -1763,20 +1764,26 @@ async def upload_shot_image(
                 prompt=shot.image_prompt,
             )
         )
-    elif variant:
+    if variant:
         variant.filename = filename
         variant.mime_type = file.content_type
         variant.source = "uploaded"
         variant.provider = "manual-upload"
         variant.prompt = shot.image_prompt
-    else:
+        variant.created_at = now()
+    elif not use_legacy:
         db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=file.content_type, source="uploaded", provider="manual-upload", prompt=shot.image_prompt))
+    for t in shot.takes:
+        if t.media_type == "image" and t.aspect_ratio == target_aspect:
+            t.selected = False
+    if use_legacy:
+        shot.selected_image_take_id = None
     if project.timeline and not promote_available_clips(project, db):
         project.timeline.revision += 1
     shot.status = "image_ready"
     db.commit()
     db.refresh(shot)
-    delete_media_file(previous_filename)
+    delete_media_file(previous_filename, db=db)
     delete_media_file(final_cut_filename)
     return shot
 
@@ -1789,17 +1796,25 @@ def delete_shot_image(shot_id: str, aspect_ratio: str | None = None, db: Session
     project = shot.scene.script_version.project
     target_aspect = aspect_ratio or project.aspect_ratio
     variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
-    media = shot.image if target_aspect == project.aspect_ratio else variant
+    media = (shot.image or variant) if target_aspect == project.aspect_ratio else variant
     if not media:
         raise HTTPException(status_code=404, detail="Shot image not found")
     filename = media.filename
     final_cut_filename = invalidate_final_cut(project, db)
-    db.delete(media)
+    if target_aspect == project.aspect_ratio and shot.image:
+        db.delete(shot.image)
+    if variant:
+        db.delete(variant)
+    for t in shot.takes:
+        if t.media_type == "image" and t.aspect_ratio == target_aspect:
+            t.selected = False
+    if target_aspect == project.aspect_ratio:
+        shot.selected_image_take_id = None
     if project.timeline and not promote_available_clips(project, db):
         project.timeline.revision += 1
     shot.status = "clip_ready" if shot.clip else "planned"
     db.commit()
-    delete_media_file(filename)
+    delete_media_file(filename, db=db)
     delete_media_file(final_cut_filename)
 
 
@@ -2160,6 +2175,7 @@ async def upload_shot_clip(
         shot.clip.source = "uploaded"
         shot.clip.provider = "manual-upload"
         shot.clip.prompt = shot.video_prompt
+        shot.clip.created_at = now()
     elif use_legacy:
         db.add(
             ShotClip(
@@ -2171,20 +2187,26 @@ async def upload_shot_clip(
                 prompt=shot.video_prompt,
             )
         )
-    elif variant:
+    if variant:
         variant.filename = filename
         variant.mime_type = file.content_type
         variant.source = "uploaded"
         variant.provider = "manual-upload"
         variant.prompt = shot.video_prompt
-    else:
+        variant.created_at = now()
+    elif not use_legacy:
         db.add(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=file.content_type, source="uploaded", provider="manual-upload", prompt=shot.video_prompt))
+    for t in shot.takes:
+        if t.media_type == "clip" and t.aspect_ratio == target_aspect:
+            t.selected = False
+    if use_legacy:
+        shot.selected_clip_take_id = None
     if project.timeline and not promote_available_clips(project, db):
         project.timeline.revision += 1
     shot.status = "clip_ready"
     db.commit()
     db.refresh(shot)
-    delete_media_file(previous_filename)
+    delete_media_file(previous_filename, db=db)
     delete_media_file(final_cut_filename)
     return shot
 
@@ -2197,17 +2219,25 @@ def delete_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session 
     project = shot.scene.script_version.project
     target_aspect = aspect_ratio or project.aspect_ratio
     variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
-    media = shot.clip if target_aspect == project.aspect_ratio else variant
+    media = (shot.clip or variant) if target_aspect == project.aspect_ratio else variant
     if not media:
         raise HTTPException(status_code=404, detail="Shot clip not found")
     filename = media.filename
     final_cut_filename = invalidate_final_cut(project, db)
-    db.delete(media)
+    if target_aspect == project.aspect_ratio and shot.clip:
+        db.delete(shot.clip)
+    if variant:
+        db.delete(variant)
+    for t in shot.takes:
+        if t.media_type == "clip" and t.aspect_ratio == target_aspect:
+            t.selected = False
+    if target_aspect == project.aspect_ratio:
+        shot.selected_clip_take_id = None
     if project.timeline:
         project.timeline.revision += 1
     shot.status = "image_ready" if shot.image else "planned"
     db.commit()
-    delete_media_file(filename)
+    delete_media_file(filename, db=db)
     delete_media_file(final_cut_filename)
 
 
@@ -2447,6 +2477,7 @@ def select_shot_take(
     take = next(item for item in shot.takes if item.id == payload.take_id)
     project = shot.scene.script_version.project
     use_legacy = take.aspect_ratio == project.aspect_ratio
+    take_timestamp = take.created_at or now()
 
     if take.media_type == "image":
         if use_legacy:
@@ -2456,6 +2487,7 @@ def select_shot_take(
                 shot.image.provider = take.provider
                 shot.image.prompt = take.prompt
                 shot.image.source = take.source
+                shot.image.created_at = take_timestamp
             else:
                 db.add(
                     ShotImage(
@@ -2465,6 +2497,7 @@ def select_shot_take(
                         source=take.source,
                         provider=take.provider,
                         prompt=take.prompt,
+                        created_at=take_timestamp,
                     )
                 )
         variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == take.aspect_ratio), None)
@@ -2474,7 +2507,7 @@ def select_shot_take(
             variant.provider = take.provider
             variant.prompt = take.prompt
             variant.source = take.source
-            variant.created_at = now()
+            variant.created_at = take_timestamp
         else:
             db.add(
                 ShotMediaVariant(
@@ -2486,11 +2519,15 @@ def select_shot_take(
                     source=take.source,
                     provider=take.provider,
                     prompt=take.prompt,
+                    created_at=take_timestamp,
                 )
             )
         conv_url = getattr(take, "conversation_url", None) or (take.settings or {}).get("conversation_url")
         if conv_url:
             shot.conversation_url = conv_url
+        if project.timeline and not promote_available_clips(project, db):
+            project.timeline.revision += 1
+        invalidate_final_cut(project, db)
 
     elif take.media_type == "clip":
         if use_legacy:
@@ -2500,6 +2537,7 @@ def select_shot_take(
                 shot.clip.provider = take.provider
                 shot.clip.prompt = take.prompt
                 shot.clip.source = take.source
+                shot.clip.created_at = take_timestamp
             else:
                 db.add(
                     ShotClip(
@@ -2509,6 +2547,7 @@ def select_shot_take(
                         source=take.source,
                         provider=take.provider,
                         prompt=take.prompt,
+                        created_at=take_timestamp,
                     )
                 )
         variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == take.aspect_ratio), None)
@@ -2518,7 +2557,7 @@ def select_shot_take(
             variant.provider = take.provider
             variant.prompt = take.prompt
             variant.source = take.source
-            variant.created_at = now()
+            variant.created_at = take_timestamp
         else:
             db.add(
                 ShotMediaVariant(
@@ -2530,12 +2569,14 @@ def select_shot_take(
                     source=take.source,
                     provider=take.provider,
                     prompt=take.prompt,
+                    created_at=take_timestamp,
                 )
             )
         conv_url = getattr(take, "conversation_url", None) or (take.settings or {}).get("conversation_url")
         if conv_url:
             shot.conversation_url = conv_url
-        from .final_cut import invalidate_final_cut
+        if project.timeline and not promote_available_clips(project, db):
+            project.timeline.revision += 1
         invalidate_final_cut(project, db)
 
     db.commit()

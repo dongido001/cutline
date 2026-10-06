@@ -19,6 +19,10 @@ const props = defineProps<{
   aspect: AspectRatio
 }>()
 
+const emit = defineEmits<{
+  (e: 'play-take', take: ShotTake): void
+}>()
+
 const store = useStudioStore()
 const activeTab = ref<'clip' | 'image'>('clip')
 const selectingTakeId = ref<string | null>(null)
@@ -107,18 +111,124 @@ function providerLabel(provider: string): string {
   return map[provider] || provider || 'AI Generated'
 }
 
-async function handleSelectTake(take: ShotTake) {
-  if (take.selected || selectingTakeId.value) return
-  selectingTakeId.value = take.id
-  try {
-    if (props.shot.takes) {
-      for (const t of props.shot.takes) {
-        if (t.media_type === take.media_type && t.aspect_ratio === take.aspect_ratio) {
-          t.selected = (t.id === take.id)
+function handleThumbMouseEnter(event: MouseEvent, takeId: string) {
+  previewHoverTakeId.value = takeId
+  const video = event.currentTarget as HTMLVideoElement | null
+  if (video) {
+    video.currentTime = 0
+    void video.play().catch(() => undefined)
+  }
+}
+
+function handleThumbMouseLeave(event: MouseEvent) {
+  previewHoverTakeId.value = null
+  const video = event.currentTarget as HTMLVideoElement | null
+  if (video) {
+    video.pause()
+    video.currentTime = 0
+  }
+}
+
+function applyOptimisticTakeSelection(take: ShotTake) {
+  if (props.shot.takes) {
+    for (const t of props.shot.takes) {
+      if (t.media_type === take.media_type && t.aspect_ratio === take.aspect_ratio) {
+        t.selected = t.id === take.id
+      }
+    }
+  }
+  const normalizedSource: 'generated' | 'uploaded' = take.source === 'uploaded' ? 'uploaded' : 'generated'
+  const isLegacyAspect = store.currentProject?.aspect_ratio === take.aspect_ratio
+  if (take.media_type === 'clip') {
+    if (isLegacyAspect) {
+      props.shot.selected_clip_take_id = take.id
+      if (props.shot.clip) {
+        props.shot.clip.url = take.url
+        props.shot.clip.mime_type = take.mime_type
+        props.shot.clip.source = normalizedSource
+        props.shot.clip.provider = take.provider
+        props.shot.clip.prompt = take.prompt
+        props.shot.clip.created_at = take.created_at
+      } else {
+        props.shot.clip = {
+          id: take.id,
+          url: take.url,
+          mime_type: take.mime_type,
+          source: normalizedSource,
+          provider: take.provider,
+          prompt: take.prompt,
+          created_at: take.created_at,
         }
       }
     }
+  } else if (take.media_type === 'image') {
+    if (isLegacyAspect) {
+      props.shot.selected_image_take_id = take.id
+      if (props.shot.image) {
+        props.shot.image.url = take.url
+        props.shot.image.mime_type = take.mime_type
+        props.shot.image.source = normalizedSource
+        props.shot.image.provider = take.provider
+        props.shot.image.prompt = take.prompt
+        props.shot.image.created_at = take.created_at
+      } else {
+        props.shot.image = {
+          id: take.id,
+          url: take.url,
+          mime_type: take.mime_type,
+          source: normalizedSource,
+          provider: take.provider,
+          prompt: take.prompt,
+          created_at: take.created_at,
+        }
+      }
+    }
+  }
+  if (take.media_type === 'clip' || take.media_type === 'image') {
+    const existingVariant = props.shot.media_variants?.find(
+      (item) => item.media_type === take.media_type && item.aspect_ratio === take.aspect_ratio
+    )
+    if (existingVariant) {
+      existingVariant.url = take.url
+      existingVariant.mime_type = take.mime_type
+      existingVariant.source = normalizedSource
+      existingVariant.provider = take.provider
+      existingVariant.prompt = take.prompt
+      existingVariant.created_at = take.created_at
+    } else if (props.shot.media_variants) {
+      props.shot.media_variants.push({
+        id: take.id,
+        media_type: take.media_type,
+        aspect_ratio: take.aspect_ratio as AspectRatio,
+        url: take.url,
+        mime_type: take.mime_type,
+        source: normalizedSource,
+        provider: take.provider,
+        prompt: take.prompt,
+        created_at: take.created_at,
+      })
+    }
+  }
+}
+
+async function handleSelectTake(take: ShotTake) {
+  if (selectingTakeId.value) return
+  if (take.selected) {
+    if (take.media_type === 'clip') {
+      emit('play-take', take)
+    }
+    return
+  }
+  selectingTakeId.value = take.id
+  try {
+    applyOptimisticTakeSelection(take)
+    if (take.media_type === 'clip') {
+      emit('play-take', take)
+    }
     await store.selectShotTake(props.shot.id, take.id)
+    if (take.media_type === 'clip') {
+      emit('play-take', take)
+    }
   } catch (err) {
     console.error('Failed to select take:', err)
   } finally {
@@ -180,11 +290,12 @@ async function handleSelectTake(take: ShotTake) {
             v-if="take.media_type === 'clip'"
             :src="take.url"
             muted
+            loop
             playsinline
             preload="metadata"
             class="take-media"
-            @mouseenter="previewHoverTakeId = take.id"
-            @mouseleave="previewHoverTakeId = null"
+            @mouseenter="handleThumbMouseEnter($event, take.id)"
+            @mouseleave="handleThumbMouseLeave($event)"
           ></video>
           <img
             v-else

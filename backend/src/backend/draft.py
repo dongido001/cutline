@@ -331,6 +331,14 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                         prompt=prompt,
                     )
                 )
+            image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == aspect), None)
+            if image_variant:
+                image_variant.filename = filename
+                image_variant.mime_type = mime_type
+                image_variant.source = "generated"
+                image_variant.provider = provider
+                image_variant.prompt = prompt
+                image_variant.created_at = now()
             record_take(
                 db,
                 shot,
@@ -346,7 +354,7 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
             shot.status = "image_ready"
             db.commit()
             if previous and previous != filename:
-                delete_media_file(previous)
+                delete_media_file(previous, db=db)
         except Exception as exc:  # noqa: BLE001
             attention.append(f"{shot.title or shot.id}: image failed ({exc})")
             db.rollback()
@@ -463,6 +471,14 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                         prompt=prompt,
                     )
                 )
+            clip_variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == aspect), None)
+            if clip_variant:
+                clip_variant.filename = filename
+                clip_variant.mime_type = mime_type
+                clip_variant.source = "generated"
+                clip_variant.provider = provider
+                clip_variant.prompt = prompt
+                clip_variant.created_at = now()
             record_take(
                 db,
                 shot,

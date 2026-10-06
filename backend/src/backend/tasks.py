@@ -541,14 +541,14 @@ def _generate_shot_image(
                         prompt=prompt,
                     )
                 )
-            elif variant:
+            if variant:
                 variant.filename = filename
                 variant.mime_type = mime_type
                 variant.source = "generated"
                 variant.provider = provider
                 variant.prompt = prompt
                 variant.created_at = now()
-            else:
+            elif not use_legacy:
                 db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=prompt))
             record_take(
                 db,
@@ -953,6 +953,7 @@ def _generate_shot_clip(
                 shot.clip.source = "generated"
                 shot.clip.provider = provider
                 shot.clip.prompt = effective_prompt
+                shot.clip.created_at = now()
             elif use_legacy:
                 shot.clip = ShotClip(
                     shot_id=shot.id,
@@ -962,14 +963,14 @@ def _generate_shot_clip(
                     provider=provider,
                     prompt=effective_prompt,
                 )
-            elif variant:
+            if variant:
                 variant.filename = filename
                 variant.mime_type = mime_type
                 variant.source = "generated"
                 variant.provider = provider
                 variant.prompt = effective_prompt
                 variant.created_at = now()
-            else:
+            elif not use_legacy:
                 shot.media_variants.append(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
             record_take(
                 db,

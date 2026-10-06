@@ -295,9 +295,20 @@ function geometryFor(item: { source?: TimelineSource | null; variant: Partial<Re
 }
 
 function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
-  const native = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === targetAspect.value)
-  if (native) return { media: native, native: true }
+  const nativeVariant = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === targetAspect.value)
   const legacy = mediaType === 'clip' ? shot.clip : shot.image
+  const hasNativeSlot = Boolean(nativeVariant || (props.project.aspect_ratio === targetAspect.value && legacy))
+  const selectedId = mediaType === 'clip' ? shot.selected_clip_take_id : shot.selected_image_take_id
+  const activeTake = hasNativeSlot
+    ? shot.takes?.find(
+        (t) =>
+          t.media_type === mediaType &&
+          t.aspect_ratio === targetAspect.value &&
+          (t.selected || (selectedId && t.id === selectedId))
+      )
+    : null
+  if (activeTake) return { media: activeTake, native: true }
+  if (nativeVariant) return { media: nativeVariant, native: true }
   if (legacy) return { media: legacy, native: props.project.aspect_ratio === targetAspect.value }
   const fallback = shot.media_variants.find((item) => item.media_type === mediaType)
   return fallback ? { media: fallback, native: false } : null
@@ -1135,6 +1146,26 @@ watch(variant, async () => {
   await startActiveVideo()
 })
 watch(activeIndex, () => void startActiveVideo())
+watch(
+  () => activeMedia.value?.url,
+  async (newUrl, oldUrl) => {
+    if (!newUrl || newUrl === oldUrl) return
+    await nextTick()
+    const video = previewVideo.value
+    if (video && activeMedia.value?.mime_type.startsWith('video')) {
+      try {
+        video.load?.()
+      } catch {
+        // Ignore in non-browser/jsdom environments
+      }
+      if (playing.value) {
+        void startActiveVideo()
+      } else {
+        syncVideo()
+      }
+    }
+  }
+)
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!target || !(target instanceof HTMLElement)) return false
   if (target.isContentEditable) return true
