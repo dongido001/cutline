@@ -371,6 +371,7 @@ const selectedShotVideoPrompt = computed(() => selectedShot.value
   ? buildShotVideoPrompt(selectedShot.value, selectedShotScene.value, selectedCast.value, mediaAspect.value)
   : '')
 const copiedShotPrompt = ref(false)
+const includeCastRefsInVideo = ref(false)
 
 function imageJobForShot(shotId: string) {
   return store.imageJobs[shotId] ?? null
@@ -463,6 +464,12 @@ watch(
     syncContinuityDrafts()
   },
   { immediate: true },
+)
+watch(
+  () => selectedShot.value?.id,
+  () => {
+    includeCastRefsInVideo.value = false
+  },
 )
 watch(
   () => [selectedShot.value?.id, castCharacters.value.map((character) => `${character.id}:${character.references.length}`).join('|')] as const,
@@ -1552,10 +1559,11 @@ async function generateShotClip() {
   const projectId = store.currentProject.id
   const episodeId = store.currentEpisodeId
   const aspectRatio = mediaAspect.value
+  const useCastRefs = includeCastRefsInVideo.value
   const input = { ...shotDraft, character_ids: [...selectedCharacterIds.value] }
   try {
     await store.updateShot(shotId, input)
-    await store.generateShotClip(shotId, aspectRatio, projectId, episodeId)
+    await store.generateShotClip(shotId, aspectRatio, projectId, episodeId, useCastRefs)
   } catch {
     // The store exposes the provider or workflow error in the workspace.
   }
@@ -2311,6 +2319,18 @@ function formatRenderedAt(value: string) {
                     <small v-if="!character.references.length">no ref</small>
                   </button>
                 </div>
+                <label
+                  v-if="selectedCharacterIds.length"
+                  class="video-cast-ref-toggle"
+                  title="Default (unchecked) locks Frame 1 strictly. Check this when a tagged character enters mid-shot and is not visible in the opening frame so Cutline also sends their Cast portrait image to Google Flow."
+                >
+                  <input
+                    v-model="includeCastRefsInVideo"
+                    type="checkbox"
+                    :disabled="store.isProcessingClip(selectedShot.id)"
+                  />
+                  <span>Also send cast portrait(s) when generating video (for off-screen entrances)</span>
+                </label>
               </div>
 
               <div class="storyboard-actions">
@@ -4005,6 +4025,22 @@ input::placeholder { color: #68716c; }
 .episode-setting-title-input:focus {
   border-color: var(--line-default);
   outline: none;
+}
+
+.video-cast-ref-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.video-cast-ref-toggle input[type="checkbox"] {
+  accent-color: #eb6554;
+  cursor: pointer;
 }
 
 @media (max-width: 640px) {

@@ -440,3 +440,92 @@ def test_flowkit_reuses_and_reports_project_scoped_flow_project_id(monkeypatch, 
     assert seen_upload_projects[-1] == "flow-proj-ep1"
     assert seen_generate_projects[-1] == "flow-proj-ep1"
 
+
+def test_flowkit_with_reference_images_uses_generate_video_refs(monkeypatch, tmp_path):
+    from backend import video
+
+    uploaded_files: list[str] = []
+    submitted_endpoint: list[str] = []
+    submitted_payload: dict = {}
+
+    class FakeResponse:
+        def __init__(self, payload=None, content=b"video-bytes", status_code=200):
+            self._payload = payload or {}
+            self.content = content
+            self.headers = {"content-type": "video/mp4"}
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise video.httpx.HTTPStatusError("err", request=None, response=self)
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, json=None):
+            if url.endswith("/upload-image"):
+                fname = json.get("file_name", "")
+                uploaded_files.append(fname)
+                return FakeResponse(
+                    {
+                        "media_id": f"media-{fname}",
+                        "project_id": "flow-proj-1",
+                    }
+                )
+            if url.endswith("/generate-video-refs") or url.endswith("/generate-video"):
+                submitted_endpoint.append(url)
+                submitted_payload.update(json or {})
+                return FakeResponse(
+                    {
+                        "project_id": "flow-proj-1",
+                        "operations": [{"name": "op-refs-1"}],
+                    }
+                )
+            if url.endswith("/check-status"):
+                return FakeResponse(
+                    {
+                        "done": True,
+                        "results": [
+                            {
+                                "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                                "video_url": "https://example.test/video.mp4",
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(url)
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(video.httpx, "Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(video.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(video.settings, "flowkit_base_url", "http://flowkit.test/api/flow")
+    monkeypatch.setattr(video.settings, "flowkit_project_id", "")
+
+    frame_path = tmp_path / "continuity.png"
+    frame_path.write_bytes(b"frame")
+    rosa_path = tmp_path / "rosa-ref.png"
+    rosa_path.write_bytes(b"rosa")
+
+    video.generate_flowkit_clip(
+        image_path=frame_path,
+        prompt="Rosa enters rear doorway",
+        duration_ms=6000,
+        aspect_ratio="9:16",
+        scene_id="scene-14",
+        reference_image_paths=[rosa_path],
+    )
+
+    assert uploaded_files == ["continuity.png", "rosa-ref.png"]
+    assert submitted_endpoint == ["http://flowkit.test/api/flow/generate-video-refs"]
+    assert submitted_payload["reference_media_ids"] == ["media-continuity.png", "media-rosa-ref.png"]
+
+

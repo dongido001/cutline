@@ -744,7 +744,62 @@ def enqueue_cast_reference(character_id: str, job_id: str, look: str | None = No
     return generate_cast_reference_worker(character_id, job_id, look)
 
 
-def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+def _resolve_video_cast_references(
+    db,
+    project: Project,
+    shot: Shot,
+    continuity_frame,
+    image_ref,
+) -> tuple[list[Path], list[str]]:
+    tagged_ids = [str(cid) for cid in (shot.character_ids or []) if cid]
+    if not tagged_ids:
+        return [], []
+
+    source_shot_id = (
+        getattr(continuity_frame, "source_shot_id", None)
+        or getattr(image_ref, "source_shot_id", None)
+    )
+    candidate_ids = tagged_ids
+    if source_shot_id:
+        source_shot = db.get(Shot, str(source_shot_id))
+        if source_shot:
+            source_char_ids = {str(cid) for cid in (source_shot.character_ids or []) if cid}
+            missing_ids = [cid for cid in tagged_ids if cid not in source_char_ids]
+            if missing_ids:
+                candidate_ids = missing_ids
+
+    characters = list(
+        db.scalars(
+            select(Character)
+            .where(Character.project_id == project.id, Character.id.in_(candidate_ids))
+            .options(selectinload(Character.references))
+        ).all()
+    )
+    by_id = {char.id: char for char in characters}
+    ref_paths: list[Path] = []
+    char_names: list[str] = []
+    for cid in candidate_ids:
+        char = by_id.get(cid)
+        if not char or not char.references:
+            continue
+        for ref in char.references:
+            path = settings.media_dir / ref.filename
+            if path.is_file():
+                ref_paths.append(path)
+                char_names.append(char.name)
+                break
+        if len(ref_paths) >= 2:
+            break
+    return ref_paths, char_names
+
+
+def _generate_shot_clip(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    include_cast_references: bool = False,
+) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
         shot = db.get(Shot, shot_id)
@@ -755,6 +810,12 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
         filename = None
         try:
             raise_if_cancelled(db, job_id)
+            if not include_cast_references and job.attempts:
+                include_cast_references = any(
+                    bool(item.get("include_cast_references"))
+                    for item in job.attempts
+                    if isinstance(item, dict)
+                )
             job.status = "running"
             job.progress = 0.1
             provider_name = (settings.video_provider or "runway").strip().lower()
@@ -825,13 +886,32 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                     )
                     if part
                 )
-            take_settings = {
-                "continuity_frame": {
+            cast_ref_paths: list[Path] = []
+            cast_ref_names: list[str] = []
+            if include_cast_references:
+                cast_ref_paths, cast_ref_names = _resolve_video_cast_references(
+                    db, project, shot, continuity_frame, image_ref
+                )
+                if cast_ref_names:
+                    effective_prompt = "\n\n".join(
+                        part
+                        for part in (
+                            effective_prompt,
+                            f"Reference images: Use the first image as the opening scene frame, and use the additional character reference portrait(s) for the exact facial identity, hair, and wardrobe of: {', '.join(cast_ref_names)}.",
+                        )
+                        if part
+                    )
+            take_settings: dict[str, object] = {}
+            if continuity_frame:
+                take_settings["continuity_frame"] = {
                     "source_shot_id": continuity_frame.source_shot_id,
                     "source_shot_title": continuity_frame.source_shot_title,
                     "source_time_ms": continuity_frame.source_time_ms,
                 }
-            } if continuity_frame else None
+            if include_cast_references:
+                take_settings["include_cast_references"] = True
+                if cast_ref_names:
+                    take_settings["cast_reference_characters"] = cast_ref_names
             import inspect
 
             resolved_flow_projects: list[str] = []
@@ -842,6 +922,8 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                     render_kwargs["flow_project_id"] = project.flow_project_id
                 if "on_flow_project_id" in sig.parameters:
                     render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
+                if cast_ref_paths and "reference_image_paths" in sig.parameters:
+                    render_kwargs["reference_image_paths"] = cast_ref_paths
             except (TypeError, ValueError):
                 pass
             filename, mime_type, provider = render_shot_clip(
@@ -899,7 +981,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                 source="generated",
                 provider=provider,
                 prompt=effective_prompt,
-                settings=take_settings,
+                settings=take_settings or None,
             )
             if project.timeline and not promote_available_clips(project, db):
                 project.timeline.revision += 1
@@ -938,18 +1020,39 @@ def compose_video_prompt(prompt: str, sound: str) -> str:
 
 
 @video_huey.task()
-def generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
-    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+def generate_shot_clip(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    include_cast_references: bool = False,
+) -> None:
+    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override, include_cast_references)
 
 
 @video_huey.task()
-def generate_shot_clip_comfy(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None) -> None:
+def generate_shot_clip_comfy(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    include_cast_references: bool = False,
+) -> None:
     """Backward-compatible queue alias for jobs enqueued before the FlowKit routing rename."""
-    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+    _generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override, include_cast_references)
 
 
-def enqueue_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = None, prompt_override: str | None = None):
+def enqueue_shot_clip(
+    shot_id: str,
+    job_id: str,
+    aspect_ratio: str | None = None,
+    prompt_override: str | None = None,
+    include_cast_references: bool = False,
+):
+    if include_cast_references:
+        return generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override, True)
     return generate_shot_clip(shot_id, job_id, aspect_ratio, prompt_override)
+
 
 def _generate_shot_lipsync(shot_id: str, job_id: str, aspect_ratio: str | None = None) -> None:
     with SessionLocal() as db:

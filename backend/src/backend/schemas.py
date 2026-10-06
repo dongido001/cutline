@@ -411,6 +411,11 @@ class ShotImageGenerateRequest(BaseModel):
     use_default_image_reference: bool = False
 
 
+class ShotClipGenerateRequest(BaseModel):
+    include_cast_references: bool = False
+
+
+
 class PublishProviderStatus(BaseModel):
     id: Literal["youtube", "facebook"]
     label: str

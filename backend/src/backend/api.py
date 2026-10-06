@@ -53,6 +53,7 @@ from .schemas import (
     PublishRecordRead,
     SceneRead,
     SceneUpdate,
+    ShotClipGenerateRequest,
     ShotImageGenerateRequest,
     ShotCreate,
     ShotRead,
@@ -924,9 +925,14 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
     elif job.kind == "shot_clip":
         shot_id = job.attempts[0].get("shot_id") if job.attempts else None
         aspect_ratio = job.attempts[0].get("aspect_ratio") if job.attempts else "16:9"
+        include_cast_refs = bool(job.attempts[0].get("include_cast_references")) if job.attempts else False
         if not shot_id:
             raise HTTPException(status_code=400, detail="Cannot retry: missing shot information")
-        task = enqueue_shot_clip(shot_id, job.id, aspect_ratio)
+        task = (
+            enqueue_shot_clip(shot_id, job.id, aspect_ratio, include_cast_references=True)
+            if include_cast_refs
+            else enqueue_shot_clip(shot_id, job.id, aspect_ratio)
+        )
     elif job.kind == "create_draft":
         variant = job.attempts[0].get("variant", "landscape") if job.attempts else "landscape"
         task = enqueue_create_draft(job.project_id, job.id, variant, retry_failed_only=True)
@@ -1802,7 +1808,12 @@ def delete_shot_image(shot_id: str, aspect_ratio: str | None = None, db: Session
     response_model=JobRead,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session = Depends(get_db)) -> Job:
+def queue_shot_clip(
+    shot_id: str,
+    aspect_ratio: str | None = None,
+    payload: ShotClipGenerateRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> Job:
     shot = db.get(Shot, shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
@@ -1833,15 +1844,23 @@ def queue_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session =
                for attempt in (existing.attempts or [])):
             db.commit()
             return existing
+    include_cast_refs = bool(payload and payload.include_cast_references)
+    attempt_meta: dict[str, Any] = {"shot_id": shot.id, "aspect_ratio": target_aspect}
+    if include_cast_refs:
+        attempt_meta["include_cast_references"] = True
     job = Job(
         project_id=project.id,
         kind="shot_clip",
         message="Queued",
-        attempts=[{"shot_id": shot.id, "aspect_ratio": target_aspect}],
+        attempts=[attempt_meta],
     )
     db.add(job)
     db.commit()
-    task = enqueue_shot_clip(shot.id, job.id, target_aspect)
+    task = (
+        enqueue_shot_clip(shot.id, job.id, target_aspect, include_cast_references=True)
+        if include_cast_refs
+        else enqueue_shot_clip(shot.id, job.id, target_aspect)
+    )
     job.task_id = task.id
     db.commit()
     db.refresh(job)

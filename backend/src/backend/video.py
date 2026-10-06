@@ -104,6 +104,7 @@ def generate_flowkit_clip(
     scene_id: str | None = None,
     flow_project_id: str | None = None,
     on_flow_project_id: Any = None,
+    reference_image_paths: list[Path] | None = None,
 ) -> tuple[str, str, str]:
     if not scene_id:
         raise RuntimeError("FlowKit video generation requires a scene_id")
@@ -155,17 +156,51 @@ def generate_flowkit_clip(
         if not media_id:
             raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded}")
 
-        payload = {
-            "start_image_media_id": media_id,
-            "prompt": prompt,
-            "project_id": project_id,
-            "scene_id": scene_id,
-            "duration_s": duration_s,
-            "resolution": "720p",
-            "aspect_ratio": flow_aspect_ratio,
-            "model_family": settings.flowkit_model_family,
-        }
-        submit = client.post(f"{base_url}/generate-video", json=payload)
+        extra_media_ids: list[str] = []
+        for ref_path in (reference_image_paths or [])[:2]:
+            if not ref_path or not ref_path.is_file():
+                continue
+            ref_mime = mimetypes.guess_type(ref_path.name)[0] or "image/png"
+            ref_b64 = base64.b64encode(ref_path.read_bytes()).decode("ascii")
+            ref_upload = client.post(
+                f"{base_url}/upload-image",
+                json={
+                    "image_base64": ref_b64,
+                    "mime_type": ref_mime,
+                    "file_name": ref_path.name,
+                    "project_id": project_id,
+                },
+            )
+            ref_upload.raise_for_status()
+            ref_uploaded = ref_upload.json()
+            ref_media_id = ref_uploaded.get("media_id")
+            if ref_media_id:
+                extra_media_ids.append(str(ref_media_id))
+
+        if extra_media_ids:
+            payload = {
+                "reference_media_ids": [media_id, *extra_media_ids],
+                "prompt": prompt,
+                "project_id": project_id,
+                "scene_id": scene_id,
+                "duration_s": duration_s,
+                "resolution": "720p",
+                "aspect_ratio": flow_aspect_ratio,
+                "model_family": settings.flowkit_model_family,
+            }
+            submit = client.post(f"{base_url}/generate-video-refs", json=payload)
+        else:
+            payload = {
+                "start_image_media_id": media_id,
+                "prompt": prompt,
+                "project_id": project_id,
+                "scene_id": scene_id,
+                "duration_s": duration_s,
+                "resolution": "720p",
+                "aspect_ratio": flow_aspect_ratio,
+                "model_family": settings.flowkit_model_family,
+            }
+            submit = client.post(f"{base_url}/generate-video", json=payload)
         try:
             submit.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -310,10 +345,11 @@ def generate_shot_clip(
     scene_id: str | None = None,
     flow_project_id: str | None = None,
     on_flow_project_id: Any = None,
+    reference_image_paths: list[Path] | None = None,
 ) -> tuple[str, str, str]:
     provider = (settings.video_provider or "runway").strip().lower()
     if provider == "flowkit":
-        if flow_project_id is None and on_flow_project_id is None:
+        if flow_project_id is None and on_flow_project_id is None and not reference_image_paths:
             return generate_flowkit_clip(
                 image_path,
                 prompt,
@@ -321,18 +357,24 @@ def generate_shot_clip(
                 aspect_ratio,
                 scene_id=scene_id,
             )
+        extra_kwargs: dict[str, Any] = {
+            "scene_id": scene_id,
+            "flow_project_id": flow_project_id,
+            "on_flow_project_id": on_flow_project_id,
+        }
+        if reference_image_paths:
+            extra_kwargs["reference_image_paths"] = reference_image_paths
         return generate_flowkit_clip(
             image_path,
             prompt,
             duration_ms,
             aspect_ratio,
-            scene_id=scene_id,
-            flow_project_id=flow_project_id,
-            on_flow_project_id=on_flow_project_id,
+            **extra_kwargs,
         )
     if provider == "runway":
         return generate_runway_clip(image_path, prompt, duration_ms, aspect_ratio)
     return generate_comfyui_clip(image_path, prompt, duration_ms, aspect_ratio)
+
 
 
 def generate_comfyui_clip(

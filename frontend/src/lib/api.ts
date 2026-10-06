@@ -815,8 +815,13 @@ export const api = {
   },
   deleteShotContinuityFrame: (id: string, aspectRatio: AspectRatio) =>
     request<void>(`/api/shots/${id}/continuity-frame?aspect_ratio=${encodeURIComponent(aspectRatio)}`, { method: 'DELETE' }),
-  generateShotClip: (id: string, aspectRatio?: AspectRatio) =>
-    request<Job>(`/api/shots/${id}/clip/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, { method: 'POST' }),
+  generateShotClip: (id: string, aspectRatio?: AspectRatio, includeCastReferences = false) =>
+    request<Job>(
+      `/api/shots/${id}/clip/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`,
+      includeCastReferences
+        ? { method: 'POST', body: JSON.stringify({ include_cast_references: true }) }
+        : { method: 'POST' },
+    ),
   uploadShotClip: (id: string, file: File, aspectRatio?: AspectRatio) => {
     const body = new FormData()
     body.append('file', file)

@@ -1072,7 +1072,13 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function generateShotClip(id: string, aspectRatio?: AspectRatio, originatingProjectId?: string, originatingEpisodeId?: string | null) {
+  async function generateShotClip(
+    id: string,
+    aspectRatio?: AspectRatio,
+    originatingProjectId?: string,
+    originatingEpisodeId?: string | null,
+    includeCastReferences = false,
+  ) {
     const projectId = originatingProjectId || currentProject.value?.id
     if (!projectId) return
     const episodeId = originatingEpisodeId === undefined ? currentEpisodeId.value : originatingEpisodeId
@@ -1080,7 +1086,9 @@ export const useStudioStore = defineStore('studio', () => {
     beginClipProcessing(id, projectId)
     let job: Job | null = null
     try {
-      job = await api.generateShotClip(id, aspectRatio)
+      job = includeCastReferences
+        ? await api.generateShotClip(id, aspectRatio, true)
+        : await api.generateShotClip(id, aspectRatio)
       const initialJob = withQueueLabel(job)
       setProjectClipJob(projectId, id, initialJob)
       const finalJob = await watchJob(job.id, (next) => {
