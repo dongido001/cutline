@@ -47,12 +47,14 @@ JOB_COLUMNS = {
     "episode_id": "VARCHAR",
 }
 CHARACTER_COLUMNS = {
+    "voice_description": "TEXT NOT NULL DEFAULT ''",
     "voice_provider": "VARCHAR(40) NOT NULL DEFAULT 'vibevoice'",
     "voice_id": "VARCHAR(120)",
     "voice_settings": "JSON NOT NULL DEFAULT '{}'",
 }
 PROJECT_COLUMNS = {
     "image_conversation_url": "TEXT",
+    "flow_project_id": "VARCHAR(120)",
     "episode_label": "VARCHAR(32) NOT NULL DEFAULT 'Episode'",
 }
 SCRIPT_VERSION_COLUMNS = {
@@ -231,6 +233,7 @@ def migrate_schema(engine: Engine) -> None:
     _ensure_columns(engine, "project_variant_exports", VARIANT_EXPORT_COLUMNS)
     _relax_single_timeline_constraints(engine)
     _backfill_episodes(engine)
+    _ensure_deep_review_runs(engine)
 
 
 def _group_legacy_structured_shots(engine: Engine) -> None:
@@ -559,3 +562,51 @@ def _backfill_episodes(engine: Engine) -> None:
                 ),
                 {"ep_id": ep_id, "proj_id": p["id"]},
             )
+
+
+def _ensure_deep_review_runs(engine: Engine) -> None:
+    if "script_versions" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS deep_review_runs (
+                    id VARCHAR NOT NULL PRIMARY KEY,
+                    script_version_id VARCHAR NOT NULL REFERENCES script_versions(id) ON DELETE CASCADE,
+                    job_id VARCHAR NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                    provider VARCHAR(40) NOT NULL,
+                    input_fingerprint VARCHAR(64) NOT NULL,
+                    input_context JSON NOT NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                    report JSON,
+                    error TEXT,
+                    draft_job_id VARCHAR,
+                    draft_finding_id VARCHAR,
+                    applied_version_id VARCHAR,
+                    undo_version_id VARCHAR,
+                    timeline_before JSON,
+                    timeline_after JSON,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_deep_review_runs_script_version_id ON deep_review_runs (script_version_id)"
+            )
+        )
+    _ensure_columns(
+        engine,
+        "deep_review_runs",
+        {
+            "draft_job_id": "VARCHAR",
+            "draft_finding_id": "VARCHAR",
+            "applied_version_id": "VARCHAR",
+            "undo_version_id": "VARCHAR",
+            "timeline_before": "JSON",
+            "timeline_after": "JSON",
+        },
+    )
+

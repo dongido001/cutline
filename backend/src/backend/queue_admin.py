@@ -3,9 +3,9 @@
 QUEUE_JOB_KINDS: dict[str, list[str]] = {
     "image": ["shot_image", "cast_reference"],
     "video": ["shot_clip", "shot_lipsync", "final_cut", "create_draft", "publish"],
-    "chatgpt": ["script_analysis", "script_continuation"],
-    "gemini": ["script_analysis", "script_continuation"],
-    "general": ["script_analysis", "script_continuation", "analyze_script", "generate_shot_image"],
+    "chatgpt": ["script_analysis", "script_continuation", "deep_review", "deep_review_draft"],
+    "gemini": ["script_analysis", "script_continuation", "deep_review", "deep_review_draft"],
+    "general": ["script_analysis", "script_continuation", "deep_review", "deep_review_draft", "analyze_script", "generate_shot_image"],
 }
 
 

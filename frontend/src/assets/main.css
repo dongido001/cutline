@@ -101,7 +101,7 @@
 .progress-step.current span { background: var(--ink); border-color: var(--ink); color: var(--panel); }
 .progress-line { width: clamp(24px, 5vw, 74px); height: 1px; margin: 0 9px; background: var(--line); }
 .progress-line.complete { background: var(--success); }
-.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(360px, 1fr) 300px; }
+.review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(360px, 1fr) 360px; }
 .shot-plan-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0, 1fr); background: var(--workspace-bg); }
 .shot-browser { min-height: calc(100vh - 194px); overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
 .shot-browser-heading { min-height: 60px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
@@ -270,10 +270,10 @@
 .scene-production div { display: flex; flex-direction: column; gap: 3px; }
 .scene-production span { color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .scene-production strong { font-size: 10px; color: var(--ink); }
-.suggestions-panel { border-left: 1px solid var(--line); }
+.suggestions-panel { border-left: 1px solid var(--line); overflow-y: auto; max-height: calc(100vh - 194px); }
 .suggestions-heading { height: 60px; }
 .review-badge { padding: 4px 6px; display: flex; align-items: center; gap: 4px; border-radius: 3px; background: rgba(73, 169, 120, 0.14); color: var(--success); font-size: 8px; font-weight: 700; }
-.suggestion-list { padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow: auto; max-height: calc(100vh - 254px); }
+.suggestion-list { padding: 10px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); }
 .suggestion { padding: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2, #191e1b); box-shadow: var(--shadow); color: var(--ink); }
 .suggestion.accepted { opacity: .62; border-color: rgba(73, 169, 120, 0.35); }
 .suggestion.rejected { opacity: .5; }

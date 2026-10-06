@@ -102,6 +102,8 @@ def generate_flowkit_clip(
     duration_ms: int,
     aspect_ratio: str,
     scene_id: str | None = None,
+    flow_project_id: str | None = None,
+    on_flow_project_id: Any = None,
 ) -> tuple[str, str, str]:
     if not scene_id:
         raise RuntimeError("FlowKit video generation requires a scene_id")
@@ -119,6 +121,7 @@ def generate_flowkit_clip(
         duration_s = requested_duration_s
     mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
     image_base64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    initial_project_id = (flow_project_id or "").strip() or settings.flowkit_project_id
 
     with httpx.Client(timeout=settings.flowkit_timeout_seconds) as client:
         upload = client.post(
@@ -127,13 +130,28 @@ def generate_flowkit_clip(
                 "image_base64": image_base64,
                 "mime_type": mime_type,
                 "file_name": image_path.name,
-                "project_id": settings.flowkit_project_id,
+                "project_id": initial_project_id,
             },
         )
+        if (
+            getattr(upload, "status_code", 200) >= 400
+            and flow_project_id
+            and not settings.flowkit_project_id
+        ):
+            initial_project_id = ""
+            upload = client.post(
+                f"{base_url}/upload-image",
+                json={
+                    "image_base64": image_base64,
+                    "mime_type": mime_type,
+                    "file_name": image_path.name,
+                    "project_id": "",
+                },
+            )
         upload.raise_for_status()
         uploaded = upload.json()
         media_id = uploaded.get("media_id")
-        project_id = uploaded.get("project_id") or settings.flowkit_project_id
+        project_id = uploaded.get("project_id") or initial_project_id
         if not media_id:
             raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded}")
 
@@ -168,8 +186,10 @@ def generate_flowkit_clip(
             submitted.get("project_id")
             or polling.get("project_id")
             or project_id
-            or settings.flowkit_project_id
+            or initial_project_id
         )
+        if project_id and callable(on_flow_project_id):
+            on_flow_project_id(str(project_id))
         if not operations and not workflows:
             raise RuntimeError(f"FlowKit returned no operation/workflow: {submitted}")
 
@@ -288,15 +308,27 @@ def generate_shot_clip(
     duration_ms: int,
     aspect_ratio: str,
     scene_id: str | None = None,
+    flow_project_id: str | None = None,
+    on_flow_project_id: Any = None,
 ) -> tuple[str, str, str]:
     provider = (settings.video_provider or "runway").strip().lower()
     if provider == "flowkit":
+        if flow_project_id is None and on_flow_project_id is None:
+            return generate_flowkit_clip(
+                image_path,
+                prompt,
+                duration_ms,
+                aspect_ratio,
+                scene_id=scene_id,
+            )
         return generate_flowkit_clip(
             image_path,
             prompt,
             duration_ms,
             aspect_ratio,
             scene_id=scene_id,
+            flow_project_id=flow_project_id,
+            on_flow_project_id=on_flow_project_id,
         )
     if provider == "runway":
         return generate_runway_clip(image_path, prompt, duration_ms, aspect_ratio)

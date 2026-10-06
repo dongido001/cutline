@@ -44,6 +44,7 @@ import TimelineEditor from '@/components/TimelineEditor.vue'
 import ImageReferencePanel from '@/components/ImageReferencePanel.vue'
 import ShotTakesPanel from '@/components/ShotTakesPanel.vue'
 import CastManagerModal from '@/components/CastManagerModal.vue'
+import DeepReviewPanel from '@/components/DeepReviewPanel.vue'
 import EpisodeSwitcher from '@/components/EpisodeSwitcher.vue'
 import OriginalScriptModal from '@/components/OriginalScriptModal.vue'
 
@@ -233,6 +234,14 @@ const previousShotId = computed(() => {
   return idx > 0 ? shots[idx - 1]?.id : undefined
 })
 const previousShot = computed(() => allShots.value.find((shot) => shot.id === previousShotId.value))
+const canReferenceEarlier = computed(() => {
+  if (previousShotId.value) return true
+  const curEp = store.currentEpisode
+  if (!curEp) return false
+  return store.episodes.some(
+    (ep) => ep.episode_number < curEp.episode_number && (ep.shot_count ?? 1) > 0,
+  )
+})
 const skipDefaultImageReference = ref(false)
 watch(() => selectedShot.value?.id, () => {
   skipDefaultImageReference.value = false
@@ -246,7 +255,9 @@ const selectedAspectImage = computed(() => {
 const selectedAspectReference = computed(() => {
   const shot = selectedShot.value
   if (!shot) return null
-  return shot.image_references?.find((item) => item.aspect_ratio === mediaAspect.value) ?? null
+  return shot.image_references?.find((item) => item.aspect_ratio === mediaAspect.value)
+    ?? shot.continuity_frames?.find((item) => item.aspect_ratio === mediaAspect.value)
+    ?? null
 })
 const selectedAspectClip = computed(() => {
   const shot = selectedShot.value
@@ -832,6 +843,40 @@ function selectScene(index: number) {
   void router.replace({ query: scene ? { ...route.query, scene: scene.id } : route.query })
 }
 
+const deepReviewRefreshKey = computed(() => {
+  const p = store.currentProject
+  if (!p?.current_version) return ''
+  const shotKey = p.current_version.scenes
+    .map(sc => `${sc.id}:${sc.set_notes}:${sc.lighting_notes}:${sc.wardrobe_notes}:${sc.props_notes}:${sc.shots.map(sh => `${sh.id}:${sh.title}:${sh.framing}:${sh.duration_ms}:${sh.action}:${sh.sound}:${sh.image_prompt}:${sh.video_prompt}:${JSON.stringify(sh.dialogue)}`).join(',')}`)
+    .join('|')
+  const castKey = (p.characters || []).map(c => `${c.id}:${c.name}:${c.notes}`).join('|')
+  return `${p.updated_at}:${shotKey}:${castKey}`
+})
+
+async function handleDeepReviewApplied() {
+  if (!store.currentProject) return
+  await store.loadProject(store.currentProject.id, { episodeId: store.currentEpisodeId || undefined })
+}
+
+async function navigateToReviewShot(shotId: string) {
+  const sceneIndex = scenes.value.findIndex(scene => scene.shots.some(shot => shot.id === shotId))
+  if (sceneIndex >= 0) {
+    selectScene(sceneIndex)
+  }
+  await nextTick()
+  const el = document.getElementById(`review-shot-${shotId}`)
+  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+async function jumpToEpisodeShot(episodeId: string, shotId?: string) {
+  if (episodeId && episodeId !== store.currentEpisodeId) {
+    await store.selectEpisode(episodeId)
+  }
+  if (shotId) {
+    await navigateToReviewShot(shotId)
+  }
+}
+
 function selectShot(id: string, stage: 'shots' | 'clips' = 'shots') {
   activeShotId.value = id
   if (store.currentProject) void router.push(projectRoute(store.currentProject.id, stage, id))
@@ -1216,6 +1261,9 @@ const newEpisodeForm = reactive({
 const projectSettingsForm = reactive({
   title: '',
   episode_label: 'Episode',
+  aspect_ratio: '16:9' as AspectRatio,
+  target_duration_seconds: 60,
+  text_provider: 'mock' as ProjectInput['text_provider'],
 })
 const episodeTitlesForm = reactive<Record<string, string>>({})
 
@@ -1266,14 +1314,26 @@ async function handleCreateEpisodeSubmit() {
 
 function openProjectSettings() {
   showEpisodeDropdown.value = false
+  projectMenuId.value = null
   if (store.currentProject) {
     projectSettingsForm.title = store.currentProject.title
     projectSettingsForm.episode_label = store.currentProject.episode_label || 'Episode'
+    projectSettingsForm.aspect_ratio = store.currentProject.aspect_ratio === '9:16' ? '9:16' : '16:9'
+    projectSettingsForm.target_duration_seconds = store.currentProject.target_duration_seconds ?? 0
+    projectSettingsForm.text_provider = (store.currentProject.text_provider as ProjectInput['text_provider']) || 'mock'
     for (const ep of store.episodes) {
       episodeTitlesForm[ep.id] = ep.title || ''
     }
   }
   showProjectSettingsModal.value = true
+}
+
+async function openProjectSettingsFor(project: ProjectSummary) {
+  projectMenuId.value = null
+  if (store.currentProject?.id !== project.id) {
+    await selectProject(project.id)
+  }
+  openProjectSettings()
 }
 
 async function handleSaveProjectSettings() {
@@ -1282,6 +1342,9 @@ async function handleSaveProjectSettings() {
   await store.updateProjectSettings({
     title: projectSettingsForm.title.trim(),
     episode_label: currentLabel,
+    aspect_ratio: projectSettingsForm.aspect_ratio,
+    target_duration_seconds: projectSettingsForm.target_duration_seconds,
+    text_provider: projectSettingsForm.text_provider,
   })
   for (const ep of store.episodes) {
     const updatedTitle = episodeTitlesForm[ep.id]?.trim()
@@ -1641,7 +1704,8 @@ function formatRenderedAt(value: string) {
               @click.stop="projectMenuId = projectMenuId === project.id ? null : project.id"
             ><MoreHorizontal :size="15" /></button>
             <div v-if="projectMenuId === project.id" class="project-menu" @click.stop>
-              <button @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
+              <button type="button" @click="openProjectSettingsFor(project)"><Settings :size="14" />Project settings</button>
+              <button type="button" class="danger-item" @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
             </div>
           </div>
           <button v-if="!store.projects.length" class="project-item project-empty-action" :disabled="store.busy" @click="loadDemoProject">
@@ -1669,7 +1733,7 @@ function formatRenderedAt(value: string) {
           <span class="status-dot" :class="{ muted: !activeProvider?.available }"></span>
           {{ activeProvider?.available ? 'Connected' : 'Not connected' }}
         </span>
-        <button @click="showCreate = true">Configure</button>
+        <button @click="store.currentProject ? openProjectSettings() : (showCreate = true)">Configure</button>
       </div>
     </aside>
 
@@ -1789,9 +1853,9 @@ function formatRenderedAt(value: string) {
             </div>
           </div>
 
-          <article class="screenplay">
+          <article :id="selectedScene.shots.length === 1 && selectedScene.shots[0] ? `review-shot-${selectedScene.shots[0].id}` : undefined" class="screenplay">
             <template v-if="selectedScene.shots.length > 1">
-              <section v-for="(shot, shotIndex) in selectedScene.shots" :key="shot.id" class="screenplay-shot">
+              <section v-for="(shot, shotIndex) in selectedScene.shots" :key="shot.id" :id="`review-shot-${shot.id}`" class="screenplay-shot">
                 <header><span>Shot {{ String(shotIndex + 1).padStart(2, '0') }}</span><strong>{{ shot.title }}</strong><small>{{ shotTime(shot) }}</small></header>
                 <p class="action-text">{{ shot.action || 'No visual action has been provided for this shot.' }}</p>
                 <div v-for="line in shot.dialogue" :key="`${shot.id}-${line.character}-${line.text}`" class="dialogue-block">
@@ -1845,6 +1909,16 @@ function formatRenderedAt(value: string) {
             </article>
             <div v-if="!suggestions.length" class="empty-review"><Check :size="20" /><strong>Review complete</strong><span>No open suggestions remain.</span></div>
           </div>
+
+          <DeepReviewPanel
+            v-if="store.currentProject?.current_version"
+            :version-id="store.currentProject.current_version.id"
+            :episode-id="store.currentEpisodeId"
+            :refresh-key="deepReviewRefreshKey"
+            @applied="handleDeepReviewApplied"
+            @navigate="navigateToReviewShot"
+            @jump="jumpToEpisodeShot"
+          />
         </aside>
       </div>
 
@@ -1914,6 +1988,7 @@ function formatRenderedAt(value: string) {
                   class="secondary-button"
                   type="button"
                   :disabled="castingBusy || !castCharacters.some((character) => !character.references.length) || !imageGenerationAvailable"
+                  :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : 'Generate reference portraits for characters missing a face'"
                   @click="generateMissingCastFaces"
                 >
                   <Sparkles :size="15" />Generate missing faces
@@ -1943,7 +2018,13 @@ function formatRenderedAt(value: string) {
                   <button type="button" class="ghost-link" @click="openCastManager(character.id)">
                     Manage
                   </button>
-                  <button type="button" class="ghost-link" :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable" @click="generateCastFace(character)">
+                  <button
+                    type="button"
+                    class="ghost-link"
+                    :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable"
+                    :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : `Generate face reference for ${character.name}`"
+                    @click="generateCastFace(character)"
+                  >
                     {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add face' : 'Generate' }}
                   </button>
                 </div>
@@ -2240,6 +2321,7 @@ function formatRenderedAt(value: string) {
                 <button
                   class="primary-button"
                   :disabled="store.isProcessingClip(selectedShot.id) || (!selectedAspectImage && !selectedAspectReference) || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  :title="(!selectedAspectImage && !selectedAspectReference) ? `Generate or upload a ${mediaAspect} image or reference frame first` : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : undefined"
                   @click="beginRegenerateClip"
                 >
                   <Video :size="15" />
@@ -2345,6 +2427,7 @@ function formatRenderedAt(value: string) {
               :aspect="mediaAspect"
               :previous-shot="previousShot"
               :project-aspect="(store.currentProject?.aspect_ratio as AspectRatio | undefined)"
+              :can-reference-earlier="canReferenceEarlier"
               v-model:skip-default="skipDefaultImageReference"
             />
 
@@ -2614,6 +2697,36 @@ function formatRenderedAt(value: string) {
           required
         />
       </div>
+
+      <div class="form-grid">
+        <label>
+          Aspect ratio
+          <select v-model="projectSettingsForm.aspect_ratio">
+            <option value="16:9">Landscape 16:9</option>
+            <option value="9:16">Portrait 9:16</option>
+          </select>
+        </label>
+        <label>
+          Target length (optional)
+          <select v-model.number="projectSettingsForm.target_duration_seconds">
+            <option :value="0">Automatic from script</option>
+            <option :value="30">30 seconds</option>
+            <option :value="60">1 minute</option>
+            <option :value="180">3 minutes</option>
+            <option :value="300">5 minutes</option>
+          </select>
+        </label>
+      </div>
+
+      <label>
+        Text provider
+        <select v-model="projectSettingsForm.text_provider">
+          <option v-for="provider in store.providers" :key="provider.id" :value="provider.id" :disabled="!provider.available && provider.id !== projectSettingsForm.text_provider">
+            {{ provider.label }} · {{ provider.model }}{{ provider.available ? '' : ' (offline)' }}
+          </option>
+          <option v-if="!store.providers.length" value="mock">Prototype parser</option>
+        </select>
+      </label>
 
       <div class="field">
         <label>Installment Naming Terminology</label>
@@ -3308,6 +3421,7 @@ input::placeholder { color: #68716c; }
 .project-item.active {
   background: rgba(255, 255, 255, 0.072);
   border-color: rgba(255, 255, 255, 0.11);
+  border-left-color: transparent;
   box-shadow: none;
 }
 
@@ -3315,12 +3429,12 @@ input::placeholder { color: #68716c; }
   content: '';
   position: absolute;
   left: -1px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent, #eb6554);
-  box-shadow: 0 0 10px rgba(235, 101, 84, 0.45);
+  top: -1px;
+  bottom: -1px;
+  width: 10px;
+  border-radius: 8px 0 0 8px;
+  border-left: 3px solid var(--accent, #eb6554);
+  pointer-events: none;
 }
 
 .project-select {
@@ -3470,7 +3584,13 @@ input::placeholder { color: #68716c; }
   place-items: center;
   cursor: pointer;
   opacity: 0;
+  outline: none;
   transition: opacity 140ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.project-menu-trigger:focus-visible {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: #ffffff;
 }
 
 .project-item:hover .project-menu-trigger,
@@ -3498,13 +3618,48 @@ input::placeholder { color: #68716c; }
   z-index: 20;
   top: calc(100% + 2px);
   right: 4px;
-  min-width: 148px;
-  padding: 4px;
+  min-width: 164px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: #14181b;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(16px);
+}
+
+.project-menu button {
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #e4e9e6;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.project-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.project-menu button.danger-item {
+  color: #f4968e;
+}
+
+.project-menu button.danger-item:hover {
+  background: rgba(235, 101, 84, 0.15);
+  color: #ffb8b1;
 }
 
 .background-jobs-badge {

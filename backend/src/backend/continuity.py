@@ -9,11 +9,32 @@ from sqlalchemy.orm import Session
 
 from .cast import load_cast_references
 from .models import Character, Project, Scene, Shot
+from .screenplay_parser import canonical_character_name, infer_voice_description
 from .settings import settings
+import re
+
+PHONE_CALL_PATTERN = re.compile(
+    r"\b(?:phone|cellphone|smartphone|handset|receiver|caller|on the line)\b",
+    re.IGNORECASE,
+)
+OFFSCREEN_SPEAKER_PATTERN = re.compile(
+    r"\((?:O\.?S\.?|V\.?O\.?|ON PHONE|OVER PHONE|THROUGH PHONE|FILTERED)\)",
+    re.IGNORECASE,
+)
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _resolve_character_voice(character: Character) -> str:
+    explicit = _text(getattr(character, "voice_description", ""))
+    if explicit:
+        return explicit
+    notes = _text(getattr(character, "notes", ""))
+    if notes:
+        return infer_voice_description(character.name, notes)
+    return ""
 
 
 def _scene_package(scene: Scene) -> dict[str, str]:
@@ -84,6 +105,16 @@ def create_shot_snapshot(
         }
         for character_id in selected_ids
     ]
+    character_voices = [
+        {
+            "id": character_id,
+            "name": names[character_id],
+            "notes": _text(by_id[character_id].notes) if character_id in by_id else "",
+            "voice_description": _resolve_character_voice(by_id[character_id]) if character_id in by_id else "",
+        }
+        for character_id in selected_ids
+        if character_id in by_id
+    ]
     scene = _scene_package(shot.scene)
     framing = _text(shot.framing)
     action = _text(shot.action)
@@ -92,6 +123,8 @@ def create_shot_snapshot(
         "version": 1,
         "character_ids": selected_ids,
         "characters": cast,
+        "character_voices": character_voices,
+        "dialogue": list(shot.dialogue or []),
         "scene": scene,
         "framing": framing,
         "action": action,
@@ -140,9 +173,20 @@ def current_shot_snapshot(shot: Shot, aspect_ratio: str) -> dict[str, Any]:
         }
         for character_id in selected_ids if character_id in by_id
     ]
+    character_voices = [
+        {
+            "id": character_id,
+            "name": by_id[character_id].name,
+            "notes": _text(by_id[character_id].notes),
+            "voice_description": _resolve_character_voice(by_id[character_id]),
+        }
+        for character_id in selected_ids if character_id in by_id
+    ]
     scene = _scene_package(shot.scene)
     return {
         "version": 1, "character_ids": selected_ids, "characters": characters,
+        "character_voices": character_voices,
+        "dialogue": list(shot.dialogue or []),
         "scene": scene, "framing": _text(shot.framing), "action": _text(shot.action),
         "video_prompt": _text(shot.video_prompt), "aspect_ratio": aspect_ratio,
         "image_prompt_base": _text(shot.image_prompt),
@@ -152,7 +196,125 @@ def current_shot_snapshot(shot: Shot, aspect_ratio: str) -> dict[str, Any]:
     }
 
 
-def video_continuity_prompt(snapshot: dict[str, Any] | None, video_prompt: str, aspect_ratio: str) -> str:
+def _collect_voice_entries(
+    snapshot: dict[str, Any],
+    shot: Shot | None = None,
+) -> list[str]:
+    characters = snapshot.get("characters") or []
+    snapshot_voices = {
+        str(item.get("id") or item.get("name") or ""): item
+        for item in (snapshot.get("character_voices") or [])
+        if isinstance(item, dict)
+    }
+    project_chars: list[Character] = []
+    if shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
+        project = shot.scene.script_version.project
+        if project is not None:
+            project_chars = list(project.characters or [])
+    by_id = {char.id: char for char in project_chars}
+    by_name: dict[str, Character] = {}
+    for char in project_chars:
+        key = canonical_character_name(char.name)
+        if key:
+            by_name[key] = char
+            first = key.split()[0]
+            if first not in by_name:
+                by_name[first] = char
+
+    seen_names: set[str] = set()
+    entries: list[str] = []
+
+    def add_voice(raw_name: str, char_id: str | None = None, fallback_voice: str = "", fallback_notes: str = "") -> None:
+        clean_name = _text(raw_name)
+        canon = canonical_character_name(clean_name)
+        if not canon or canon in seen_names:
+            return
+        live_char = (by_id.get(char_id) if char_id else None) or by_name.get(canon) or (
+            by_name.get(canon.split()[0]) if canon.split() else None
+        )
+        voice_desc = ""
+        if live_char is not None:
+            voice_desc = _resolve_character_voice(live_char)
+        if not voice_desc:
+            voice_desc = _text(fallback_voice)
+        if not voice_desc and fallback_notes:
+            voice_desc = infer_voice_description(canon, fallback_notes)
+        if voice_desc:
+            seen_names.add(canon)
+            entries.append(f"{clean_name}: {voice_desc.rstrip('.')}")
+
+    for item in characters:
+        if not isinstance(item, dict):
+            continue
+        char_id = _text(item.get("id"))
+        name = _text(item.get("name"))
+        sv = snapshot_voices.get(char_id) or snapshot_voices.get(name) or {}
+        add_voice(
+            name,
+            char_id=char_id or None,
+            fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
+            fallback_notes=_text(item.get("notes") or sv.get("notes")),
+        )
+
+    dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
+    for line in dialogue:
+        if not isinstance(line, dict):
+            continue
+        speaker = _text(line.get("character") or line.get("speaker"))
+        if speaker:
+            add_voice(speaker)
+
+    return entries
+
+
+def _phone_routing_instruction(
+    snapshot: dict[str, Any],
+    video_prompt: str,
+    shot: Shot | None = None,
+) -> str:
+    action = _text(shot.action if shot is not None else snapshot.get("action"))
+    framing = _text(shot.framing if shot is not None else snapshot.get("framing"))
+    combined = f"{action}\n{video_prompt}\n{framing}"
+    if not PHONE_CALL_PATTERN.search(combined):
+        return ""
+
+    dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
+    on_camera_speakers: list[str] = []
+    for line in dialogue:
+        if not isinstance(line, dict):
+            continue
+        raw_speaker = _text(line.get("character") or line.get("speaker"))
+        text = _text(line.get("text"))
+        if not raw_speaker or not text:
+            continue
+        if OFFSCREEN_SPEAKER_PATTERN.search(raw_speaker):
+            continue
+        canon = canonical_character_name(raw_speaker)
+        if canon and canon not in on_camera_speakers:
+            on_camera_speakers.append(canon)
+
+    if not on_camera_speakers and re.search(r'\bspeaks\s*:|["\u201c][^"\u201d]+["\u201d]', video_prompt, re.IGNORECASE):
+        for item in snapshot.get("characters") or []:
+            if isinstance(item, dict) and _text(item.get("name")):
+                on_camera_speakers.append(_text(item.get("name")))
+
+    if not on_camera_speakers:
+        return ""
+
+    speakers_label = ", ".join(on_camera_speakers)
+    return (
+        f"Voice routing: {speakers_label} speaks on camera with their natural, direct, unfiltered chest voice "
+        "in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech."
+    )
+
+
+def video_continuity_prompt(
+    snapshot: dict[str, Any] | None,
+    video_prompt: str,
+    aspect_ratio: str,
+    *,
+    shot: Shot | None = None,
+) -> str:
     anchor = "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; preserve its composition, faces, wardrobe, set, props, and lighting throughout the clip."
     if not snapshot:
         return "\n\n".join(part for part in (video_prompt.strip(), anchor) if part)
@@ -165,7 +327,15 @@ def video_continuity_prompt(snapshot: dict[str, Any] | None, video_prompt: str, 
         f"Shot action: {snapshot.get('action') or 'continue the action naturally from the supplied frame'}.",
     ]
     if cast_names:
-        package.append(f"Character identity continuity: {cast_names}; preserve canonical identities without face, age, hair, or body changes.")
+        package.append(
+            f"Character identity continuity: {cast_names}; preserve canonical identities without face, age, hair, body, or voice changes."
+        )
+    voice_entries = _collect_voice_entries(snapshot, shot=shot)
+    if voice_entries:
+        package.append(f"Character voices: {'; '.join(voice_entries)}.")
+    phone_routing = _phone_routing_instruction(snapshot, video_prompt, shot=shot)
+    if phone_routing:
+        package.append(phone_routing)
     for key, label in (
         ("location", "Location"), ("time_of_day", "Time of day"),
         ("set_notes", "Set"), ("lighting_notes", "Lighting"),

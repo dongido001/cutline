@@ -33,7 +33,9 @@ export interface ShotContinuityStatus {
 export interface ContinuitySnapshot {
   version: number
   character_ids: string[]
-  characters: Array<{ id: string; name: string; reference_ids: string[] }>
+  characters: Array<{ id: string; name: string; reference_ids: string[]; voice_description?: string; notes?: string }>
+  character_voices?: Array<{ id: string; name: string; notes?: string; voice_description?: string }>
+  dialogue?: DialogueLine[]
   scene: {
     title: string
     action?: string
@@ -263,6 +265,10 @@ export interface EpisodeUpdate {
 export interface ProjectUpdateInput {
   title?: string
   episode_label?: string
+  aspect_ratio?: AspectRatio
+  target_duration_seconds?: number
+  text_provider?: 'mock' | 'ollama' | 'gemini_web' | 'chatgpt_web' | 'compatible'
+  flow_project_id?: string | null
 }
 
 export interface ProjectSummary {
@@ -272,6 +278,7 @@ export interface ProjectSummary {
   aspect_ratio: string
   target_duration_seconds: number
   text_provider: string
+  flow_project_id?: string | null
   episode_label: string
   created_at: string
   updated_at: string
@@ -324,6 +331,7 @@ export interface Character {
   id: string
   name: string
   notes: string
+  voice_description?: string
   voice_provider?: string
   voice_id?: string | null
   voice_settings?: Record<string, any>
@@ -578,7 +586,7 @@ export interface ProjectContinuationInput {
   target_duration_seconds: number
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData
   const systemToken = import.meta.env.VITE_CUTLINE_SYSTEM_TOKEN
   const response = await fetch(path, {
@@ -609,9 +617,9 @@ export const api = {
   providers: () => request<ProviderStatus[]>('/api/providers'),
   imageProviders: () => request<ImageProviderStatus[]>('/api/image-providers'),
   videoProvider: () => request<ProviderStatus>('/api/video-provider'),
-  resetFlowSession: () =>
+  resetFlowSession: (projectId?: string) =>
     request<{ status: string; message: string; session_project?: Record<string, any> }>(
-      '/api/video-provider/reset-flow-session',
+      `/api/video-provider/reset-flow-session${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
       { method: 'POST' }
     ),
   audioProvider: () => request<ProviderStatus>('/api/audio-provider'),
@@ -736,17 +744,21 @@ export const api = {
         use_default_image_reference: useDefaultImageReference,
       }),
     }),
-  createCharacter: (projectId: string, input: { name: string; notes?: string }) =>
+  createCharacter: (projectId: string, input: { name: string; notes?: string; voice_description?: string }) =>
     request<Character>(`/api/projects/${projectId}/characters`, {
       method: 'POST',
-      body: JSON.stringify({ name: input.name, notes: input.notes || '' }),
+      body: JSON.stringify({
+        name: input.name,
+        notes: input.notes || '',
+        voice_description: input.voice_description || '',
+      }),
     }),
   voices: () => request<VoiceProviderInfo[]>('/api/voices'),
   auditionVoice: (input: { provider: string; voice_id: string; text: string; settings?: Record<string, any> }) =>
     request<VoiceAuditionResponse>('/api/voices/audition', { method: 'POST', body: JSON.stringify(input) }),
   uploadCustomVoice: (formData: FormData) =>
     request<VoicePreset>('/api/voices/custom', { method: 'POST', body: formData }),
-  updateCharacter: (id: string, input: { name?: string; notes?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) =>
+  updateCharacter: (id: string, input: { name?: string; notes?: string; voice_description?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) =>
     request<Character>(`/api/characters/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteCharacter: (id: string) => request<void>(`/api/characters/${id}`, { method: 'DELETE' }),
   uploadCharacterReference: (id: string, file: File) => {

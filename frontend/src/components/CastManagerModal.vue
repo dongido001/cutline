@@ -17,8 +17,11 @@ const emit = defineEmits<{
 const store = useStudioStore()
 const fileInput = ref<HTMLInputElement | null>(null)
 const notesDraft = ref(props.character.notes || '')
+const voiceDescriptionDraft = ref(props.character.voice_description || '')
 const savingNotes = ref(false)
 const notesSaved = ref(false)
+const savingVoice = ref(false)
+const voiceSaved = ref(false)
 const busy = ref(false)
 
 watch(
@@ -28,8 +31,19 @@ watch(
   },
 )
 
+watch(
+  () => props.character.voice_description,
+  (newVoice) => {
+    voiceDescriptionDraft.value = newVoice || ''
+  },
+)
+
 const notesChanged = computed(() => {
   return notesDraft.value.trim() !== (props.character.notes || '').trim()
+})
+
+const voiceChanged = computed(() => {
+  return voiceDescriptionDraft.value.trim() !== (props.character.voice_description || '').trim()
 })
 
 const isGenerating = computed(() => {
@@ -52,9 +66,28 @@ async function saveNotes() {
   }
 }
 
+async function saveVoiceDescription() {
+  if (!voiceChanged.value || savingVoice.value) return
+  savingVoice.value = true
+  try {
+    await store.updateCharacter(props.character.id, { voice_description: voiceDescriptionDraft.value })
+    voiceSaved.value = true
+    setTimeout(() => {
+      voiceSaved.value = false
+    }, 2000)
+  } catch {
+    // Store error surface
+  } finally {
+    savingVoice.value = false
+  }
+}
+
 async function handleGenerate() {
   if (notesChanged.value) {
     await saveNotes()
+  }
+  if (voiceChanged.value) {
+    await saveVoiceDescription()
   }
   try {
     await store.generateCharacterReference(props.character.id)
@@ -140,7 +173,7 @@ function onBackdropClick(e: MouseEvent) {
 
       <div class="cast-manager-content">
         <p class="cast-manager-sub">
-          Manage face references for <strong>{{ character.name }}</strong>. Shots tagged with this character inherit these references for visual consistency.
+          Manage face references and canonical voice continuity for <strong>{{ character.name }}</strong>. Shots tagged with this character inherit these references and voice traits across episodes.
         </p>
 
         <!-- Face Prompt / Appearance Notes Editor -->
@@ -169,6 +202,35 @@ function onBackdropClick(e: MouseEvent) {
             maxlength="2000"
             placeholder="Describe facial features, skin tone, eye color, hair style, age, and distinguishing traits..."
             @blur="saveNotes"
+          ></textarea>
+        </div>
+
+        <!-- Canonical Voice Prompt (Google Flow / Veo) Editor -->
+        <div class="cast-prompt-section">
+          <div class="cast-prompt-header">
+            <label :for="'cast-voice-' + character.id">
+              <strong>Canonical Voice Prompt (Google Flow / Veo)</strong>
+              <small>Injected as "Character voices: {{ character.name }}: …" in every video prompt where this character speaks or appears.</small>
+            </label>
+            <button
+              v-if="voiceChanged || voiceSaved"
+              type="button"
+              class="secondary-button mini-btn"
+              :disabled="savingVoice || voiceSaved"
+              @click="saveVoiceDescription"
+            >
+              <Check v-if="voiceSaved" :size="13" />
+              <span>{{ voiceSaved ? 'Saved' : savingVoice ? 'Saving…' : 'Save voice' }}</span>
+            </button>
+          </div>
+          <textarea
+            :id="'cast-voice-' + character.id"
+            v-model="voiceDescriptionDraft"
+            class="cast-prompt-textarea"
+            rows="2"
+            maxlength="1000"
+            placeholder="e.g., Steady, resonant 29-year-old Filipino baritone, subtle Filipino-English cadence, composed, controlled, unhurried delivery"
+            @blur="saveVoiceDescription"
           ></textarea>
         </div>
 

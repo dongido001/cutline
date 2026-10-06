@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session, selectinload
 from .media import FaceReferenceImage
 from .settings import settings
 from .models import Character, Project, Scene, ScriptVersion, Shot
-from .screenplay_parser import canonical_character_name, parse_character_consistency
+from .screenplay_parser import (
+    canonical_character_name,
+    infer_voice_description,
+    parse_character_consistency,
+)
 
 
 CHARACTER_MENTION_ALIASES = {
@@ -166,16 +170,28 @@ def _ensure_character(
     by_name: dict[str, Character],
     name: str,
     notes: str = "",
+    voice_description: str = "",
 ) -> Character:
     key = canonical_character_name(name)
     existing = by_name.get(key) or _find_first_name_alias(by_name, key)
+    resolved_voice = (voice_description or "").strip() or infer_voice_description(key, notes)
     if existing:
         if notes and (not existing.notes or len(notes) > len(existing.notes)):
             existing.notes = notes
-            existing.name = key
+            if key not in by_name or by_name[key].id == existing.id:
+                existing.name = key
+        if not (existing.voice_description or "").strip():
+            existing.voice_description = resolved_voice or infer_voice_description(
+                existing.name, existing.notes
+            )
         by_name[key] = existing
         return existing
-    character = Character(project_id=project_id, name=key, notes=notes or "")
+    character = Character(
+        project_id=project_id,
+        name=key,
+        notes=notes or "",
+        voice_description=resolved_voice,
+    )
     db.add(character)
     db.flush()
     by_name[key] = character
@@ -216,10 +232,20 @@ def sync_project_cast(
             .order_by(Character.name)
         )
     )
+    for item in characters:
+        if not (item.voice_description or "").strip() and (item.notes or "").strip():
+            item.voice_description = infer_voice_description(item.name, item.notes)
     by_name = {canonical_character_name(item.name): item for item in characters}
 
     for entry in parse_character_consistency(source_text or ""):
-        _ensure_character(db, project.id, by_name, entry["name"], entry["notes"])
+        _ensure_character(
+            db,
+            project.id,
+            by_name,
+            entry["name"],
+            entry["notes"],
+            entry.get("voice_description", ""),
+        )
 
     unique_chars = lambda: list({char.id: char for char in by_name.values()}.values())
 

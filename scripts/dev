@@ -27,13 +27,13 @@ wait_url() {
   log "$name did not become ready: $url"
   return 1
 }
-start_process() {
+  start_process() {
   local name="$1" directory="$2" logfile="$3"
   shift 3
   (cd "$directory" && exec "$@") >"$RUNTIME/$logfile" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
-  [[ "$name" == "ChatGPT Web bridge" ]] || REQUIRED_PIDS+=("$pid")
+  [[ "$name" == "ChatGPT Web bridge" || "$name" == "FlowKit bridge" ]] || REQUIRED_PIDS+=("$pid")
   log "starting $name (log: .runtime/$logfile)"
 }
 cleanup() {
@@ -108,6 +108,15 @@ if [[ "${1:-}" == "--bridges" ]]; then
     fi
   else
     log "ChatGPT Web is offline; prototype parser remains available"
+  fi
+
+  FLOWKIT_DIR="${MOVIE_FLOWKIT_ROOT:-$ROOT/../flowkit}"
+  if ! port_open 8100 && [[ -x "$FLOWKIT_DIR/venv/bin/python" ]]; then
+    start_process "FlowKit bridge" "$FLOWKIT_DIR" "flowkit.log" \
+      "$FLOWKIT_DIR/venv/bin/python" -u -m agent.main
+  fi
+  if port_open 8100 || [[ -x "$FLOWKIT_DIR/venv/bin/python" ]]; then
+    wait_url "FlowKit" "http://127.0.0.1:8100/api/flow/status" 10 || log "FlowKit video bridge unavailable"
   fi
 else
   log "Optional browser bridges skipped; use --bridges after configuring them"

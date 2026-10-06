@@ -64,4 +64,23 @@ describe('buildShotVideoPrompt', () => {
     const prompt = buildShotVideoPrompt({ ...shot, dialogue: [] } as Shot, scene, [], '9:16')
     expect(prompt).toContain('Spoken dialogue: No spoken dialogue in this shot.')
   })
+
+  it('includes FlowKit-style character voices and direct phone-call voice routing', () => {
+    const gabe = {
+      id: 'gabe',
+      name: 'GABE',
+      notes: '29 years old. Filipino man.',
+      voice_description: 'Steady, resonant 29-year-old Filipino baritone, composed, unhurried delivery',
+    } as Character
+    const phoneShot = {
+      ...shot,
+      action: 'Gabe lowers his phone slightly inside the SUV and speaks.',
+      video_prompt: 'Tight interior close-up as Gabe lowers the phone slightly and speaks.',
+      dialogue: [{ character: 'GABE', text: 'Four minutes. Wait for the horn.' }],
+      character_ids: ['gabe'],
+    } as Shot
+    const prompt = buildShotVideoPrompt(phoneShot, scene, [gabe], '16:9')
+    expect(prompt).toContain('Character voices: GABE: Steady, resonant 29-year-old Filipino baritone, composed, unhurried delivery.')
+    expect(prompt).toContain('Voice routing: GABE speaks on camera with their natural, direct, unfiltered chest voice')
+  })
 })

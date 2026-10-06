@@ -66,6 +66,51 @@ def test_video_prompt_anchors_frame_and_uses_saved_constraints():
     }
     prompt = video_continuity_prompt(snapshot, "Slow push-in.", "16:9")
     assert "exact opening frame and visual anchor" in prompt
-    assert "Character identity continuity: MARA" in prompt
+    assert "Character identity continuity: MARA; preserve canonical identities without face, age, hair, body, or voice changes." in prompt
     assert "Wardrobe continuity: Green coat." in prompt
     assert "Shot action: She turns toward the door." in prompt
+
+
+def test_video_prompt_includes_flowkit_character_voices_and_phone_call_routing():
+    from backend.screenplay_parser import parse_character_consistency
+
+    script = (
+        "Character consistency:\n"
+        'GABRIEL "GABE" DE LEON, 29 — Filipino man with warm tan skin, defined jawline, composed expression.\n\n'
+        "SHOT 1 — GABE IN SUV\n"
+    )
+    parsed_cast = parse_character_consistency(script)
+    assert len(parsed_cast) == 1
+    assert parsed_cast[0]["name"] == "GABE"
+    assert "29 years old." in parsed_cast[0]["notes"]
+    assert "29-year-old" in parsed_cast[0]["voice_description"]
+    assert "baritone" in parsed_cast[0]["voice_description"]
+
+    snapshot = {
+        "framing": "Tight interior close-up",
+        "action": "Gabe sits inside the SUV and lowers his phone slightly as he speaks into the phone.",
+        "characters": [{"id": "char-gabe", "name": "GABE"}],
+        "character_voices": [
+            {
+                "id": "char-gabe",
+                "name": "GABE",
+                "voice_description": "Steady, resonant 29-year-old Filipino baritone, subtle Filipino-English cadence, composed, controlled, unhurried delivery",
+            }
+        ],
+        "dialogue": [{"character": "GABE", "text": "Four minutes. Wait for the horn, then unlock the side gate."}],
+        "scene": {"location": "SUV interior", "time_of_day": "Morning"},
+    }
+    prompt = video_continuity_prompt(
+        snapshot,
+        'Camera holds in a tight interior close-up as Gabe lowers the phone slightly and speaks: "Four minutes. Wait for the horn, then unlock the side gate."',
+        "16:9",
+    )
+    assert (
+        "Character voices: GABE: Steady, resonant 29-year-old Filipino baritone, subtle Filipino-English cadence, composed, controlled, unhurried delivery."
+        in prompt
+    )
+    assert (
+        "Voice routing: GABE speaks on camera with their natural, direct, unfiltered chest voice in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech."
+        in prompt
+    )
+

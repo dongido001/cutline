@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { Check, ChevronDown, Clapperboard, Pencil, Plus, Settings, X } from '@lucide/vue'
+import { Check, ChevronDown, Clapperboard, Copy, Pencil, Plus, Settings, X } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
 
 const emit = defineEmits<{
@@ -16,6 +16,8 @@ const editingEpisodeId = ref<string | null>(null)
 const editingTitle = ref('')
 const savingId = ref<string | null>(null)
 const renameInputRef = ref<HTMLInputElement | null>(null)
+const copiedEpisodeId = ref<string | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
 
 const episodeLabel = computed(() => store.episodeLabel || 'Episode')
 
@@ -52,6 +54,19 @@ function handleOpenSettings() {
 function handleOpenNewEpisode() {
   closeDropdown()
   emit('open-new-episode')
+}
+
+async function copyEpisodeTitle(ep: { id: string; title: string | null; episode_number: number }) {
+  const title = (ep.title || `${episodeLabel.value} ${ep.episode_number}`).trim()
+  if (!title) return
+  await navigator.clipboard.writeText(title)
+  copiedEpisodeId.value = ep.id
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    if (copiedEpisodeId.value === ep.id) {
+      copiedEpisodeId.value = null
+    }
+  }, 1800)
 }
 
 function startEditing(ep: { id: string; title: string | null; episode_number: number }) {
@@ -97,6 +112,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  if (copiedTimer) clearTimeout(copiedTimer)
 })
 </script>
 
@@ -185,7 +201,19 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="episode-edit-icon-btn"
+                :class="{ 'is-copied': copiedEpisodeId === ep.id }"
+                :title="copiedEpisodeId === ep.id ? 'Title copied' : 'Copy episode title'"
+                :aria-label="copiedEpisodeId === ep.id ? 'Title copied' : `Copy ${ep.title || `${episodeLabel} ${ep.episode_number}`} title`"
+                @click.stop="copyEpisodeTitle(ep)"
+              >
+                <Check v-if="copiedEpisodeId === ep.id" :size="12" />
+                <Copy v-else :size="12" />
+              </button>
+              <button
+                type="button"
+                class="episode-edit-icon-btn"
                 title="Rename episode"
+                :aria-label="`Rename ${ep.title || `${episodeLabel} ${ep.episode_number}`}`"
                 @click.stop="startEditing(ep)"
               >
                 <Pencil :size="12" />
@@ -434,6 +462,13 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.18);
   color: #fff;
+}
+
+.episode-edit-icon-btn.is-copied {
+  opacity: 1;
+  color: #7fd1a5;
+  background: rgba(73, 169, 120, 0.15);
+  border-color: rgba(73, 169, 120, 0.35);
 }
 
 .episode-check-icon {

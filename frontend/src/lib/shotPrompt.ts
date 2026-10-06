@@ -32,6 +32,37 @@ export function buildShotVideoPrompt(
     : characters
       .filter((character) => selected.has(character.id))
       .map((character) => `${character.name}${character.notes.trim() ? ` — ${character.notes.trim()}` : ''}`)
+  const voiceEntries: string[] = []
+  const seenVoiceNames = new Set<string>()
+  const addVoiceForCharacter = (char: Character | undefined, fallbackName?: string, fallbackVoice?: string) => {
+    const name = (char?.name || fallbackName || '').trim()
+    const key = name.toUpperCase()
+    const voice = (char?.voice_description || fallbackVoice || '').trim().replace(/\.$/, '')
+    if (!key || seenVoiceNames.has(key) || !voice) return
+    seenVoiceNames.add(key)
+    voiceEntries.push(`${name}: ${voice}`)
+  }
+  if (snapshot?.characters.length) {
+    for (const item of snapshot.characters) {
+      const current = characters.find((c) => c.id === item.id || c.name.toUpperCase() === item.name.toUpperCase())
+      const snapVoice = snapshot.character_voices?.find((v) => v.id === item.id || v.name === item.name)?.voice_description
+      addVoiceForCharacter(current, item.name, item.voice_description || snapVoice)
+    }
+  } else {
+    for (const current of characters.filter((c) => selected.has(c.id))) {
+      addVoiceForCharacter(current)
+    }
+  }
+  for (const line of shot.dialogue || []) {
+    const speaker = (line.character || line.speaker || '').trim()
+    if (!speaker) continue
+    const speakerUpper = speaker.toUpperCase()
+    const current = characters.find(
+      (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
+    )
+    addVoiceForCharacter(current, speaker)
+  }
+
   const continuityScene = snapshot?.scene ?? scene
   const framing = snapshot?.framing || shot.framing
   const action = snapshot?.action || shot.action
@@ -47,10 +78,25 @@ export function buildShotVideoPrompt(
     continuityScene?.props_notes?.trim() ? `Props: ${continuityScene.props_notes.trim()}` : '',
   ].filter(Boolean)
 
-  return [
+  const combinedText = `${action || ''}\n${shot.video_prompt || ''}\n${framing || ''}`
+  const isPhoneShot = /\b(?:phone|cellphone|smartphone|handset|receiver|caller|on the line)\b/i.test(combinedText)
+  const onCameraSpeakers = (shot.dialogue || [])
+    .map((line) => (line.character || line.speaker || '').trim())
+    .filter((speaker) => speaker && !/\((?:O\.?S\.?|V\.?O\.?|ON PHONE|OVER PHONE|THROUGH PHONE|FILTERED)\)/i.test(speaker))
+  const lines = [
     `Visual framing: ${value(framing, 'cinematic medium shot')}; ${aspectRatio} aspect ratio; ${location}; ${time}.`,
     `Style and starting image: ${value(snapshot?.effective_image_prompt || shot.image_prompt, 'cinematic live-action, naturalistic detail')}.`,
-    `Character identity and appearance: ${identity}. Do not change faces, age, body, hair, or wardrobe.`,
+    `Character identity and appearance: ${identity}. Do not change faces, age, body, hair, voice, or wardrobe.`,
+  ]
+  if (voiceEntries.length) {
+    lines.push(`Character voices: ${voiceEntries.join('; ')}.`)
+  }
+  if (isPhoneShot && onCameraSpeakers.length) {
+    lines.push(
+      `Voice routing: ${Array.from(new Set(onCameraSpeakers)).join(', ')} speaks on camera with their natural, direct, unfiltered chest voice in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech.`,
+    )
+  }
+  lines.push(
     `Shot action and micro-acting: ${value(action, value(continuityScene?.action, 'subtle, motivated performance'))}.`,
     `Camera motion: ${value(shot.video_prompt, 'controlled cinematic movement that follows the action without abrupt cuts')}.`,
     `Lighting continuity: ${continuity.find((item) => item.startsWith('Lighting:'))?.slice(10).trim() || `match the ${time} lighting established in the scene`}.`,
@@ -61,5 +107,6 @@ export function buildShotVideoPrompt(
     `Spoken dialogue: ${dialogueText(shot)}`,
     'Realistic motion guidance: physically plausible weight, timing, eye-lines, hand interaction, cloth and hair movement; natural lip sync when dialogue is present; no frozen poses or rubbery motion.',
     'Negative constraints: no subtitles, captions, text, logos, watermark, extra characters, duplicate people, face changes, wardrobe changes, geometry glitches, or unexplained object changes.',
-  ].join('\n')
+  )
+  return lines.join('\n')
 }

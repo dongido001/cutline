@@ -173,4 +173,40 @@ describe('ImageReferencePanel', () => {
     expect(wrapper.text()).toContain('No reference selected')
     expect(wrapper.text()).not.toContain('Attached automatically on generate')
   })
+
+  it('enables Choose reference shot on Shot 1 of a later episode when earlier episodes have shots', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useStudioStore()
+    store.currentEpisodeId = 'ep-4'
+    store.currentProject = {
+      id: 'project-1',
+      episodes: [
+        { id: 'ep-1', project_id: 'project-1', episode_number: 1, title: 'Ep 1', status: 'approved', shot_count: 20, duration_ms: 120000, created_at: '', updated_at: '' },
+        { id: 'ep-4', project_id: 'project-1', episode_number: 4, title: 'Ep 4', status: 'approved', shot_count: 20, duration_ms: 120000, created_at: '', updated_at: '' },
+      ],
+    } as typeof store.currentProject
+
+    const wrapper = mount(ImageReferencePanel, {
+      props: {
+        shot: makeShot({ id: 'ep4-shot-1', order_index: 0 }),
+        aspect: '9:16',
+        previousShot: undefined,
+        projectAspect: '16:9',
+      },
+      global: {
+        plugins: [pinia],
+        stubs: {
+          Dialog: defineComponent({
+            props: { open: Boolean },
+            template: '<section v-if="open" role="dialog"><slot /></section>',
+          }),
+        },
+      },
+    })
+
+    const chooseBtn = wrapper.get('button')
+    expect((chooseBtn.element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.text()).not.toContain('References become available after the first shot.')
+  })
 })

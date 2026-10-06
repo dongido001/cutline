@@ -341,3 +341,102 @@ def test_runway_does_not_silently_shorten_authored_duration(monkeypatch):
     assert _duration_seconds(9600) == 10
     with pytest.raises(ValueError, match='Split the shot'):
         _duration_seconds(10001)
+
+
+def test_flowkit_reuses_and_reports_project_scoped_flow_project_id(monkeypatch, tmp_path):
+    from backend import video
+
+    seen_upload_projects: list[str] = []
+    seen_generate_projects: list[str] = []
+    reported_projects: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload=None, content=b"video-bytes", status_code=200):
+            self._payload = payload or {}
+            self.content = content
+            self.headers = {"content-type": "video/mp4"}
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise video.httpx.HTTPStatusError(
+                    "err", request=None, response=self
+                )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, json=None):
+            if url.endswith("/upload-image"):
+                seen_upload_projects.append(json.get("project_id", ""))
+                return FakeResponse(
+                    {
+                        "media_id": "media-1",
+                        "project_id": json.get("project_id") or "flow-proj-ep1",
+                    }
+                )
+            if url.endswith("/generate-video"):
+                seen_generate_projects.append(json.get("project_id", ""))
+                return FakeResponse(
+                    {
+                        "project_id": json.get("project_id") or "flow-proj-ep1",
+                        "operations": [{"name": "op-1"}],
+                    }
+                )
+            if url.endswith("/check-status"):
+                return FakeResponse(
+                    {
+                        "done": True,
+                        "results": [
+                            {
+                                "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                                "video_url": "https://example.test/video.mp4",
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(url)
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(video.httpx, "Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(video.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(video.settings, "flowkit_base_url", "http://flowkit.test/api/flow")
+    monkeypatch.setattr(video.settings, "flowkit_project_id", "")
+
+    image_path = tmp_path / "frame.png"
+    image_path.write_bytes(b"png")
+
+    video.generate_flowkit_clip(
+        image_path=image_path,
+        prompt="Episode 1 shot",
+        duration_ms=6000,
+        aspect_ratio="16:9",
+        scene_id="scene-ep1",
+        flow_project_id=None,
+        on_flow_project_id=reported_projects.append,
+    )
+    assert seen_upload_projects == [""]
+    assert seen_generate_projects == ["flow-proj-ep1"]
+    assert reported_projects == ["flow-proj-ep1"]
+
+    video.generate_flowkit_clip(
+        image_path=image_path,
+        prompt="Episode 4 shot",
+        duration_ms=6000,
+        aspect_ratio="16:9",
+        scene_id="scene-ep4",
+        flow_project_id=reported_projects[-1],
+        on_flow_project_id=reported_projects.append,
+    )
+    assert seen_upload_projects[-1] == "flow-proj-ep1"
+    assert seen_generate_projects[-1] == "flow-proj-ep1"
+

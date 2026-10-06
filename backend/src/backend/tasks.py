@@ -812,7 +812,7 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
             if not snapshot:
                 snapshot = current_shot_snapshot(shot, target_aspect)
             effective_prompt = compose_video_prompt(
-                video_continuity_prompt(snapshot, base_prompt, target_aspect),
+                video_continuity_prompt(snapshot, base_prompt, target_aspect, shot=shot),
                 shot.sound,
             )
             if continuity_frame or image_ref:
@@ -831,18 +831,33 @@ def _generate_shot_clip(shot_id: str, job_id: str, aspect_ratio: str | None = No
                     "source_time_ms": continuity_frame.source_time_ms,
                 }
             } if continuity_frame else None
+            import inspect
+
+            resolved_flow_projects: list[str] = []
+            render_kwargs: dict[str, object] = {"scene_id": str(shot.scene.id)}
+            try:
+                sig = inspect.signature(render_shot_clip)
+                if "flow_project_id" in sig.parameters:
+                    render_kwargs["flow_project_id"] = project.flow_project_id
+                if "on_flow_project_id" in sig.parameters:
+                    render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
+            except (TypeError, ValueError):
+                pass
             filename, mime_type, provider = render_shot_clip(
                 settings.media_dir / source_image.filename,
                 effective_prompt,
                 shot.duration_ms,
                 target_aspect,
-                scene_id=str(shot.scene.id),
+                **render_kwargs,
             )
             # Release the render-time read snapshot, then serialize result writes.
             # ponytail: serialize SQLite writes; use server-database row locks for higher throughput.
             project_id = project.id
             db.rollback()
-            db.execute(update(Project).where(Project.id == project_id).values(updated_at=Project.updated_at))
+            project_updates: dict[str, object] = {"updated_at": Project.updated_at}
+            if resolved_flow_projects and resolved_flow_projects[-1]:
+                project_updates["flow_project_id"] = resolved_flow_projects[-1]
+            db.execute(update(Project).where(Project.id == project_id).values(**project_updates))
             db.expire_all()
             raise_if_cancelled(db, job_id)
             variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == target_aspect), None)
@@ -1180,3 +1195,64 @@ def analyze_script(project_id: str, version_id: str, job_id: str) -> None:
 @general_huey.task()
 def generate_shot_image(shot_id: str, job_id: str) -> None:
     enqueue_shot_image(shot_id, job_id)
+
+
+@general_huey.task()
+def deep_review_general(run_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_job
+
+    run_deep_review_job(run_id, job_id)
+
+
+@chatgpt_huey.task()
+def deep_review_chatgpt(run_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_job
+
+    run_deep_review_job(run_id, job_id)
+
+
+@gemini_huey.task()
+def deep_review_gemini(run_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_job
+
+    run_deep_review_job(run_id, job_id)
+
+
+def enqueue_deep_review(provider: str, run_id: str, job_id: str):
+    if provider == "chatgpt_web":
+        return deep_review_chatgpt(run_id, job_id)
+    if provider == "gemini_web":
+        return deep_review_gemini(run_id, job_id)
+    return deep_review_general(run_id, job_id)
+
+
+@general_huey.task()
+def deep_review_draft_general(run_id: str, finding_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_draft_job
+
+    run_deep_review_draft_job(run_id, finding_id, job_id)
+
+
+@chatgpt_huey.task()
+def deep_review_draft_chatgpt(run_id: str, finding_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_draft_job
+
+    run_deep_review_draft_job(run_id, finding_id, job_id)
+
+
+@gemini_huey.task()
+def deep_review_draft_gemini(run_id: str, finding_id: str, job_id: str) -> None:
+    from .deep_review import run_deep_review_draft_job
+
+    run_deep_review_draft_job(run_id, finding_id, job_id)
+
+
+def enqueue_deep_review_draft(
+    provider: str, run_id: str, finding_id: str, job_id: str
+):
+    if provider == "chatgpt_web":
+        return deep_review_draft_chatgpt(run_id, finding_id, job_id)
+    if provider == "gemini_web":
+        return deep_review_draft_gemini(run_id, finding_id, job_id)
+    return deep_review_draft_general(run_id, finding_id, job_id)
+

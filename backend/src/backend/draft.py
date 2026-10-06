@@ -400,7 +400,7 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
             snapshot = candidate if candidate and candidate.get("aspect_ratio") == aspect else None
         snapshot = snapshot or current_shot_snapshot(shot, aspect)
         base_prompt = (shot.video_prompt or shot.image_prompt or "").strip()
-        prompt = video_continuity_prompt(snapshot, base_prompt, aspect)
+        prompt = video_continuity_prompt(snapshot, base_prompt, aspect, shot=shot)
         if continuity_frame:
             prompt = "\n\n".join(
                 part
@@ -417,13 +417,27 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
         job.progress = 0.35 + (completed / total) * 0.35
         db.commit()
         try:
+            import inspect
+
+            resolved_flow_projects: list[str] = []
+            render_kwargs: dict[str, object] = {"scene_id": str(shot.scene.id)}
+            try:
+                sig = inspect.signature(generate_shot_clip)
+                if "flow_project_id" in sig.parameters:
+                    render_kwargs["flow_project_id"] = project.flow_project_id
+                if "on_flow_project_id" in sig.parameters:
+                    render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
+            except (TypeError, ValueError):
+                pass
             filename, mime_type, provider = generate_shot_clip(
                 settings.media_dir / source.filename,
                 prompt,
                 duration_ms,
                 aspect,
-                scene_id=str(shot.scene.id),
+                **render_kwargs,
             )
+            if resolved_flow_projects and resolved_flow_projects[-1]:
+                project.flow_project_id = resolved_flow_projects[-1]
             try:
                 raise_if_cancelled(db, job.id)
             except JobCancelled:

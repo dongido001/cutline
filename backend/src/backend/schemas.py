@@ -44,6 +44,12 @@ class EpisodeSummary(BaseModel):
 class ProjectUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     episode_label: str | None = Field(default=None, min_length=1, max_length=32)
+    aspect_ratio: Literal["16:9", "9:16"] | None = None
+    target_duration_seconds: int | None = Field(default=None, ge=0, le=1800)
+    text_provider: Literal[
+        "mock", "ollama", "gemini_web", "chatgpt_web", "compatible"
+    ] | None = None
+    flow_project_id: str | None = Field(default=None, max_length=120)
 
 
 class ProjectCreate(BaseModel):
@@ -76,6 +82,7 @@ class ProjectSummary(BaseModel):
     target_duration_seconds: int
     text_provider: str
     episode_label: str = "Episode"
+    flow_project_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -370,6 +377,7 @@ class CharacterRead(BaseModel):
     id: str
     name: str
     notes: str
+    voice_description: str = ""
     voice_provider: str = "vibevoice"
     voice_id: str | None = None
     voice_settings: dict[str, Any] = {}
@@ -380,6 +388,7 @@ class CharacterRead(BaseModel):
 class CharacterCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     notes: str = Field(default="", max_length=2000)
+    voice_description: str = Field(default="", max_length=1000)
     voice_provider: str = "vibevoice"
     voice_id: str | None = None
     voice_settings: dict[str, Any] = {}
@@ -388,6 +397,7 @@ class CharacterCreate(BaseModel):
 class CharacterUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     notes: str | None = Field(default=None, max_length=2000)
+    voice_description: str | None = Field(default=None, max_length=1000)
     voice_provider: str | None = Field(default=None, max_length=40)
     voice_id: str | None = Field(default=None, max_length=120)
     voice_settings: dict[str, Any] | None = None
@@ -639,6 +649,16 @@ class JobQueueItemRead(JobRead):
 
 class SuggestionDecision(BaseModel):
     decision: Literal["accepted", "rejected"]
+
+
+class DeepReviewFindingDecision(BaseModel):
+    decision: Literal["accepted", "rejected", "addressed"]
+    expected_version_id: str | None = None
+    patches: list[dict[str, Any]] | None = None
+
+
+class DeepReviewUndoRequest(BaseModel):
+    expected_version_id: str
 
 
 class ProjectApproval(BaseModel):

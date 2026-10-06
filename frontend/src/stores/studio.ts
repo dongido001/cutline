@@ -588,6 +588,14 @@ export const useStudioStore = defineStore('studio', () => {
       const updated = await api.updateProject(currentProject.value.id, input)
       currentProject.value.title = updated.title
       currentProject.value.episode_label = updated.episode_label
+      currentProject.value.aspect_ratio = updated.aspect_ratio
+      currentProject.value.target_duration_seconds = updated.target_duration_seconds
+      currentProject.value.text_provider = updated.text_provider
+      currentProject.value.updated_at = updated.updated_at
+      const idx = projects.value.findIndex((p) => p.id === updated.id)
+      if (idx !== -1) {
+        projects.value.splice(idx, 1, updated)
+      }
     } finally {
       updatingProject.value = false
     }
@@ -816,11 +824,11 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function createCharacter(name: string, notes = '') {
+  async function createCharacter(name: string, notes = '', voiceDescription = '') {
     if (!currentProject.value) return
     error.value = ''
     try {
-      await api.createCharacter(currentProject.value.id, { name, notes })
+      await api.createCharacter(currentProject.value.id, { name, notes, voice_description: voiceDescription })
       await loadProject(currentProject.value.id)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not create character'
@@ -885,7 +893,7 @@ export const useStudioStore = defineStore('studio', () => {
 
 
 
-  async function updateCharacter(id: string, input: { name?: string; notes?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) {
+  async function updateCharacter(id: string, input: { name?: string; notes?: string; voice_description?: string; voice_provider?: string; voice_id?: string | null; voice_settings?: Record<string, any> }) {
     if (!currentProject.value) return
     error.value = ''
     try {

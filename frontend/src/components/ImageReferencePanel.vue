@@ -14,9 +14,16 @@ const props = defineProps<{
   canReferenceEarlier?: boolean
 }>()
 const skipDefault = defineModel<boolean>('skipDefault', { default: false })
-const previousShotId = computed(() => props.previousShot?.id)
-const canBrowse = computed(() => props.canReferenceEarlier ?? !!previousShotId.value)
 const store = useStudioStore()
+const previousShotId = computed(() => props.previousShot?.id)
+const hasEarlierEpisodeShots = computed(() => {
+  const curEp = store.currentEpisode
+  if (!curEp) return false
+  return store.episodes.some(
+    (ep) => ep.episode_number < curEp.episode_number && (ep.shot_count ?? 1) > 0,
+  )
+})
+const canBrowse = computed(() => props.canReferenceEarlier ?? (!!previousShotId.value || hasEarlierEpisodeShots.value))
 const active = computed(() => props.shot.image_references?.find((item) => item.aspect_ratio === props.aspect))
 const defaultPreview = computed(() => {
   const frame = props.shot.continuity_frames?.find((item) => item.aspect_ratio === props.aspect)
@@ -56,7 +63,12 @@ async function browse(previous = false) {
   loading.value = true
   try {
     sources.value = await api.imageReferenceSources(props.shot.id)
-    sourceShotId.value = (previous && previousShotId.value ? previousShotId.value : active.value?.source_shot_id) || sources.value[sources.value.length - 1]?.id || ''
+    const latestWithMedia = [...sources.value].reverse().find((item) => item.media.length > 0)?.id
+    sourceShotId.value =
+      (previous && previousShotId.value ? previousShotId.value : active.value?.source_shot_id) ||
+      latestWithMedia ||
+      sources.value[sources.value.length - 1]?.id ||
+      ''
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load sources' }
   finally { loading.value = false }
 }

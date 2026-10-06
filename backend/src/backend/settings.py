@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     app_name: str = "Cutline Studio API"
     data_dir: Path = BACKEND_ROOT / "data"
     text_provider: str = "mock"
+    deep_review_max_input_chars: int = Field(default=160000, ge=1000)
+    deep_review_ollama_max_input_chars: int = Field(default=32000, ge=1000)
+    deep_review_timeout_seconds: int = Field(default=300, ge=10, le=1800)
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:8b"
     compatible_base_url: str = "http://127.0.0.1:6969/v1"

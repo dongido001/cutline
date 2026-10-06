@@ -43,6 +43,80 @@ def canonical_character_name(name: str) -> str:
     return cleaned.upper()
 
 
+def infer_voice_description(name: str, notes: str, age: int | None = None) -> str:
+    """Extract an explicit Voice: clause or synthesize a deterministic Veo voice profile from character notes."""
+    cleaned_notes = (notes or "").strip()
+    if not cleaned_notes and age is None:
+        return ""
+
+    explicit = re.search(
+        r"(?:speaking\s+)?voice(?:\s+profile)?\s*:\s*([^\n]+)",
+        cleaned_notes,
+        re.IGNORECASE,
+    )
+    if explicit:
+        return explicit.group(1).strip().rstrip(".")
+
+    lower = cleaned_notes.lower()
+    if age is None:
+        age_match = re.search(r"\b(\d{2})\s*(?:years?\s*old|yo|y/o)\b", lower)
+        if age_match:
+            age = int(age_match.group(1))
+
+    is_female = bool(
+        re.search(
+            r"\b(woman|female|mother|matriarch|sister|daughter|girl|wife|widow|aunt|grandmother|blouse|ponytail|bun|she|her)\b",
+            lower,
+        )
+    )
+    is_male = bool(
+        re.search(
+            r"\b(man|male|father|patriarch|brother|son|boy|husband|uncle|grandfather|jaw|stubble|beard|baritone|tenor|he|him|his)\b",
+            lower,
+        )
+    )
+
+    is_older = (age is not None and age >= 50) or bool(
+        re.search(r"\b(older|elderly|matriarch|patriarch|50s|60s|70s|silver|graying|grey)\b", lower)
+    )
+
+    if is_female and not is_male:
+        if is_older:
+            register = f"Firm, seasoned {f'{age}-year-old ' if age else ''}contralto"
+        else:
+            register = f"Warm, grounded {f'{age}-year-old ' if age else ''}mezzo-soprano"
+    elif is_male and not is_female:
+        if is_older:
+            register = f"Deep, weathered {f'{age}-year-old ' if age else ''}baritone"
+        else:
+            register = f"Steady, resonant {f'{age}-year-old ' if age else ''}baritone"
+    else:
+        register = f"Clear, grounded {f'{age}-year-old ' if age else ''}speaking voice"
+
+    traits: list[str] = [register]
+    if "filipino" in lower:
+        traits.append("subtle Filipino-English cadence")
+    elif "nigerian" in lower:
+        traits.append("natural Nigerian-English cadence")
+    elif "british" in lower:
+        traits.append("natural British-English cadence")
+
+    delivery: list[str] = []
+    if re.search(r"\b(composed|controlled|guarded|calculating|calm|measured|unhurried)\b", lower):
+        delivery.append("composed, controlled, unhurried delivery")
+    elif re.search(r"\b(authoritative|commanding|stern|sharp|matriarch|patriarch)\b", lower):
+        delivery.append("authoritative, measured delivery")
+    elif re.search(r"\b(weathered|salt-aged|quiet|observant|working-class|rough)\b", lower):
+        delivery.append("low-key, weathered, unhurried delivery")
+    elif re.search(r"\b(practical|alert|determined|capable|direct|focused)\b", lower):
+        delivery.append("clear, natural, earnest delivery")
+    else:
+        delivery.append("natural, steady conversational delivery")
+
+    traits.extend(delivery)
+    return ", ".join(traits)
+
+
 def parse_character_consistency(script: str) -> list[dict[str, str]]:
     """Extract named cast descriptions from a structured screenplay preamble."""
     if not script or not script.strip():
@@ -100,6 +174,8 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
                 break
             continue
         raw_name = match.group("name").strip()
+        age_match = re.search(r",\s*(\d{1,3})\b", raw_name)
+        age = int(age_match.group(1)) if age_match else None
         nickname_match = re.search(
             r'["\'\u201c\u2018]([^"\'\u201d\u2019]+)["\'\u201d\u2019]', raw_name
         )
@@ -116,10 +192,19 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
             continue
         role = (match.group("role") or "").strip()
         notes = match.group("notes").strip()
+        if age is not None and not re.search(rf"\b{age}\b", notes):
+            notes = f"{age} years old. {notes}".strip()
         if role:
             notes = f"({role}) {notes}".strip()
+        voice_description = infer_voice_description(name, notes, age=age)
         seen.add(name)
-        found.append({"name": name, "notes": notes})
+        found.append(
+            {
+                "name": name,
+                "notes": notes,
+                "voice_description": voice_description,
+            }
+        )
     return found
 
 

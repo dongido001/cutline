@@ -42,6 +42,7 @@ class Project(Base):
     target_duration_seconds: Mapped[int] = mapped_column(Integer, default=60)
     text_provider: Mapped[str] = mapped_column(String(24), default="mock")
     image_conversation_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flow_project_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
@@ -487,6 +488,7 @@ class Character(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     notes: Mapped[str] = mapped_column(Text, default="")
+    voice_description: Mapped[str] = mapped_column(Text, default="")
     voice_provider: Mapped[str] = mapped_column(String(40), default="vibevoice")
     voice_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     voice_settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -533,6 +535,29 @@ class Suggestion(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
 
     script_version: Mapped[ScriptVersion] = relationship(back_populates="suggestions")
+
+
+class DeepReviewRun(Base):
+    """Editorial reports are independent of production approval suggestions."""
+
+    __tablename__ = "deep_review_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    script_version_id: Mapped[str] = mapped_column(ForeignKey("script_versions.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(40))
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    input_context: Mapped[dict[str, Any]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    draft_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    draft_finding_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    applied_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    undo_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    timeline_before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    timeline_after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class Job(Base):

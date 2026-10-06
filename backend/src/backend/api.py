@@ -22,7 +22,7 @@ from .video import video_provider_status, clip_source_image
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
-from .models import Character, CharacterReference, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
+from .models import Character, CharacterReference, DeepReviewRun, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
 from .schemas import (
     EpisodeCreate,
     EpisodeSummary,
@@ -36,6 +36,8 @@ from .schemas import (
     VoiceProviderInfo,
     VoicePresetRead,
     CreateDraftRequest,
+    DeepReviewFindingDecision,
+    DeepReviewUndoRequest,
     JobRead,
     JobQueueItemRead,
     ImageProviderStatus,
@@ -70,8 +72,17 @@ from .oauth import (
 )
 from .image_references import default_visual_reference, earlier_shots, freeze_visual_reference, media_sources, reference_snapshot, release_reference_asset, snapshot_filenames, validate_reference_bytes
 from .jobs import mark_job_cancelled, revoke_job_task
+from .deep_review import (
+    decide_deep_review_finding,
+    get_deep_review,
+    start_deep_review,
+    start_deep_review_draft,
+    undo_deep_review_apply,
+)
 from .tasks import (
     enqueue_cast_reference,
+    enqueue_deep_review,
+    enqueue_deep_review_draft,
     enqueue_final_cut,
     enqueue_script_analysis,
     enqueue_script_continuation,
@@ -204,12 +215,24 @@ def video_provider() -> ProviderStatus:
 
 
 @app.post("/api/video-provider/reset-flow-session")
-def reset_flow_session() -> dict:
+def reset_flow_session(
+    project_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
     base_url = settings.flowkit_base_url.rstrip("/")
     try:
         res = httpx.post(f"{base_url}/reset-session", timeout=15.0)
         if not res.is_success:
             raise HTTPException(status_code=res.status_code, detail=res.text)
+        if project_id:
+            project = db.get(Project, project_id)
+            if project:
+                project.flow_project_id = None
+                db.commit()
+        else:
+            for project in db.scalars(select(Project).where(Project.flow_project_id.is_not(None))):
+                project.flow_project_id = None
+            db.commit()
         return res.json()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"FlowKit communication error: {exc}")
@@ -343,6 +366,14 @@ def update_project(
         project.title = payload.title
     if payload.episode_label is not None:
         project.episode_label = payload.episode_label
+    if payload.aspect_ratio is not None:
+        project.aspect_ratio = payload.aspect_ratio
+    if payload.target_duration_seconds is not None:
+        project.target_duration_seconds = payload.target_duration_seconds
+    if payload.text_provider is not None:
+        project.text_provider = payload.text_provider
+    if "flow_project_id" in payload.model_fields_set:
+        project.flow_project_id = (payload.flow_project_id or "").strip() or None
     db.commit()
     db.refresh(project)
     return project
@@ -747,6 +778,11 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
     if job.status not in {"queued", "running"}:
         raise HTTPException(status_code=409, detail=f"Cannot cancel a job in status {job.status}")
     mark_job_cancelled(job)
+    db.execute(
+        update(DeepReviewRun)
+        .where(DeepReviewRun.job_id == job.id, DeepReviewRun.status.in_(["queued", "running"]))
+        .values(status="cancelled")
+    )
     db.commit()
     db.refresh(job)
     revoke_job_task(job)
@@ -938,6 +974,11 @@ def cancel_all_active_jobs(db: Session = Depends(get_db)) -> dict:
     count = 0
     for job in active_jobs:
         mark_job_cancelled(job)
+        db.execute(
+            update(DeepReviewRun)
+            .where(DeepReviewRun.job_id == job.id, DeepReviewRun.status.in_(["queued", "running"]))
+            .values(status="cancelled")
+        )
         revoke_job_task(job)
         count += 1
     db.commit()
@@ -957,7 +998,12 @@ def cleanup_finished_jobs(
         statuses = ["cancelled"]
     else:
         statuses = ["completed", "cancelled"]
-    deleted = db.execute(delete(Job).where(Job.status.in_(statuses))).rowcount
+    deleted = db.execute(
+        delete(Job).where(
+            Job.status.in_(statuses),
+            Job.kind.notin_(["deep_review", "deep_review_draft"]),
+        )
+    ).rowcount
     db.commit()
     return {"deleted": deleted}
 
@@ -1426,6 +1472,7 @@ def create_character(
         project_id=project_id,
         name=name,
         notes=payload.notes.strip(),
+        voice_description=payload.voice_description.strip(),
         voice_provider=payload.voice_provider or "vibevoice",
         voice_id=payload.voice_id,
         voice_settings=payload.voice_settings or {},
@@ -1465,6 +1512,8 @@ def update_character(
         character.name = name
     if payload.notes is not None:
         character.notes = payload.notes.strip()
+    if payload.voice_description is not None:
+        character.voice_description = payload.voice_description.strip()
     if payload.voice_provider is not None:
         character.voice_provider = payload.voice_provider.strip()
     if payload.voice_id is not None:
@@ -2830,13 +2879,23 @@ def decide_suggestion(
             version_number=source_version.version_number + 1,
             source_text=source_version.source_text,
             structured_data=updated_data,
-            status="review",
+            status=source_version.status if source_version.status == "approved" else "review",
         )
         db.add(new_version)
         db.flush()
+        shot_id_map: dict[str, str] = {}
+        media_id_map: dict[str, str] = {}
+        pending_refs: list[tuple[ShotContinuityFrame | ShotImageReference, Shot]] = []
         for index, original_scene in enumerate(updated_data.get("scenes", [])):
             scene_data = dict(original_scene)
             shots = scene_data.pop("shots", [])
+            orig_scene_model = next(
+                (existing for existing in source_version.scenes if existing.order_index == index),
+                None,
+            )
+            if orig_scene_model:
+                for note_field in ("set_notes", "lighting_notes", "wardrobe_notes", "props_notes"):
+                    scene_data.setdefault(note_field, getattr(orig_scene_model, note_field, ""))
             scene = Scene(
                 script_version_id=new_version.id,
                 order_index=index,
@@ -2870,31 +2929,145 @@ def decide_suggestion(
                     ),
                     None,
                 )
+                new_shot = Shot(
+                    scene_id=scene.id,
+                    order_index=shot_data.get("order_index", shot_index),
+                    title=shot_data["title"],
+                    start_ms=shot_data["start_ms"],
+                    end_ms=shot_data["end_ms"],
+                    action=shot_data["action"],
+                    dialogue=shot_data["dialogue"],
+                    sound=shot_data["sound"],
+                    duration_ms=duration_ms,
+                    framing=shot_data.get("framing", "Medium"),
+                    image_prompt=shot_data.get("image_prompt", ""),
+                    video_prompt=shot_data.get("video_prompt", ""),
+                    title_card_text=shot_data.get("title_card_text", ""),
+                    character_ids=list(shot_data.get("character_ids") or (original.character_ids if original else [])),
+                    continuity_snapshot=(
+                        shot_data.get("continuity_snapshot")
+                        if isinstance(shot_data.get("continuity_snapshot"), dict)
+                        else (original.continuity_snapshot if original else None)
+                    ),
+                    status=original.status if original else "planned",
+                    dialogue_audio_filename=original.dialogue_audio_filename if original else None,
+                    dialogue_audio_mime=original.dialogue_audio_mime if original else None,
+                    conversation_url=original.conversation_url if original else None,
+                )
+                db.add(new_shot)
+                db.flush()
+                if original:
+                    shot_id_map[original.id] = new_shot.id
+                    if original.image:
+                        new_img = ShotImage(
+                            shot_id=new_shot.id,
+                            filename=original.image.filename,
+                            mime_type=original.image.mime_type,
+                            source=original.image.source,
+                            provider=original.image.provider,
+                            prompt=original.image.prompt,
+                            created_at=original.image.created_at,
+                        )
+                        db.add(new_img)
+                        db.flush()
+                        media_id_map[original.image.id] = new_img.id
+                    if original.clip:
+                        new_clip = ShotClip(
+                            shot_id=new_shot.id,
+                            filename=original.clip.filename,
+                            mime_type=original.clip.mime_type,
+                            source=original.clip.source,
+                            provider=original.clip.provider,
+                            prompt=original.clip.prompt,
+                            created_at=original.clip.created_at,
+                        )
+                        db.add(new_clip)
+                        db.flush()
+                        media_id_map[original.clip.id] = new_clip.id
+                    for mv in original.media_variants:
+                        new_mv = ShotMediaVariant(
+                            shot_id=new_shot.id,
+                            media_type=mv.media_type,
+                            aspect_ratio=mv.aspect_ratio,
+                            filename=mv.filename,
+                            mime_type=mv.mime_type,
+                            source=mv.source,
+                            provider=mv.provider,
+                            prompt=mv.prompt,
+                            created_at=mv.created_at,
+                        )
+                        db.add(new_mv)
+                        db.flush()
+                        media_id_map[mv.id] = new_mv.id
+                    take_id_map: dict[str, str] = {}
+                    for take in original.takes:
+                        new_take = ShotTake(
+                            shot_id=new_shot.id,
+                            media_type=take.media_type,
+                            aspect_ratio=take.aspect_ratio,
+                            filename=take.filename,
+                            mime_type=take.mime_type,
+                            source=take.source,
+                            provider=take.provider,
+                            prompt=take.prompt,
+                            settings=deepcopy(take.settings),
+                            selected=take.selected,
+                            created_at=take.created_at,
+                        )
+                        db.add(new_take)
+                        db.flush()
+                        take_id_map[take.id] = new_take.id
+                        media_id_map[take.id] = new_take.id
+                    new_shot.selected_image_take_id = take_id_map.get(original.selected_image_take_id or "")
+                    new_shot.selected_clip_take_id = take_id_map.get(original.selected_clip_take_id or "")
+                    new_shot.selected_audio_take_id = take_id_map.get(original.selected_audio_take_id or "")
+                    for cf in original.continuity_frames:
+                        pending_refs.append((cf, new_shot))
+                    for ir in original.image_references:
+                        pending_refs.append((ir, new_shot))
+                shot_cursor = end_ms
+        for ref_obj, target_shot in pending_refs:
+            if isinstance(ref_obj, ShotContinuityFrame):
                 db.add(
-                    Shot(
-                        scene_id=scene.id,
-                        order_index=shot_data.get("order_index", shot_index),
-                        title=shot_data["title"],
-                        start_ms=shot_data["start_ms"],
-                        end_ms=shot_data["end_ms"],
-                        action=shot_data["action"],
-                        dialogue=shot_data["dialogue"],
-                        sound=shot_data["sound"],
-                        duration_ms=duration_ms,
-                        framing=shot_data.get("framing", "Medium"),
-                        image_prompt=shot_data.get("image_prompt", ""),
-                        video_prompt=shot_data.get("video_prompt", ""),
-                        title_card_text=shot_data.get("title_card_text", ""),
-                        character_ids=list(shot_data.get("character_ids") or (original.character_ids if original else [])),
-                        continuity_snapshot=(
-                            shot_data.get("continuity_snapshot")
-                            if isinstance(shot_data.get("continuity_snapshot"), dict)
-                            else (original.continuity_snapshot if original else None)
-                        ),
-                        conversation_url=original.conversation_url if original else None,
+                    ShotContinuityFrame(
+                        shot_id=target_shot.id,
+                        aspect_ratio=ref_obj.aspect_ratio,
+                        filename=ref_obj.filename,
+                        mime_type=ref_obj.mime_type,
+                        source_shot_id=shot_id_map.get(ref_obj.source_shot_id, ref_obj.source_shot_id),
+                        source_shot_title=ref_obj.source_shot_title,
+                        source_time_ms=ref_obj.source_time_ms,
+                        created_at=ref_obj.created_at,
                     )
                 )
-                shot_cursor = end_ms
+            elif isinstance(ref_obj, ShotImageReference):
+                db.add(
+                    ShotImageReference(
+                        shot_id=target_shot.id,
+                        aspect_ratio=ref_obj.aspect_ratio,
+                        filename=ref_obj.filename,
+                        mime_type=ref_obj.mime_type,
+                        source_shot_id=shot_id_map.get(ref_obj.source_shot_id, ref_obj.source_shot_id),
+                        source_shot_title=ref_obj.source_shot_title,
+                        source_media_id=media_id_map.get(ref_obj.source_media_id, ref_obj.source_media_id),
+                        source_media_kind=ref_obj.source_media_kind,
+                        source_media_type=ref_obj.source_media_type,
+                        source_aspect_ratio=ref_obj.source_aspect_ratio,
+                        source_time_ms=ref_obj.source_time_ms,
+                        mode=ref_obj.mode,
+                        created_at=ref_obj.created_at,
+                    )
+                )
+        if shot_id_map:
+            from .deep_review import _find_episode_timeline, _remap_timeline_doc
+            timeline = _find_episode_timeline(db, source_version.project_id, source_version.episode_id)
+            if timeline:
+                timeline.document = _remap_timeline_doc(timeline.document, shot_id_map) or {}
+                timeline.shorts_document = _remap_timeline_doc(timeline.shorts_document, shot_id_map)
+                timeline.revision += 1
+                flag_modified(timeline, "document")
+                if timeline.shorts_document is not None:
+                    flag_modified(timeline, "shorts_document")
         flag_modified(new_version, "structured_data")
         for pending in source_version.suggestions:
             if pending.id == suggestion.id or pending.status != "pending":
@@ -2933,6 +3106,58 @@ def _suggestion_value(current: object, before: object, after: object) -> object:
     if isinstance(current, dict) and not isinstance(after, dict):
         raise HTTPException(status_code=422, detail="The proposed value must be an object.")
     return after
+
+
+@app.get("/api/script-versions/{version_id}/deep-review")
+def read_deep_review(version_id: str, db: Session = Depends(get_db)) -> dict:
+    return get_deep_review(db, version_id)
+
+
+@app.post(
+    "/api/script-versions/{version_id}/deep-review",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_deep_review(version_id: str, db: Session = Depends(get_db)) -> dict:
+    return start_deep_review(db, version_id, enqueue_deep_review)
+
+
+@app.post(
+    "/api/deep-reviews/{run_id}/findings/{finding_id}/draft",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def draft_deep_review_finding(
+    run_id: str,
+    finding_id: str,
+    db: Session = Depends(get_db),
+) -> Job:
+    return start_deep_review_draft(db, run_id, finding_id, enqueue_deep_review_draft)
+
+
+@app.patch("/api/deep-reviews/{run_id}/findings/{finding_id}")
+def update_deep_review_finding(
+    run_id: str,
+    finding_id: str,
+    payload: DeepReviewFindingDecision,
+    db: Session = Depends(get_db),
+) -> dict:
+    return decide_deep_review_finding(
+        db,
+        run_id,
+        finding_id,
+        payload.decision,
+        expected_version_id=payload.expected_version_id,
+        patches=payload.patches,
+    )
+
+
+@app.post("/api/deep-reviews/{run_id}/undo")
+def undo_deep_review(
+    run_id: str,
+    payload: DeepReviewUndoRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    return undo_deep_review_apply(db, run_id, payload.expected_version_id)
 
 
 @app.post("/api/projects/{project_id}/approve", response_model=ProjectSummary)

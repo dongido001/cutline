@@ -95,6 +95,10 @@ async function checkQueueStats() {
   try {
     const status = await api.systemQueues()
     activeQueueJobs.value = status.active_jobs
+    const videoBridge = status.bridges?.find((b) => b.id === 'video_provider')
+    if (videoBridge && (!store.videoProvider || store.videoProvider.available !== videoBridge.available)) {
+      store.videoProvider = await api.videoProvider()
+    }
   } catch {
     // ignore background errors
   }
