@@ -83,7 +83,7 @@ def infer_voice_description(name: str, notes: str, age: int | None = None) -> st
     )
     is_non_human_mascot = bool(
         re.search(
-            r"\b(magical\s+animated|rainbow\s+character|talking\s+rainbow|animated\s+character|talking\s+animal)\b",
+            r"\b(magical\s+animated|friendly\s+animated|animated\s+(?:yellow\s+)?sun|rainbow\s+character|talking\s+rainbow|animated\s+character|talking\s+animal)\b",
             lower,
         )
     )
@@ -271,7 +271,11 @@ def _is_character_cue(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
-    if not stripped.endswith(":") and stripped.endswith((".", "!")):
+    if stripped.startswith(OPEN_QUOTES) or (
+        not stripped.endswith(":") and stripped.endswith(CLOSE_QUOTES)
+    ):
+        return False
+    if not stripped.endswith(":") and stripped.endswith((".", "!", "?")):
         return False
     candidate = stripped.rstrip(":").strip()
     if TRANSITION_LINE.match(candidate):
@@ -652,7 +656,8 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         group["end_ms"] = source_scene["end_ms"]
         if source_scene["action"] and source_scene["action"] != group["action"]:
             group["action"] += f"\n\n{source_scene['action']}"
-        group["dialogue"].extend(source_scene["dialogue"])
+        if shot_index > 0:
+            group["dialogue"].extend(source_scene["dialogue"])
         if group["time_of_day"] == "Unspecified" and source_scene["time_of_day"] != "Unspecified":
             group["time_of_day"] = source_scene["time_of_day"]
         shot_targets[source_index] = (len(grouped_scenes) - 1, shot_index)

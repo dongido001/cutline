@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import re
 from abc import ABC, abstractmethod
@@ -20,15 +22,97 @@ class ScriptProvider(ABC):
         return {"suggestions": []}
 
 
+def _repair_markdown_json(text: str) -> str:
+    """Re-escape inner double quotes and newlines when browser Markdown rendering stripped backslashes."""
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    string_is_key = False
+    expecting_key = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            if ch == "{":
+                stack.append("{")
+                expecting_key = True
+            elif ch == "[":
+                stack.append("[")
+                expecting_key = False
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+                expecting_key = False
+            elif ch == ":":
+                expecting_key = False
+            elif ch == ",":
+                expecting_key = bool(stack and stack[-1] == "{")
+            elif ch == '"':
+                in_string = True
+                string_is_key = expecting_key
+            out.append(ch)
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == "\n":
+            out.append("\\n")
+            i += 1
+            continue
+        if ch == "\r":
+            i += 1
+            continue
+        if ch == '"':
+            rest = text[i + 1 :].lstrip()
+            if string_is_key:
+                is_closing = rest.startswith(":")
+            elif not rest:
+                is_closing = True
+            elif rest[0] in "}]":
+                after_close = rest[1:].lstrip()
+                is_closing = not after_close or after_close[0] in ",}]"
+            elif rest[0] == ",":
+                after_comma = rest[1:].lstrip()
+                if stack and stack[-1] == "{":
+                    is_closing = (
+                        bool(re.match(r'^"[A-Za-z0-9_ -]+"\s*:', after_comma))
+                        or after_comma.startswith("}")
+                    )
+                else:
+                    is_closing = bool(
+                        re.match(r'^(?:"|\{|\[|\]|true\b|false\b|null\b|-?\d)', after_comma)
+                    )
+            else:
+                is_closing = False
+
+            if is_closing:
+                in_string = False
+                string_is_key = False
+                out.append('"')
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def loads_model_json(content: str) -> dict[str, Any]:
-    """Parse model JSON, tolerating fences and leading/trailing prose."""
+    """Parse model JSON, tolerating fences, leading/trailing prose, and Markdown-stripped escapes."""
     text = (content or "").strip()
     if not text:
         raise ValueError("Model returned an empty response")
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, strict=False)
         if isinstance(parsed, dict):
             return parsed
     except json.JSONDecodeError:
@@ -36,16 +120,34 @@ def loads_model_json(content: str) -> dict[str, Any]:
 
     for fence in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
         block = fence.group(1).strip()
-        try:
-            parsed = json.loads(block)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            continue
+        for candidate_block in (block, _repair_markdown_json(block)):
+            try:
+                parsed = json.loads(candidate_block, strict=False)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
 
-    decoder = json.JSONDecoder()
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        outer = text[first_brace : last_brace + 1]
+        for candidate_outer in (outer, _repair_markdown_json(outer)):
+            try:
+                parsed = json.loads(candidate_outer, strict=False)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+    decoder = json.JSONDecoder(strict=False)
     candidates: list[tuple[int, int, dict[str, Any]]] = []
-    expected_keys = {"assessment", "findings", "scenes", "suggestions", "patches"}
+    expects_assessment = '"assessment"' in text
+    root_keys = (
+        {"assessment"}
+        if expects_assessment
+        else {"assessment", "findings", "scenes", "suggestions", "patches"}
+    )
     idx = 0
     while True:
         brace = text.find("{", idx)
@@ -54,8 +156,9 @@ def loads_model_json(content: str) -> dict[str, Any]:
         try:
             obj, end = decoder.raw_decode(text, brace)
             if isinstance(obj, dict):
-                has_expected = int(bool(expected_keys.intersection(obj.keys())))
-                candidates.append((has_expected, end - brace, obj))
+                has_root = int(bool(root_keys.intersection(obj.keys())))
+                if not expects_assessment or has_root:
+                    candidates.append((has_root, end - brace, obj))
                 idx = end
                 continue
         except json.JSONDecodeError:
@@ -69,7 +172,8 @@ def loads_model_json(content: str) -> dict[str, Any]:
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         raise ValueError("Model response did not contain a JSON object")
-    parsed = json.loads(match.group(0))
+    repaired = _repair_markdown_json(match.group(0))
+    parsed = json.loads(repaired, strict=False)
     if not isinstance(parsed, dict):
         raise ValueError("Model JSON root must be an object")
     return parsed

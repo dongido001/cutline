@@ -240,3 +240,72 @@ Rosa overhears Gabe and freezes.
     assert "Rosa freezes." in shot2["action"]
     assert "CUT TO BLACK." in shot2["action"]
 
+
+def test_uppercase_quoted_dialogue_and_scene_dialogue_deduplication() -> None:
+    script = """COLOR HUNT
+
+Duration: 12 seconds
+Format: 2 shots x 6 seconds
+Aspect ratio: 9:16
+Location: Playroom.
+
+SHOT 1 - FIND RED
+
+Scene: RED HUNT
+Time: 00:00-00:06
+Framing: Medium two-shot
+
+Action:
+Jasmine asks a question.
+
+JASMINE:
+"Can you find something RED?"
+
+Sound: Chime.
+
+Image prompt:
+Jasmine and Skylar in playroom.
+
+Video prompt:
+Jasmine asks the viewer.
+
+SHOT 2 - RED IS BACK!
+
+Scene: RED HUNT
+Time: 00:06-00:12
+Framing: Medium tracking shot
+
+Action:
+Skylar points at the ball.
+
+SKYLAR:
+"RED BALL!"
+
+JASMINE:
+"Yes! Red!"
+
+Sound: Bell.
+
+Image prompt:
+Skylar pointing at red ball.
+
+Video prompt:
+Skylar shouts RED BALL and Jasmine confirms.
+"""
+    result = parse_structured_screenplay(script)
+    assert result is not None
+    assert len(result["scenes"]) == 1
+    scene = result["scenes"][0]
+    assert scene["shots"][0]["dialogue"] == [
+        {"character": "JASMINE", "text": "Can you find something RED?"}
+    ]
+    assert scene["shots"][1]["dialogue"] == [
+        {"character": "SKYLAR", "text": "RED BALL!"},
+        {"character": "JASMINE", "text": "Yes! Red!"},
+    ]
+    assert scene["dialogue"] == [
+        {"character": "JASMINE", "text": "Can you find something RED?"},
+        {"character": "SKYLAR", "text": "RED BALL!"},
+        {"character": "JASMINE", "text": "Yes! Red!"},
+    ]
+
