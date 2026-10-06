@@ -330,6 +330,48 @@ def _phone_routing_instruction(
     )
 
 
+def _collect_visual_profiles(
+    snapshot: dict[str, Any],
+    shot: Shot | None = None,
+) -> list[str]:
+    characters = snapshot.get("characters") or []
+    snapshot_voices = {
+        str(item.get("id") or item.get("name") or ""): item
+        for item in (snapshot.get("character_voices") or [])
+        if isinstance(item, dict)
+    }
+    project_chars: list[Character] = []
+    if shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
+        project = shot.scene.script_version.project
+        if project is not None:
+            project_chars = list(project.characters or [])
+    by_id = {char.id: char for char in project_chars}
+    by_name = {canonical_character_name(char.name): char for char in project_chars if char.name}
+
+    profiles: list[str] = []
+    seen: set[str] = set()
+    for item in characters:
+        if not isinstance(item, dict):
+            continue
+        char_id = _text(item.get("id"))
+        name = _text(item.get("name"))
+        canon = canonical_character_name(name)
+        if not canon or canon in seen:
+            continue
+        live_char = (by_id.get(char_id) if char_id else None) or by_name.get(canon)
+        sv = snapshot_voices.get(char_id) or snapshot_voices.get(name) or {}
+        notes = _text((live_char.notes if live_char is not None else "") or item.get("notes") or sv.get("notes"))
+        if not notes:
+            continue
+        # Keep the first two sentences (physical identity + wardrobe) so plot notes don't clutter the video prompt.
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", notes) if part.strip()]
+        visual_summary = " ".join(sentences[:2]).rstrip(".")
+        if visual_summary:
+            seen.add(canon)
+            profiles.append(f"{name}: {visual_summary}")
+    return profiles
+
+
 def video_continuity_prompt(
     snapshot: dict[str, Any] | None,
     video_prompt: str,
@@ -354,6 +396,9 @@ def video_continuity_prompt(
         package.append(
             f"Character identity continuity: {cast_names}; preserve canonical identities without face, age, hair, body, or voice changes."
         )
+    visual_profiles = _collect_visual_profiles(snapshot, shot=shot)
+    if visual_profiles:
+        package.append(f"Character visual profiles: {'; '.join(visual_profiles)}.")
     voice_entries = _collect_voice_entries(snapshot, shot=shot)
     if voice_entries:
         package.append(f"Character voices: {'; '.join(voice_entries)}.")
