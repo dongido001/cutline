@@ -12,25 +12,97 @@ const store = useStudioStore()
 const route = useRoute()
 const router = useRouter()
 const timeline = ref<ProjectTimeline | null>(null)
+
+interface PersistedTimelineUiState {
+  isMuted?: boolean
+  zoomLevel?: number
+  playheadMs?: number
+  selectedKind?: 'primary' | 'image' | 'text'
+  selectedId?: string
+  variant?: OutputVariant
+  scrollLeft?: number
+}
+
+const GLOBAL_PREFS_KEY = 'cutline:timeline-prefs'
+
+function uiStorageKey(projectId = props.project.id, episodeId = store.currentEpisodeId): string {
+  return `cutline:timeline-ui:${projectId}:${episodeId || 'default'}`
+}
+
+function readPersistedUiState(projectId = props.project.id, episodeId = store.currentEpisodeId): PersistedTimelineUiState {
+  const result: PersistedTimelineUiState = {}
+  try {
+    const rawGlobal = localStorage.getItem(GLOBAL_PREFS_KEY)
+    if (rawGlobal) {
+      const parsedGlobal = JSON.parse(rawGlobal) as { isMuted?: boolean }
+      if (typeof parsedGlobal?.isMuted === 'boolean') result.isMuted = parsedGlobal.isMuted
+    }
+  } catch {}
+  try {
+    const rawScoped =
+      localStorage.getItem(uiStorageKey(projectId, episodeId)) ||
+      (episodeId ? localStorage.getItem(uiStorageKey(projectId, null)) : null)
+    if (rawScoped) {
+      const parsed = JSON.parse(rawScoped) as PersistedTimelineUiState
+      if (parsed && typeof parsed === 'object') Object.assign(result, parsed)
+    }
+  } catch {}
+  return result
+}
+
+const initialUiState = readPersistedUiState()
 const requestedVariant = route.query.variant
 const variant = ref<OutputVariant>(
   requestedVariant === 'shorts' || requestedVariant === 'landscape'
     ? requestedVariant
-    : props.project.aspect_ratio === '9:16' ? 'shorts' : 'landscape',
+    : initialUiState.variant === 'shorts' || initialUiState.variant === 'landscape'
+      ? initialUiState.variant
+      : props.project.aspect_ratio === '9:16' ? 'shorts' : 'landscape',
 )
-const selectedKind = ref<'primary' | 'image' | 'text'>('primary')
-const selectedId = ref('')
-const playheadMs = ref(0)
+const selectedKind = ref<'primary' | 'image' | 'text'>(
+  initialUiState.selectedKind === 'image' || initialUiState.selectedKind === 'text'
+    ? initialUiState.selectedKind
+    : 'primary',
+)
+const selectedId = ref(typeof initialUiState.selectedId === 'string' ? initialUiState.selectedId : '')
+const playheadMs = ref(typeof initialUiState.playheadMs === 'number' && initialUiState.playheadMs >= 0 ? initialUiState.playheadMs : 0)
 const playing = ref(false)
-const isMuted = ref(false)
+const isMuted = ref(Boolean(initialUiState.isMuted))
 const previewVideo = ref<HTMLVideoElement | null>(null)
 const sourceDurationMs = ref(0)
 const timelineScrollRef = ref<HTMLElement | null>(null)
 const containerWidth = ref(1000)
-const zoomLevel = ref(1)
+const zoomLevel = ref(
+  typeof initialUiState.zoomLevel === 'number' && initialUiState.zoomLevel >= 1 && initialUiState.zoomLevel <= 10
+    ? initialUiState.zoomLevel
+    : 1,
+)
+const currentScrollLeft = ref(typeof initialUiState.scrollLeft === 'number' && initialUiState.scrollLeft >= 0 ? initialUiState.scrollLeft : 0)
 const showShortcutsModal = ref(false)
 // Publish modal state is URL-driven (?publish=1) so refresh preserves it
 const showPublishModal = computed(() => route.query.publish === '1')
+
+function persistUiState() {
+  const payload: PersistedTimelineUiState = {
+    isMuted: isMuted.value,
+    zoomLevel: zoomLevel.value,
+    playheadMs: Math.round(playheadMs.value),
+    selectedKind: selectedKind.value,
+    selectedId: selectedId.value,
+    variant: variant.value,
+    scrollLeft: timelineScrollRef.value ? Math.round(timelineScrollRef.value.scrollLeft) : Math.round(currentScrollLeft.value),
+  }
+  try {
+    localStorage.setItem(GLOBAL_PREFS_KEY, JSON.stringify({ isMuted: isMuted.value }))
+    localStorage.setItem(uiStorageKey(), JSON.stringify(payload))
+  } catch {}
+}
+
+function handleTimelineScroll() {
+  if (!timelineScrollRef.value) return
+  currentScrollLeft.value = timelineScrollRef.value.scrollLeft
+  persistUiState()
+}
 
 function openPublishModal() {
   router.replace({ query: { ...route.query, publish: '1' } })
@@ -66,7 +138,11 @@ function zoomOut() {
 
 function resetZoom() {
   zoomLevel.value = 1
-  nextTick(() => scrollPlayheadIntoView())
+  currentScrollLeft.value = 0
+  nextTick(() => {
+    if (timelineScrollRef.value) timelineScrollRef.value.scrollLeft = 0
+    scrollPlayheadIntoView()
+  })
 }
 
 function handleTimelineWheel(event: WheelEvent) {
@@ -85,6 +161,7 @@ function scrollPlayheadIntoView() {
   const clientWidth = container.clientWidth
   if (targetX < scrollLeft + 60 || targetX > scrollLeft + clientWidth - 60) {
     container.scrollLeft = Math.max(0, targetX - clientWidth / 2)
+    currentScrollLeft.value = container.scrollLeft
   }
 }
 const loading = ref(true)
@@ -94,6 +171,8 @@ const localError = ref('')
 const history = ref<string[]>([])
 const future = ref<string[]>([])
 let saveTimer: number | undefined
+let pendingSave = false
+let dirtyDocument = false
 let playbackTimer: number | undefined
 type OverlayItem = { id: string; start_ms: number; duration_ms: number }
 type OverlayEditMode = 'move' | 'resize-start' | 'resize-end'
@@ -213,16 +292,52 @@ const activeBadge = computed(() => {
   return activeMedia.value.native ? `NATIVE ${targetAspect.value}` : `REFRAMED ${targetAspect.value === '9:16' ? '16:9' : '9:16'}`
 })
 
+let loadedProjectId = props.project.id
+let loadedEpisodeId: string | undefined = store.currentEpisodeId || undefined
+
 async function loadTimeline() {
   loading.value = true
   localError.value = ''
+  const reqProjectId = props.project.id
+  const reqEpisodeId = store.currentEpisodeId || undefined
+  const persisted = readPersistedUiState(reqProjectId, reqEpisodeId || null)
+  if (typeof persisted.isMuted === 'boolean') {
+    isMuted.value = persisted.isMuted
+  }
+  if (typeof persisted.zoomLevel === 'number' && persisted.zoomLevel >= 1 && persisted.zoomLevel <= 10) {
+    zoomLevel.value = persisted.zoomLevel
+  }
   try {
-    timeline.value = await api.timeline(props.project.id, variant.value, store.currentEpisodeId || undefined)
+    timeline.value = await api.timeline(reqProjectId, variant.value, reqEpisodeId)
+    loadedProjectId = reqProjectId
+    loadedEpisodeId = reqEpisodeId
     const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
     const requestedIndex = trimShot ? timeline.value.document.primary.findIndex((item) => item.source?.ref_id === trimShot && item.kind === 'video') : -1
-    const initialIndex = requestedIndex >= 0 ? requestedIndex : 0
-    selectedId.value = timeline.value.document.primary[initialIndex]?.id ?? ''
-    playheadMs.value = timeline.value.document.primary.slice(0, initialIndex).reduce((sum, item) => sum + item.duration_ms, 0)
+    if (requestedIndex >= 0) {
+      selectedKind.value = 'primary'
+      selectedId.value = timeline.value.document.primary[requestedIndex]?.id ?? ''
+      playheadMs.value = timeline.value.document.primary.slice(0, requestedIndex).reduce((sum, item) => sum + item.duration_ms, 0)
+    } else {
+      const doc = timeline.value.document
+      if (persisted.selectedKind === 'image' && persisted.selectedId && doc.image_overlays.some((item) => item.id === persisted.selectedId)) {
+        selectedKind.value = 'image'
+        selectedId.value = persisted.selectedId
+      } else if (persisted.selectedKind === 'text' && persisted.selectedId && doc.text_overlays.some((item) => item.id === persisted.selectedId)) {
+        selectedKind.value = 'text'
+        selectedId.value = persisted.selectedId
+      } else if (persisted.selectedId && doc.primary.some((item) => item.id === persisted.selectedId)) {
+        selectedKind.value = 'primary'
+        selectedId.value = persisted.selectedId
+      } else {
+        selectedKind.value = 'primary'
+        selectedId.value = doc.primary[0]?.id ?? ''
+      }
+      if (typeof persisted.playheadMs === 'number' && Number.isFinite(persisted.playheadMs)) {
+        playheadMs.value = Math.max(0, Math.min(totalMs.value, persisted.playheadMs))
+      } else {
+        playheadMs.value = 0
+      }
+    }
     if (route.query.variant === 'shorts' || route.query.variant === 'landscape') variant.value = route.query.variant
     history.value = []
     future.value = []
@@ -231,6 +346,19 @@ async function loadTimeline() {
   } finally {
     loading.value = false
   }
+  await nextTick()
+  updateContainerWidth()
+  if (timelineScrollRef.value) {
+    const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
+    if (!trimShot && typeof persisted.scrollLeft === 'number' && persisted.scrollLeft > 0) {
+      timelineScrollRef.value.scrollLeft = persisted.scrollLeft
+      currentScrollLeft.value = persisted.scrollLeft
+    } else if (zoomLevel.value > 1) {
+      scrollPlayheadIntoView()
+    }
+  }
+  syncVideo()
+  persistUiState()
 }
 
 function snapshot() {
@@ -264,15 +392,29 @@ function redo() {
 
 function scheduleSave() {
   if (!timeline.value) return
+  dirtyDocument = true
   saveState.value = 'Unsaved'
   window.clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(saveTimeline, 650)
+  saveTimer = window.setTimeout(() => {
+    saveTimer = undefined
+    void saveTimeline()
+  }, 650)
 }
 
 async function saveTimeline() {
-  if (!timeline.value || saving.value) return
+  if (!timeline.value) return
+  if (saving.value) {
+    pendingSave = true
+    return
+  }
+  window.clearTimeout(saveTimer)
+  saveTimer = undefined
+  dirtyDocument = false
   saving.value = true
   saveState.value = 'Saving...'
+  const targetProjectId = loadedProjectId
+  const targetVariant = timeline.value.edit || variant.value
+  const targetEpisodeId = loadedEpisodeId
   try {
     for (const item of timeline.value.document.primary) {
       item.duration_ms = Math.round(item.duration_ms)
@@ -289,15 +431,36 @@ async function saveTimeline() {
       item.start_ms = Math.round(item.start_ms)
       item.duration_ms = Math.round(item.duration_ms)
     }
-    timeline.value = await api.saveTimeline(props.project.id, timeline.value, variant.value, store.currentEpisodeId || undefined)
-    saveState.value = 'Saved'
+    const saved = await api.saveTimeline(targetProjectId, timeline.value, targetVariant, targetEpisodeId)
+    if (props.project.id === targetProjectId && (timeline.value?.edit || variant.value) === targetVariant && (store.currentEpisodeId || undefined) === targetEpisodeId) {
+      if (!pendingSave && !dirtyDocument) {
+        timeline.value = saved
+      } else if (timeline.value) {
+        timeline.value.revision = saved.revision
+      }
+    }
+    if (!pendingSave && !dirtyDocument) {
+      saveState.value = 'Saved'
+    }
     localError.value = ''
-    await store.loadProject(props.project.id)
+    await store.loadProject(targetProjectId)
   } catch (cause) {
     localError.value = cause instanceof Error ? cause.message : 'Could not save timeline'
     saveState.value = 'Save failed'
   } finally {
     saving.value = false
+    if (pendingSave || dirtyDocument) {
+      pendingSave = false
+      void saveTimeline()
+    }
+  }
+}
+
+async function flushPendingSave() {
+  if (saveTimer !== undefined || dirtyDocument) {
+    window.clearTimeout(saveTimer)
+    saveTimer = undefined
+    await saveTimeline()
   }
 }
 
@@ -584,7 +747,8 @@ async function uploadAsset(event: Event, append: boolean) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file || !timeline.value) return
-  timeline.value = await api.uploadTimelineAsset(props.project.id, file)
+  await flushPendingSave()
+  timeline.value = await api.uploadTimelineAsset(props.project.id, file, file.name, variant.value, store.currentEpisodeId || undefined)
   const asset = timeline.value.assets[timeline.value.assets.length - 1]
   if (asset) {
     selectedKind.value = 'primary'
@@ -686,13 +850,15 @@ function seek(event: Event) {
     selectedId.value = item.id
   }
   syncVideo()
+  persistUiState()
 }
 
 function toggleMute() {
   isMuted.value = !isMuted.value
   if (previewVideo.value) {
-    previewVideo.value.muted = isMuted.value
+    previewVideo.value.muted = isMuted.value || Boolean(activeItem.value?.mute_audio)
   }
+  persistUiState()
 }
 
 function syncVideo() {
@@ -717,7 +883,7 @@ function toggleSelectedAudio() {
 
 function handleLoadedMetadata() {
   const video = previewVideo.value
-  if (video) video.muted = isMuted.value
+  if (video) video.muted = isMuted.value || Boolean(activeItem.value?.mute_audio)
   sourceDurationMs.value = video && Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : selectedTrimOutMs.value
   syncVideo()
 }
@@ -731,19 +897,20 @@ async function startActiveVideo() {
     try {
       await video.play()
     } catch {
-      // Fall back to muted playback if autoplay restrictions require user interaction
+      // Fall back to muted playback on the element if autoplay restrictions require user interaction
       video.muted = true
-      isMuted.value = true
       await video.play().catch(() => undefined)
     }
   }
 }
 
 function stopPlayback() {
+  const wasPlaying = playing.value
   playing.value = false
   if (playbackTimer !== undefined) cancelAnimationFrame(playbackTimer)
   playbackTimer = undefined
   previewVideo.value?.pause()
+  if (wasPlaying && !loading.value) persistUiState()
 }
 
 function togglePlayback() {
@@ -767,21 +934,41 @@ function togglePlayback() {
 }
 
 async function renderVariant() {
+  await flushPendingSave()
   await store.renderFinalCut(variant.value)
 }
 
 async function resetTimeline() {
   if (!confirm('Reset the timeline to the current shot plan? All timeline edits and overlays will be removed.')) return
+  window.clearTimeout(saveTimer)
+  saveTimer = undefined
+  dirtyDocument = false
+  pendingSave = false
   timeline.value = await api.resetTimeline(props.project.id, store.currentEpisodeId || undefined)
+  selectedKind.value = 'primary'
   selectedId.value = timeline.value.document.primary[0]?.id ?? ''
+  playheadMs.value = 0
+  persistUiState()
   await store.loadProject(props.project.id)
 }
 
-watch(() => [props.project.id, store.currentEpisodeId], loadTimeline)
-watch(variant, () => {
+watch([isMuted, zoomLevel, selectedKind, selectedId, variant], () => {
+  if (!loading.value) persistUiState()
+})
+watch(playheadMs, () => {
+  if (!loading.value && !playing.value) persistUiState()
+})
+watch(() => [props.project.id, store.currentEpisodeId], async () => {
+  await flushPendingSave()
+  await loadTimeline()
+})
+watch(variant, async () => {
   stopPlayback()
+  persistUiState()
   emit('variantChange', variant.value)
-  void loadTimeline().then(() => startActiveVideo())
+  await flushPendingSave()
+  await loadTimeline()
+  await startActiveVideo()
 })
 watch(activeIndex, () => void startActiveVideo())
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -930,7 +1117,13 @@ function handleKeydown(event: KeyboardEvent) {
 
 let resizeObserver: ResizeObserver | null = null
 
+function handleBeforeUnload() {
+  persistUiState()
+  void flushPendingSave()
+}
+
 onMounted(() => {
+  emit('variantChange', variant.value)
   updateContainerWidth()
   if (typeof ResizeObserver !== 'undefined' && timelineScrollRef.value) {
     resizeObserver = new ResizeObserver(() => updateContainerWidth())
@@ -938,14 +1131,18 @@ onMounted(() => {
   }
   window.addEventListener('resize', updateContainerWidth)
   window.addEventListener('keydown', handleKeydown)
-  loadTimeline()
+  window.addEventListener('beforeunload', handleBeforeUnload)
+  void loadTimeline()
 })
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect()
   window.removeEventListener('resize', updateContainerWidth)
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
   stopPlayback()
   finishOverlayEdit()
+  persistUiState()
+  void flushPendingSave()
 })
 </script>
 
@@ -988,7 +1185,7 @@ onBeforeUnmount(() => {
     <template v-else-if="timeline">
       <div class="editor-main">
         <section class="program-monitor" :class="variant">
-          <video v-if="activeMedia?.mime_type.startsWith('video')" ref="previewVideo" :src="activeMedia.url" :style="activeMediaStyle" :muted="isMuted" playsinline preload="auto" @loadedmetadata="handleLoadedMetadata"></video>
+          <video v-if="activeMedia?.mime_type.startsWith('video')" ref="previewVideo" :src="activeMedia.url" :style="activeMediaStyle" :muted="isMuted || Boolean(activeItem?.mute_audio)" playsinline preload="auto" @loadedmetadata="handleLoadedMetadata"></video>
           <img v-else-if="activeMedia" :src="activeMedia.url" :style="activeMediaStyle" alt="" />
           <div v-else-if="activeItem?.kind === 'title'" class="preview-title">{{ activeItem.text }}</div>
           <div v-else class="preview-missing">Missing media</div>
@@ -1103,6 +1300,7 @@ onBeforeUnmount(() => {
         class="timeline-scroll"
         :style="{ '--track-width': `${trackWidthPx}px`, '--full-track-width': `${trackWidthPx + 110}px` }"
         @wheel="handleTimelineWheel"
+        @scroll="handleTimelineScroll"
       >
         <div class="playhead-scrubber">
           <strong>TIMELINE</strong>

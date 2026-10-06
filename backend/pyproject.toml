@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local-first movie production API and persistent generation worker"
 readme = "README.md"
 authors = [
-    { name = "Gideon", email = "gideon.o@turing.com" }
+    { name = "Gideon", email = "dongidomed@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [

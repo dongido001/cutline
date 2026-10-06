@@ -233,6 +233,12 @@ def image_providers() -> list[dict]:
     return image_provider_statuses()
 
 
+@app.post("/api/demo-project", response_model=ProjectSummary, status_code=201)
+def create_demo_project(db: Session = Depends(get_db)) -> Project:
+    from .demo import load_demo_project
+    return load_demo_project(db)
+
+
 @app.post("/api/projects", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Job:
     project = Project(
@@ -2662,7 +2668,14 @@ def reset_timeline(
 
 
 @app.post("/api/projects/{project_id}/timeline/assets", response_model=ProjectTimelineRead)
-async def upload_timeline_asset(project_id: str, file: UploadFile = File(...), label: str = Form("Uploaded image"), db: Session = Depends(get_db)) -> dict:
+async def upload_timeline_asset(
+    project_id: str,
+    file: UploadFile = File(...),
+    label: str = Form("Uploaded image"),
+    episode_id: str | None = None,
+    edit: str = "landscape",
+    db: Session = Depends(get_db),
+) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -2677,19 +2690,29 @@ async def upload_timeline_asset(project_id: str, file: UploadFile = File(...), l
     (settings.media_dir / filename).write_bytes(content)
     asset = TimelineAsset(project_id=project.id, filename=filename, mime_type=file.content_type, label=label[:160] or "Uploaded image")
     db.add(asset)
-    timeline = ensure_timeline(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
     timeline.revision += 1
     db.commit()
-    return {"revision": timeline.revision, "document": timeline.document, "assets": project.timeline_assets}
+    active_doc = (
+        timeline.shorts_document or timeline.document
+        if edit == "shorts"
+        else timeline.document
+    )
+    return {"revision": timeline.revision, "document": active_doc, "edit": edit if edit in {"landscape", "shorts"} else "landscape", "assets": project.timeline_assets}
 
 
 @app.delete("/api/projects/{project_id}/timeline/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_timeline_asset(project_id: str, asset_id: str, db: Session = Depends(get_db)) -> None:
+def delete_timeline_asset(
+    project_id: str,
+    asset_id: str,
+    episode_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> None:
     asset = db.get(TimelineAsset, asset_id)
     if not asset or asset.project_id != project_id:
         raise HTTPException(status_code=404, detail="Timeline asset not found")
     project = asset.project
-    timeline = ensure_timeline(project, db)
+    timeline = ensure_timeline(project, db, episode_id=episode_id)
     document = TimelineDocument.model_validate(timeline.document)
     used = any(item.source and item.source.kind == "asset" and item.source.ref_id == asset.id for item in document.primary) or any(item.source.kind == "asset" and item.source.ref_id == asset.id for item in document.image_overlays)
     if used:

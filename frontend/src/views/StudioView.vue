@@ -842,6 +842,22 @@ async function decide(id: string | number, decision: 'accepted' | 'rejected') {
   }
 }
 
+async function loadDemoProject() {
+  store.busy = true
+  store.error = ''
+  try {
+    const project = await api.loadDemoProject()
+    store.projects = await api.projects()
+    await store.loadProject(project.id)
+    showCreate.value = false
+    await router.push(projectRoute(project.id, 'shots'))
+  } catch (cause) {
+    store.error = cause instanceof Error ? cause.message : 'Could not load demo project'
+  } finally {
+    store.busy = false
+  }
+}
+
 async function submitProject() {
   try {
     await store.createProject({ ...form })
@@ -1566,6 +1582,10 @@ function formatRenderedAt(value: string) {
             <button @click="openDeleteConfirmation(project)"><Trash2 :size="14" />Delete project</button>
           </div>
         </div>
+        <button v-if="!store.projects.length" class="project-item" :disabled="store.busy" @click="loadDemoProject">
+          <span class="project-thumb"><Play :size="17" /></span>
+          <span class="project-copy"><strong>{{ store.busy ? 'Loading…' : 'Load demo project' }}</strong><small>Jasmine &amp; Skylar · 16 shots</small></span>
+        </button>
         <button v-if="!store.projects.length" class="project-item" @click="showCreate = true">
           <span class="project-thumb"><Film :size="17" /></span>
           <span class="project-copy"><strong>Create a project</strong><small>Import a screenplay</small></span>
@@ -2323,6 +2343,8 @@ function formatRenderedAt(value: string) {
   <div v-if="showCreate" class="modal-backdrop" @pointerdown="trackCreateBackdropPress" @click="closeCreateFromBackdrop">
     <form class="project-modal" @submit.prevent="submitProject">
       <header><div><span class="section-label">New project</span><h2>Import screenplay</h2></div><button type="button" class="mini-icon" aria-label="Close" @click="showCreate = false"><X :size="17" /></button></header>
+      <button type="button" class="secondary-button" :disabled="store.busy" @click="loadDemoProject">{{ store.busy ? 'Loading…' : 'Load demo project' }}</button>
+      <p>Explore Jasmine &amp; Skylar: 16 planned shots, cast, and continuity notes. Images and clips are optional downloads.</p>
       <label>Project title<input v-model="form.title" required /></label>
       <div class="form-grid">
         <label>Target length (optional)<select v-model="form.target_duration_seconds"><option :value="0">Automatic from script</option><option :value="30">30 seconds</option><option :value="60">1 minute</option><option :value="180">3 minutes</option><option :value="300">5 minutes</option></select><small>Planning guidance only. Supplied scenes and timestamps are preserved.</small></label>

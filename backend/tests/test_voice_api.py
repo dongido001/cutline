@@ -1,3 +1,5 @@
+import wave
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -29,6 +31,17 @@ def _client(tmp_path, monkeypatch):
         yield session
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "vibevoice_root", tmp_path / "vibevoice")
+    monkeypatch.setattr(settings, "vibevoice_mode", "mock")
+    from backend.voice_service import VIBEVOICE_METADATA
+    voices = settings.vibevoice_root / "demo" / "voices"
+    voices.mkdir(parents=True)
+    for voice_id in VIBEVOICE_METADATA:
+        with wave.open(str(voices / f"{voice_id}.wav"), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes(b"\x00\x00" * 24000)
     app.dependency_overrides[get_db] = override_db
     return TestClient(app), session, project, shot
 

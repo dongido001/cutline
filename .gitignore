@@ -25,23 +25,3 @@ bridges/gemini-web-to-api/
 
 output/
 tmp/
-scripts/build_mreif_offer_letter.py
-
-backend/.venv/
-backend/data/
-backend/.pytest_cache/
-backend/**/__pycache__/
-
-frontend/node_modules/
-frontend/dist/
-frontend/test-results/
-frontend/playwright-report/
-
-bridges/.env
-bridges/*.env
-bridges/.playwright/
-bridges/chatgpt-profile/
-bridges/chatgpt-web-provider/
-bridges/gemini-web-to-api/
-*.db
-*.sqlite*

@@ -187,3 +187,57 @@ def test_timeline_accepts_float_millisecond_values_and_coerces_to_int(tmp_path, 
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_timeline_persists_mute_audio_across_episode_1_adoption(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'timeline_mute.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Mute persistence test", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. STUDIO - DAY")
+    Shot(
+        scene=scene,
+        order_index=0,
+        title="Opening shot",
+        duration_ms=3000,
+        image_prompt="A studio",
+        video_prompt="Pan across",
+    )
+    session.add(project)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        # 1. Create and edit legacy timeline before Episode 1 is resolved
+        initial_res = client.get(f"/api/projects/{project.id}/timeline")
+        assert initial_res.status_code == 200
+        timeline = initial_res.json()
+        timeline["document"]["primary"][0]["mute_audio"] = True
+
+        saved_res = client.put(
+            f"/api/projects/{project.id}/timeline",
+            json={"revision": timeline["revision"], "document": timeline["document"], "edit": "landscape"},
+        )
+        assert saved_res.status_code == 200
+        assert saved_res.json()["document"]["primary"][0]["mute_audio"] is True
+
+        # 2. Fetch project detail (which auto-creates Episode 1) and then fetch timeline with episode_id
+        proj_res = client.get(f"/api/projects/{project.id}")
+        assert proj_res.status_code == 200
+        ep1_id = proj_res.json()["current_episode_id"]
+        assert ep1_id
+
+        ep_timeline_res = client.get(f"/api/projects/{project.id}/timeline?episode_id={ep1_id}&edit=landscape")
+        assert ep_timeline_res.status_code == 200
+        ep_timeline = ep_timeline_res.json()
+        assert ep_timeline["document"]["primary"][0]["mute_audio"] is True
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+

@@ -544,8 +544,8 @@ export const useStudioStore = defineStore('studio', () => {
       throw cause
     }
     if (sequence !== projectLoadSequence) return
+    currentEpisodeId.value = project.current_episode_id || null
     currentProject.value = project
-    currentEpisodeId.value = currentProject.value.current_episode_id || null
     if (currentEpisodeId.value) {
       try {
         localStorage.setItem(`cutline:active-episode:${id}`, currentEpisodeId.value)

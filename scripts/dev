@@ -3,9 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME="$ROOT/.runtime"
+if [[ "${1:-}" != "" && "${1:-}" != "--bridges" ]]; then
+  printf 'Usage: ./scripts/dev [--bridges]\n' >&2
+  exit 2
+fi
 mkdir -p "$RUNTIME"
 
 PIDS=()
+REQUIRED_PIDS=()
 GEMINI_STARTED=0
 
 log() { printf '[cutline] %s\n' "$*"; }
@@ -28,6 +33,7 @@ start_process() {
   (cd "$directory" && exec "$@") >"$RUNTIME/$logfile" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
+  [[ "$name" == "ChatGPT Web bridge" ]] || REQUIRED_PIDS+=("$pid")
   log "starting $name (log: .runtime/$logfile)"
 }
 cleanup() {
@@ -48,44 +54,63 @@ trap cleanup EXIT INT TERM
 command -v uv >/dev/null || { log "uv is required"; exit 1; }
 command -v npm >/dev/null || { log "npm is required"; exit 1; }
 command -v curl >/dev/null || { log "curl is required"; exit 1; }
+command -v lsof >/dev/null || { log "lsof is required"; exit 1; }
 
-if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-  if ! port_open 4981; then
-    log "starting Gemini Web bridge"
-    docker compose -f "$ROOT/bridges/docker-compose.yml" up -d gemini-web
-    GEMINI_STARTED=1
-  fi
-  wait_url "Gemini Web" "http://127.0.0.1:4981/health" 30 || log "Gemini fallback unavailable; ChatGPT remains primary"
-else
-  log "Docker is not running; Gemini fallback will be unavailable"
+if [[ ! -x "$ROOT/backend/.venv/bin/movie-worker" ]]; then
+  (cd "$ROOT/backend" && uv sync --locked)
+fi
+if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
+  (cd "$ROOT/frontend" && npm ci)
 fi
 
-set -a
-if [[ -f "$ROOT/bridges/chatgpt.env" ]]; then
-  # shellcheck disable=SC1091
-  source "$ROOT/bridges/chatgpt.env"
-else
-  log "bridges/chatgpt.env is missing; ChatGPT Web bridge will be skipped"
-fi
-set +a
+if [[ "${1:-}" == "--bridges" ]]; then
 
-if [[ -f "$ROOT/bridges/chatgpt.env" ]] && ! port_open 8791; then
-  if [[ -x "$ROOT/bridges/chatgpt-web-provider/.venv/bin/chatgpt-web-provider" ]]; then
-    start_process "ChatGPT Web bridge" "$ROOT/bridges/chatgpt-web-provider" "chatgpt.log" \
-      env PLAYWRIGHT_BROWSERS_PATH="$ROOT/bridges/.playwright" .venv/bin/chatgpt-web-provider
+  if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    if ! port_open 4981 && [[ -f "$ROOT/bridges/gemini-web-to-api/Dockerfile" && -f "$ROOT/bridges/.env" ]]; then
+      log "starting Gemini Web bridge"
+      if docker compose -f "$ROOT/bridges/docker-compose.yml" up -d gemini-web; then
+        GEMINI_STARTED=1
+      else
+        log "Gemini bridge failed to start; continuing without it"
+      fi
+    fi
+    if port_open 4981; then
+      wait_url "Gemini Web" "http://127.0.0.1:4981/health" 10 || log "Gemini fallback unavailable"
+    else
+      log "Gemini bridge not configured or unavailable; continuing without it"
+    fi
   else
-    log "ChatGPT Web bridge is not installed; continuing with mock/Ollama"
+    log "Docker is not running; Gemini fallback will be unavailable"
   fi
-fi
-if port_open 8791; then
-  wait_url "ChatGPT Web" "http://127.0.0.1:8791/health" 60
-  if ! curl --silent --fail --max-time 4 -H "Authorization: Bearer ${CHATGPT_WEB_API_KEYS%%,*}" \
-    "http://127.0.0.1:8791/v1/provider/capabilities" | grep -q 'status_endpoint'; then
-    log "Port 8791 is running stale bridge code without image monitoring. Stop that process and run ./scripts/dev again."
-    exit 1
+
+  set -a
+  if [[ -f "$ROOT/bridges/chatgpt.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT/bridges/chatgpt.env"
+  else
+    log "bridges/chatgpt.env is missing; ChatGPT Web bridge will be skipped"
+  fi
+  set +a
+
+  if [[ -f "$ROOT/bridges/chatgpt.env" ]] && ! port_open 8791; then
+    if [[ -x "$ROOT/bridges/chatgpt-web-provider/.venv/bin/chatgpt-web-provider" ]]; then
+      start_process "ChatGPT Web bridge" "$ROOT/bridges/chatgpt-web-provider" "chatgpt.log" \
+        env PLAYWRIGHT_BROWSERS_PATH="$ROOT/bridges/.playwright" .venv/bin/chatgpt-web-provider
+    else
+      log "ChatGPT Web bridge is not installed; continuing with mock/Ollama"
+    fi
+  fi
+  bridge_key="${CHATGPT_WEB_API_KEYS:-}"
+  if port_open 8791; then
+    if wait_url "ChatGPT Web" "http://127.0.0.1:8791/health" 10 && ! curl --silent --fail --max-time 4 -H "Authorization: Bearer ${bridge_key%%,*}" \
+      "http://127.0.0.1:8791/v1/provider/capabilities" | grep -q 'status_endpoint'; then
+      log "Port 8791 lacks image monitoring or authentication failed; browser images may be unavailable."
+    fi
+  else
+    log "ChatGPT Web is offline; prototype parser remains available"
   fi
 else
-  log "ChatGPT Web is offline; prototype parser remains available"
+  log "Optional browser bridges skipped; use --bridges after configuring them"
 fi
 
 if ! port_open 8000; then
@@ -119,8 +144,8 @@ log "press Ctrl+C to stop services started by this command"
 while true; do
   # When every dependency was already listening, PIDS stays empty. Do not treat
   # an empty expansion as a dead child (bash "${PIDS[@]:-}" → one empty word).
-  if ((${#PIDS[@]} > 0)); then
-    for pid in "${PIDS[@]}"; do
+  if ((${#REQUIRED_PIDS[@]} > 0)); then
+    for pid in "${REQUIRED_PIDS[@]}"; do
       [[ -n "$pid" ]] || continue
       if ! kill -0 "$pid" >/dev/null 2>&1; then
         log "a managed service stopped; inspect .runtime logs"

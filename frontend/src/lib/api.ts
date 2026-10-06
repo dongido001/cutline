@@ -675,6 +675,7 @@ export const api = {
     request<EpisodeSummary>(`/api/projects/${projectId}/episodes/${episodeId}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteEpisode: (projectId: string, episodeId: string) =>
     request<void>(`/api/projects/${projectId}/episodes/${episodeId}`, { method: 'DELETE' }),
+  loadDemoProject: () => request<ProjectSummary>('/api/demo-project', { method: 'POST' }),
   createProject: (input: ProjectInput) =>
     request<Job>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   continueProject: (id: string, input: ProjectContinuationInput) =>
@@ -859,13 +860,18 @@ export const api = {
     const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
     return request<ProjectTimeline>(`/api/projects/${id}/timeline/reset${qs}`, { method: 'POST' })
   },
-  uploadTimelineAsset: (id: string, file: File, label = file.name) => {
+  uploadTimelineAsset: (id: string, file: File, label = file.name, edit: OutputVariant = 'landscape', episodeId?: string) => {
     const body = new FormData()
     body.append('file', file)
     body.append('label', label)
-    return request<ProjectTimeline>(`/api/projects/${id}/timeline/assets`, { method: 'POST', body })
+    const qs = new URLSearchParams({ edit })
+    if (episodeId) qs.set('episode_id', episodeId)
+    return request<ProjectTimeline>(`/api/projects/${id}/timeline/assets?${qs.toString()}`, { method: 'POST', body })
   },
-  deleteTimelineAsset: (id: string, assetId: string) => request<void>(`/api/projects/${id}/timeline/assets/${assetId}`, { method: 'DELETE' }),
+  deleteTimelineAsset: (id: string, assetId: string, episodeId?: string) => {
+    const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+    return request<void>(`/api/projects/${id}/timeline/assets/${assetId}${qs}`, { method: 'DELETE' })
+  },
   publishProviders: () => request<PublishProviderStatus[]>('/api/publish/providers'),
   publishPlan: (id: string, variant: OutputVariant = 'landscape') =>
     request<PublishPlan>(`/api/projects/${id}/publish/plan?variant=${variant}`),

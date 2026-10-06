@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .final_cut import probe_duration_ms
-from .models import Project, ProjectTimeline, Scene, ScriptVersion, Shot, TimelineAsset
+from .models import Episode, Project, ProjectTimeline, Scene, ScriptVersion, Shot, TimelineAsset
 from .schemas import TimelineDocument, TimelinePrimaryItem, TimelineSource, TimelineTextOverlay
 from .settings import settings
 
@@ -113,6 +113,18 @@ def ensure_timeline(project: Project, db: Session, episode_id: str | None = None
         )
         if timeline:
             return timeline
+        ep = db.get(Episode, episode_id)
+        if ep and ep.project_id == project.id and ep.episode_number == 1:
+            legacy = db.scalar(
+                select(ProjectTimeline).where(
+                    ProjectTimeline.project_id == project.id,
+                    ProjectTimeline.episode_id.is_(None),
+                )
+            )
+            if legacy:
+                legacy.episode_id = episode_id
+                db.flush()
+                return legacy
         timeline = ProjectTimeline(
             project_id=project.id,
             episode_id=episode_id,
@@ -131,6 +143,16 @@ def ensure_timeline(project: Project, db: Session, episode_id: str | None = None
     )
     if timeline:
         return timeline
+    ep1_timeline = db.scalar(
+        select(ProjectTimeline)
+        .join(Episode, ProjectTimeline.episode_id == Episode.id)
+        .where(
+            ProjectTimeline.project_id == project.id,
+            Episode.episode_number == 1,
+        )
+    )
+    if ep1_timeline:
+        return ep1_timeline
     timeline = ProjectTimeline(
         project_id=project.id,
         revision=1,
@@ -280,10 +302,10 @@ def append_missing_shots(project: Project, db: Session, episode_id: str | None =
             existing_shot_ids.add(shot.id)
             doc_added += 1
         if doc_added:
-            setattr(project.timeline, doc_attr, document.model_dump(mode="json"))
+            setattr(timeline, doc_attr, document.model_dump(mode="json"))
             total_added = max(total_added, doc_added)
     if total_added:
-        project.timeline.revision += 1
+        timeline.revision += 1
     return total_added
 
 
