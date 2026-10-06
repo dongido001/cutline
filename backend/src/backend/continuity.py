@@ -243,26 +243,42 @@ def _collect_voice_entries(
             seen_names.add(canon)
             entries.append(f"{clean_name}: {voice_desc.rstrip('.')}")
 
-    for item in characters:
-        if not isinstance(item, dict):
-            continue
-        char_id = _text(item.get("id"))
-        name = _text(item.get("name"))
-        sv = snapshot_voices.get(char_id) or snapshot_voices.get(name) or {}
-        add_voice(
-            name,
-            char_id=char_id or None,
-            fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
-            fallback_notes=_text(item.get("notes") or sv.get("notes")),
-        )
-
     dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
-    for line in dialogue:
-        if not isinstance(line, dict):
-            continue
-        speaker = _text(line.get("character") or line.get("speaker"))
-        if speaker:
-            add_voice(speaker)
+    char_by_canon = {
+        canonical_character_name(_text(item.get("name"))): item
+        for item in characters
+        if isinstance(item, dict) and _text(item.get("name"))
+    }
+    if dialogue:
+        for line in dialogue:
+            if not isinstance(line, dict):
+                continue
+            speaker = _text(line.get("character") or line.get("speaker"))
+            if not speaker:
+                continue
+            canon = canonical_character_name(speaker)
+            item = char_by_canon.get(canon) or {}
+            char_id = _text(item.get("id"))
+            sv = snapshot_voices.get(char_id) or snapshot_voices.get(canon) or snapshot_voices.get(speaker) or {}
+            add_voice(
+                speaker,
+                char_id=char_id or None,
+                fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
+                fallback_notes=_text(item.get("notes") or sv.get("notes")),
+            )
+    else:
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            char_id = _text(item.get("id"))
+            name = _text(item.get("name"))
+            sv = snapshot_voices.get(char_id) or snapshot_voices.get(name) or {}
+            add_voice(
+                name,
+                char_id=char_id or None,
+                fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
+                fallback_notes=_text(item.get("notes") or sv.get("notes")),
+            )
 
     return entries
 

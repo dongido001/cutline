@@ -42,7 +42,19 @@ export function buildShotVideoPrompt(
     seenVoiceNames.add(key)
     voiceEntries.push(`${name}: ${voice}`)
   }
-  if (snapshot?.characters.length) {
+  if (shot.dialogue && shot.dialogue.length > 0) {
+    for (const line of shot.dialogue) {
+      const speaker = (line.character || line.speaker || '').trim()
+      if (!speaker) continue
+      const speakerUpper = speaker.toUpperCase()
+      const current = characters.find(
+        (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
+      )
+      const snapChar = snapshot?.characters.find((c) => c.name.toUpperCase() === speakerUpper)
+      const snapVoice = snapshot?.character_voices?.find((v) => v.name.toUpperCase() === speakerUpper)?.voice_description
+      addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice)
+    }
+  } else if (snapshot?.characters.length) {
     for (const item of snapshot.characters) {
       const current = characters.find((c) => c.id === item.id || c.name.toUpperCase() === item.name.toUpperCase())
       const snapVoice = snapshot.character_voices?.find((v) => v.id === item.id || v.name === item.name)?.voice_description
@@ -52,15 +64,6 @@ export function buildShotVideoPrompt(
     for (const current of characters.filter((c) => selected.has(c.id))) {
       addVoiceForCharacter(current)
     }
-  }
-  for (const line of shot.dialogue || []) {
-    const speaker = (line.character || line.speaker || '').trim()
-    if (!speaker) continue
-    const speakerUpper = speaker.toUpperCase()
-    const current = characters.find(
-      (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
-    )
-    addVoiceForCharacter(current, speaker)
   }
 
   const continuityScene = snapshot?.scene ?? scene

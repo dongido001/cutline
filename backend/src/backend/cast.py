@@ -79,6 +79,24 @@ def cast_portrait_prompt(character: Character, *, look: str | None = None) -> st
     )
 
 
+QUOTED_SPEECH_RE = re.compile(r'"[^"\n]+"|\u201c[^\u201d\n]+\u201d')
+
+
+def _is_explicitly_absent(name_token: str, haystack: str) -> bool:
+    escaped = re.escape(name_token)
+    if re.search(
+        rf"\b{escaped}(?:\s+[A-Z]+)?\s+(?:HAS\s+ALREADY\s+[^.\n]{{0,50}}?\s+AND\s+|IS\s+ALREADY\s+[^.\n]{{0,50}}?\s+AND\s+)?(?:IS\s+)?(?:NOT\s+PHYSICALLY\s+PRESENT|NOT\s+VISIBLE|NEVER\s+APPEARS|MUST\s+NOT\s+APPEAR|DOES\s+NOT\s+APPEAR|OUTSIDE\s+THE\s+VISIBLE\s+FRAME|OUT\s+OF\s+THE\s+MAIN\s+FRAME|GONE)\b",
+        haystack,
+    ):
+        return True
+    if re.search(
+        rf"\b(?:DO\s+NOT\s+GENERATE|ONCE)\s+{escaped}\b|\bAFTER\s+{escaped}(?:'S|\u2019S)\s+EXIT\b",
+        haystack,
+    ):
+        return True
+    return False
+
+
 def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
     if isinstance(shot, Shot):
         dialogue = shot.dialogue or []
@@ -104,7 +122,15 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
             seen.add(key)
             names.append(key)
 
-    haystack = f"{title}\n{action}\n{image_prompt}\n{video_prompt}".upper()
+    visual_text = "\n".join(
+        (
+            title,
+            QUOTED_SPEECH_RE.sub(" ", action),
+            QUOTED_SPEECH_RE.sub(" ", image_prompt),
+            QUOTED_SPEECH_RE.sub(" ", video_prompt),
+        )
+    )
+    haystack = visual_text.upper()
     return names, haystack
 
 
@@ -115,11 +141,14 @@ def match_character_ids(
 ) -> list[str]:
     char_list = list(characters)
     dialogue_set = {canonical_character_name(name) for name in dialogue_names}
+    by_exact_key = {canonical_character_name(c.name): c for c in char_list if canonical_character_name(c.name)}
     first_word_counts: dict[str, int] = {}
     for character in char_list:
         key = canonical_character_name(character.name)
         parts = key.split()
         if parts:
+            if len(parts) > 1 and parts[0] in by_exact_key:
+                continue
             first_word_counts[parts[0]] = first_word_counts.get(parts[0], 0) + 1
 
     matched: list[str] = []
@@ -128,9 +157,15 @@ def match_character_ids(
         if not key:
             continue
         parts = key.split()
+        if len(parts) > 1 and parts[0] in by_exact_key:
+            continue
         first_word = parts[0] if len(parts) > 1 and first_word_counts.get(parts[0]) == 1 else None
         if key in dialogue_set or (first_word and first_word in dialogue_set):
             matched.append(character.id)
+            continue
+        if _is_explicitly_absent(key, haystack) or (
+            first_word and _is_explicitly_absent(first_word, haystack)
+        ):
             continue
         pattern = rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])"
         first_pattern = (
@@ -199,17 +234,26 @@ def _ensure_character(
 
 
 def _latest_version_scenes(project: Project, db: Session) -> list[Scene]:
-    version = db.scalar(
-        select(ScriptVersion)
-        .where(ScriptVersion.project_id == project.id)
-        .order_by(ScriptVersion.version_number.desc())
+    versions = list(
+        db.scalars(
+            select(ScriptVersion)
+            .where(ScriptVersion.project_id == project.id)
+            .order_by(ScriptVersion.version_number.desc(), ScriptVersion.created_at.desc())
+        )
     )
-    if not version:
+    if not versions:
         return []
+    seen_episodes: set[str | None] = set()
+    latest_version_ids: list[str] = []
+    for version in versions:
+        ep_key = version.episode_id
+        if ep_key not in seen_episodes:
+            seen_episodes.add(ep_key)
+            latest_version_ids.append(version.id)
     return list(
         db.scalars(
             select(Scene)
-            .where(Scene.script_version_id == version.id)
+            .where(Scene.script_version_id.in_(latest_version_ids))
             .options(selectinload(Scene.shots))
             .order_by(Scene.order_index)
         )
