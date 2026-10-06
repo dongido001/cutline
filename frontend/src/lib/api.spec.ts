@@ -5,7 +5,7 @@ describe('image generation API', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('sends the explicitly selected previous-shot reference ID', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'job-1' }), {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'job-1' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' },
     }))
@@ -26,7 +26,7 @@ describe('image generation API', () => {
   })
 
   it('can skip the automatic previous-shot still', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'job-2' }), {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'job-2' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' },
     }))
@@ -52,7 +52,7 @@ describe('publish API', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('queues a rich publish request', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'job-publish' }), {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'job-publish' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' },
     }))

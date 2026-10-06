@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api, type AspectRatio, type EpisodeCreate, type EpisodeSummary, type EpisodeUpdate, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProjectUpdateInput, type ProviderStatus, type ShotCreate, type ShotUpdate, type VoiceProviderInfo, type VoiceAuditionResponse } from '@/lib/api'
+import { api, type AspectRatio, type EpisodeCreate, type EpisodeUpdate, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProjectUpdateInput, type ProviderStatus, type ShotCreate, type ShotUpdate, type VoiceProviderInfo } from '@/lib/api'
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
@@ -340,7 +340,7 @@ export const useStudioStore = defineStore('studio', () => {
     const run = (async (): Promise<Job | null> => {
       watchingJobIds.add(jobId)
       const emit = (job: Job) => {
-        for (const listener of [...listeners]) listener(job)
+        for (const listener of listeners) listener(job)
       }
       const fetchJob = async (): Promise<Job> => {
         let lastError: unknown

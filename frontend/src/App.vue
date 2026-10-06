@@ -103,7 +103,11 @@ async function checkQueueStats() {
 function handleKeyboard(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
-    showCommands.value ? showCommands.value = false : openCommands()
+    if (showCommands.value) {
+      showCommands.value = false
+    } else {
+      openCommands()
+    }
   } else if (event.key === 'Escape') {
     showCommands.value = false
     showSettings.value = false
