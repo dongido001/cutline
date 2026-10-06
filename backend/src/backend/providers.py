@@ -33,6 +33,39 @@ def loads_model_json(content: str) -> dict[str, Any]:
             return parsed
     except json.JSONDecodeError:
         pass
+
+    for fence in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
+        block = fence.group(1).strip()
+        try:
+            parsed = json.loads(block)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    decoder = json.JSONDecoder()
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    expected_keys = {"assessment", "findings", "scenes", "suggestions", "patches"}
+    idx = 0
+    while True:
+        brace = text.find("{", idx)
+        if brace == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, brace)
+            if isinstance(obj, dict):
+                has_expected = int(bool(expected_keys.intersection(obj.keys())))
+                candidates.append((has_expected, end - brace, obj))
+                idx = end
+                continue
+        except json.JSONDecodeError:
+            pass
+        idx = brace + 1
+
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         raise ValueError("Model response did not contain a JSON object")

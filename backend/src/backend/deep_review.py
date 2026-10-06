@@ -299,6 +299,42 @@ def get_deep_review(db: Session, version_id: str) -> dict[str, Any]:
     }
 
 
+def _resolve_deep_review_provider_name(preferred: str | None) -> str:
+    """When a project uses the deterministic 'mock' parser for import, auto-select a connected AI text provider for Deep Review."""
+    name = (preferred or "").strip() or "mock"
+    if name != "mock":
+        return name
+    import httpx
+    from .settings import settings
+
+    def _bridge_up(base_url: str, api_key: str = "") -> bool:
+        if not base_url:
+            return False
+        try:
+            res = httpx.get(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+                timeout=1.0,
+            )
+            return res.is_success
+        except Exception:
+            return False
+
+    if _bridge_up(settings.chatgpt_web_base_url, settings.chatgpt_web_api_key):
+        return "chatgpt_web"
+    if _bridge_up(settings.gemini_web_base_url):
+        return "gemini_web"
+    if _bridge_up(settings.compatible_base_url, settings.compatible_api_key):
+        return "compatible"
+    try:
+        res = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=1.0)
+        if res.is_success:
+            return "ollama"
+    except Exception:
+        pass
+    return "mock"
+
+
 def start_deep_review(
     db: Session,
     version_id: str,
@@ -319,7 +355,7 @@ def start_deep_review(
                 status_code=409,
                 detail="A deep review is already running for these script inputs.",
             )
-    provider_name = version.project.text_provider
+    provider_name = _resolve_deep_review_provider_name(version.project.text_provider)
     job = Job(
         project_id=version.project_id,
         episode_id=version.episode_id,
@@ -373,6 +409,11 @@ def run_deep_review_job(run_id: str, job_id: str) -> None:
             run.status = "running"
             db.commit()
 
+            resolved_provider = _resolve_deep_review_provider_name(run.provider)
+            if resolved_provider != run.provider:
+                run.provider = resolved_provider
+                job.provider = resolved_provider
+                db.commit()
             provider = get_script_provider(run.provider)
             prompt_context = context_for_prompt(run.input_context)
             preflight_findings = preflight(run.input_context)
