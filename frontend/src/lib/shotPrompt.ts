@@ -72,8 +72,8 @@ export function buildShotVideoPrompt(
   }
 
   const continuityScene = snapshot?.scene ?? scene
-  const framing = snapshot?.framing || shot.framing
-  const action = snapshot?.action || shot.action
+  const framing = shot.framing?.trim() || snapshot?.framing
+  const action = shot.action?.trim() || snapshot?.action
   const identity = cast.length
     ? cast.join('; ')
     : 'Preserve the exact identity and appearance established by the shot description.'

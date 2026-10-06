@@ -337,16 +337,18 @@ def video_continuity_prompt(
     *,
     shot: Shot | None = None,
 ) -> str:
-    anchor = "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; preserve its composition, faces, wardrobe, set, props, and lighting throughout the clip."
+    anchor = "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; preserve its composition, faces, wardrobe, set, and lighting throughout the clip, moving or removing props only as explicitly performed in the shot action."
     if not snapshot:
         return "\n\n".join(part for part in (video_prompt.strip(), anchor) if part)
     scene = snapshot.get("scene") or {}
     characters = snapshot.get("characters") or []
     cast_names = ", ".join(item.get("name", "") for item in characters if item.get("name"))
+    live_framing = _text(shot.framing) if shot is not None else ""
+    live_action = _text(shot.action) if shot is not None else ""
     package = [
         anchor,
-        f"Shot framing: {snapshot.get('framing') or 'preserve the supplied frame'}. Aspect ratio: {aspect_ratio}.",
-        f"Shot action: {snapshot.get('action') or 'continue the action naturally from the supplied frame'}.",
+        f"Shot framing: {live_framing or snapshot.get('framing') or 'preserve the supplied frame'}. Aspect ratio: {aspect_ratio}.",
+        f"Shot action: {live_action or snapshot.get('action') or 'continue the action naturally from the supplied frame'}.",
     ]
     if cast_names:
         package.append(
