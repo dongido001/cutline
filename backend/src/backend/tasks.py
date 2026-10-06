@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
 from .cast import cast_portrait_prompt, is_usable_reference_image, load_cast_references, sync_project_cast
+from .continuity import current_shot_snapshot, get_or_create_shot_snapshot, video_continuity_prompt
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
