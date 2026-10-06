@@ -83,4 +83,16 @@ describe('buildShotVideoPrompt', () => {
     expect(prompt).toContain('Character voices: GABE: Steady, resonant 29-year-old Filipino baritone, composed, unhurried delivery.')
     expect(prompt).toContain('Voice routing: GABE speaks on camera with their natural, direct, unfiltered chest voice')
   })
+
+  it('handles partial continuity_snapshot objects without characters array (e.g. demo project shots)', () => {
+    const partialSnapshotShot = {
+      ...shot,
+      continuity_snapshot: {
+        action: 'Jasmine makes a pretend searching visor with one hand. Skylar copies her.',
+      } as unknown as Shot['continuity_snapshot'],
+    } as Shot
+    const prompt = buildShotVideoPrompt(partialSnapshotShot, scene, [character], '16:9')
+    expect(prompt).toContain('Mara — early 30s, freckled, athletic build')
+    expect(prompt).toContain('Mara: "We have to go."')
+  })
 })

@@ -373,9 +373,14 @@ async function handleDeleteCharacterFromManager(characterId: string) {
   await removeCastCharacter(characterId)
   managingCharacterId.value = null
 }
-const selectedShotVideoPrompt = computed(() => selectedShot.value
-  ? buildShotVideoPrompt(selectedShot.value, selectedShotScene.value, selectedCast.value, mediaAspect.value)
-  : '')
+const selectedShotVideoPrompt = computed(() => {
+  if (!selectedShot.value) return ''
+  try {
+    return buildShotVideoPrompt(selectedShot.value, selectedShotScene.value, selectedCast.value, mediaAspect.value)
+  } catch {
+    return selectedShot.value.video_prompt || ''
+  }
+})
 const copiedShotPrompt = ref(false)
 const includeCastRefsInVideo = ref(false)
 

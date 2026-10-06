@@ -23,15 +23,25 @@ export function buildShotVideoPrompt(
   aspectRatio: AspectRatio,
 ): string {
   const snapshot = shot.continuity_snapshot
-  const selected = new Set(snapshot?.character_ids || shot.character_ids || [])
-  const cast = snapshot?.characters.length
-    ? snapshot.characters.map((character) => {
+  const snapshotCharacters = Array.isArray(snapshot?.characters) ? snapshot.characters : []
+  const snapshotVoices = Array.isArray(snapshot?.character_voices) ? snapshot.character_voices : []
+  const selected = new Set(
+    (Array.isArray(snapshot?.character_ids) && snapshot.character_ids.length
+      ? snapshot.character_ids
+      : shot.character_ids) || [],
+  )
+  const cast = snapshotCharacters.length
+    ? snapshotCharacters.map((character) => {
       const current = characters.find((item) => item.id === character.id)
-      return `${character.name}${current?.notes.trim() ? ` — ${current.notes.trim()}` : ''}`
+      const notes = (current?.notes || '').trim()
+      return `${character.name}${notes ? ` — ${notes}` : ''}`
     })
     : characters
       .filter((character) => selected.has(character.id))
-      .map((character) => `${character.name}${character.notes.trim() ? ` — ${character.notes.trim()}` : ''}`)
+      .map((character) => {
+        const notes = (character.notes || '').trim()
+        return `${character.name}${notes ? ` — ${notes}` : ''}`
+      })
   const voiceEntries: string[] = []
   const seenVoiceNames = new Set<string>()
   const addVoiceForCharacter = (char: Character | undefined, fallbackName?: string, fallbackVoice?: string) => {
@@ -52,17 +62,17 @@ export function buildShotVideoPrompt(
       for (const speaker of parts) {
         const speakerUpper = speaker.toUpperCase()
         const current = characters.find(
-          (c) => c.name.toUpperCase() === speakerUpper || c.name.toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
+          (c) => (c.name || '').toUpperCase() === speakerUpper || (c.name || '').toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
         )
-        const snapChar = snapshot?.characters.find((c) => c.name.toUpperCase() === speakerUpper)
-        const snapVoice = snapshot?.character_voices?.find((v) => v.name.toUpperCase() === speakerUpper)?.voice_description
+        const snapChar = snapshotCharacters.find((c) => (c.name || '').toUpperCase() === speakerUpper)
+        const snapVoice = snapshotVoices.find((v) => (v.name || '').toUpperCase() === speakerUpper)?.voice_description
         addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice)
       }
     }
-  } else if (snapshot?.characters.length) {
-    for (const item of snapshot.characters) {
-      const current = characters.find((c) => c.id === item.id || c.name.toUpperCase() === item.name.toUpperCase())
-      const snapVoice = snapshot.character_voices?.find((v) => v.id === item.id || v.name === item.name)?.voice_description
+  } else if (snapshotCharacters.length) {
+    for (const item of snapshotCharacters) {
+      const current = characters.find((c) => c.id === item.id || (c.name || '').toUpperCase() === (item.name || '').toUpperCase())
+      const snapVoice = snapshotVoices.find((v) => v.id === item.id || v.name === item.name)?.voice_description
       addVoiceForCharacter(current, item.name, item.voice_description || snapVoice)
     }
   } else {
