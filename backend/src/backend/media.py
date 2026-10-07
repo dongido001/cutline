@@ -347,6 +347,7 @@ def _request_provider_image(
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
     references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
+    conversation_url: str | None = None,
 ) -> tuple[bytes, str, dict]:
     references = list(references or [])
     size = "1344x768" if aspect_ratio == "16:9" else "768x1344"
@@ -367,6 +368,8 @@ def _request_provider_image(
     payload: dict = {"model": model, "prompt": prompt, "size": size, "n": 1, "response_format": "b64_json"}
     if references and provider == "chatgpt_web":
         payload["reference_images"] = _reference_payload(references)
+    if conversation_url and provider == "chatgpt_web":
+        payload["conversation_url"] = conversation_url
     if provider == "chatgpt_web":
         # The browser bridge can legitimately take up to 300 seconds to finish
         # rendering and extracting an image. Do not time out its HTTP request
@@ -426,16 +429,18 @@ def generate_storyboard_image(
     aspect_ratio: str,
     progress: Callable[[dict], None] | None = None,
     references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
+    conversation_url: str | None = None,
+    is_followup_edit: bool = False,
 ) -> tuple[str, str, str]:
     references = list(references or [])
     prompt = prepare_image_prompt(prompt, aspect_ratio)
     prompt = prepare_face_reference_prompt(prompt, references)
     has_visual_reference = any(isinstance(ref, VisualReferenceImage) for ref in references)
-    if has_visual_reference:
+    if has_visual_reference and not is_followup_edit:
         prompt = prepare_visual_reference_prompt(prompt)
     providers = settings.image_provider_order
     if not providers:
-        if has_visual_reference:
+        if has_visual_reference and not is_followup_edit:
             raise RuntimeError("No configured provider supports image references")
         return (
             render_storyboard_placeholder(prompt, scene_title, framing, aspect_ratio),
@@ -459,12 +464,14 @@ def generate_storyboard_image(
         if progress:
             progress({"provider": provider, "phase": "submitting", "message": f"Generating with {label}" if index == 0 else f"Trying fallback: {label}"})
         try:
+            extra_kwargs = {"conversation_url": conversation_url} if conversation_url else {}
             image, _model, metadata = _request_provider_image(
                 provider,
                 prompt,
                 aspect_ratio,
                 progress,
                 references=references,
+                **extra_kwargs,
             )
             if progress:
                 progress({"provider": provider, "phase": "saving", **metadata})

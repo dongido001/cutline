@@ -1773,11 +1773,17 @@ async def upload_shot_image(
         variant.created_at = now()
     elif not use_legacy:
         db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=file.content_type, source="uploaded", provider="manual-upload", prompt=shot.image_prompt))
-    for t in shot.takes:
-        if t.media_type == "image" and t.aspect_ratio == target_aspect:
-            t.selected = False
-    if use_legacy:
-        shot.selected_image_take_id = None
+    record_take(
+        db,
+        shot,
+        media_type="image",
+        aspect_ratio=target_aspect,
+        filename=filename,
+        mime_type=file.content_type,
+        source="uploaded",
+        provider="manual-upload",
+        prompt=shot.image_prompt,
+    )
     if project.timeline and not promote_available_clips(project, db):
         project.timeline.revision += 1
     shot.status = "image_ready"
@@ -2593,6 +2599,200 @@ def select_shot_take(
         )
     )
     return fresh_shot or shot
+
+
+@app.post(
+    "/api/shots/{shot_id}/takes/{take_id}/edit",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def edit_shot_image_take(
+    shot_id: str,
+    take_id: str,
+    prompt: str = Form(...),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+) -> Job:
+    shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.scene)
+            .selectinload(Scene.script_version)
+            .selectinload(ScriptVersion.project),
+        )
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    take = next((item for item in shot.takes if item.id == take_id), None)
+    if not take:
+        raise HTTPException(status_code=404, detail="Take not found")
+    if take.media_type != "image":
+        raise HTTPException(
+            status_code=422, detail="Only image takes support follow-up edits"
+        )
+    edit_prompt = prompt.strip()
+    if not edit_prompt:
+        raise HTTPException(
+            status_code=422, detail="Enter follow-up edit instructions"
+        )
+    project = shot.scene.script_version.project
+    if project.status != "shot_plan":
+        raise HTTPException(
+            status_code=409, detail="Approve the script before editing images"
+        )
+    base_path = settings.media_dir / take.filename if take.filename else None
+    if not base_path or not base_path.is_file():
+        raise HTTPException(
+            status_code=409, detail="Target take image file is missing on disk"
+        )
+
+    extensions = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    validated_attachments: list[tuple[str, str, bytes]] = []
+    for upload in files or []:
+        if not upload or not (upload.filename or upload.content_type):
+            continue
+        if upload.content_type not in extensions:
+            raise HTTPException(
+                status_code=415, detail="Upload JPG, PNG, or WebP attachment images"
+            )
+        content = await upload.read(10 * 1024 * 1024 + 1)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(
+                status_code=413, detail="Attachment image must be 10 MB or smaller"
+            )
+        if not content or not is_usable_reference_image(content):
+            raise HTTPException(
+                status_code=400, detail="Uploaded attachment image is empty or invalid"
+            )
+        validated_attachments.append(
+            (extensions[upload.content_type], upload.content_type, content)
+        )
+
+    target_aspect = take.aspect_ratio or project.aspect_ratio
+    db.execute(
+        update(Project)
+        .where(Project.id == project.id)
+        .values(updated_at=Project.updated_at)
+    )
+    active_image_jobs = db.scalars(
+        select(Job).where(
+            Job.project_id == project.id,
+            Job.kind == "shot_image",
+            Job.status.in_(["queued", "running"]),
+        )
+    ).all()
+    for existing in active_image_jobs:
+        if any(
+            attempt.get("shot_id") == shot.id
+            and attempt.get("aspect_ratio", project.aspect_ratio) == target_aspect
+            for attempt in (existing.attempts or [])
+            if isinstance(attempt, dict)
+        ):
+            db.commit()
+            return existing
+
+    take_settings = take.settings if isinstance(take.settings, dict) else {}
+    edit_conversation_url = (
+        str(
+            getattr(take, "conversation_url", None)
+            or take_settings.get("conversation_url")
+            or ""
+        ).strip()
+        or None
+    )
+    image_takes_for_aspect = [
+        t
+        for t in shot.takes
+        if t.media_type == "image" and t.aspect_ratio == target_aspect
+    ]
+    if not edit_conversation_url and shot.conversation_url:
+        if (
+            image_takes_for_aspect
+            and image_takes_for_aspect[-1].id == take.id
+            and take.source == "generated"
+        ):
+            edit_conversation_url = shot.conversation_url
+    same_conv_takes = (
+        [
+            t
+            for t in image_takes_for_aspect
+            if (
+                getattr(t, "conversation_url", None)
+                or (t.settings if isinstance(t.settings, dict) else {}).get(
+                    "conversation_url"
+                )
+            )
+            == edit_conversation_url
+        ]
+        if edit_conversation_url
+        else []
+    )
+    is_latest_in_conv = bool(
+        edit_conversation_url
+        and (not same_conv_takes or same_conv_takes[-1].id == take.id)
+    )
+
+    snapshot = (
+        deepcopy(take_settings.get("continuity_snapshot"))
+        if isinstance(take_settings.get("continuity_snapshot"), dict)
+        else None
+    )
+    if not snapshot:
+        try:
+            snapshot = get_or_create_shot_snapshot(db, project, shot, target_aspect)
+        except RuntimeError:
+            snapshot = shot.continuity_snapshot or {
+                "character_ids": list(shot.character_ids or []),
+                "effective_image_prompt": shot.image_prompt,
+                "scene": {"title": shot.scene.title},
+                "framing": shot.framing,
+            }
+    character_ids = list(snapshot.get("character_ids") or shot.character_ids or [])
+
+    from uuid import uuid4
+
+    saved_attachments: list[dict[str, str]] = []
+    for ext, mime_type, content in validated_attachments:
+        att_filename = f"edit-ref-{uuid4()}{ext}"
+        (settings.media_dir / att_filename).write_bytes(content)
+        saved_attachments.append({"filename": att_filename, "mime_type": mime_type})
+
+    job = Job(
+        project_id=project.id,
+        kind="shot_image",
+        message="Queued follow-up edit",
+        conversation_url=edit_conversation_url,
+        attempts=[
+            {
+                "shot_id": shot.id,
+                "aspect_ratio": target_aspect,
+                "character_ids": character_ids,
+                "continuity_snapshot": snapshot,
+                "edit_take_id": take.id,
+                "edit_prompt": edit_prompt,
+                "edit_base_filename": take.filename,
+                "edit_base_mime_type": take.mime_type or "image/png",
+                "edit_conversation_url": edit_conversation_url,
+                "edit_is_latest_in_conversation": is_latest_in_conv,
+                "edit_attachment_files": saved_attachments,
+            }
+        ],
+    )
+    db.add(job)
+    db.commit()
+    task = enqueue_shot_image(
+        shot.id, job.id, target_aspect, character_ids=character_ids
+    )
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
 
 
 @app.get("/api/publish/providers")

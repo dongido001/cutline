@@ -279,3 +279,77 @@ def test_face_reference_attachment_failure_falls_back_to_prompt_likeness(monkeyp
     assert calls[0] == {'provider': 'chatgpt_web', 'has_refs': True}
     assert calls[1] == {'provider': 'chatgpt_web', 'has_refs': False}
     assert (tmp_path / 'media' / filename).exists()
+
+
+def test_upload_shot_image_and_followup_edit_take(setup, monkeypatch):
+    db, client, project, shots = setup
+    shot = shots[2]
+
+    # 1. Upload an image directly -> should create an uploaded ShotTake and select it
+    upload_res = client.post(
+        f'/api/shots/{shot.id}/image/upload',
+        files={'file': ('custom.png', png('purple'), 'image/png')},
+    )
+    assert upload_res.status_code == 200, upload_res.text
+    shot_data = upload_res.json()
+    image_takes = [t for t in shot_data['takes'] if t['media_type'] == 'image']
+    assert len(image_takes) == 1
+    take1 = image_takes[0]
+    assert take1['source'] == 'uploaded'
+    assert take1['selected'] is True
+    assert shot_data['selected_image_take_id'] == take1['id']
+
+    # Set a conversation_url on take1 to test in-conversation follow-up edit
+    take1_row = db.get(ShotTake, take1['id'])
+    take1_row.settings = {'conversation_url': 'https://chatgpt.com/c/existing-conv-123'}
+    db.commit()
+
+    # 2. Submit a follow-up edit on take1 with an attached reference image
+    edit_res = client.post(
+        f'/api/shots/{shot.id}/takes/{take1["id"]}/edit',
+        data={'prompt': 'Change her jacket to emerald green'},
+        files=[('files', ('jacket_ref.png', png('green'), 'image/png'))],
+    )
+    assert edit_res.status_code == 202, edit_res.text
+    job_data = edit_res.json()
+    assert job_data['conversation_url'] == 'https://chatgpt.com/c/existing-conv-123'
+
+    seen = {}
+
+    def fake_request(provider, prompt, aspect, progress=None, references=None, conversation_url=None):
+        seen['provider'] = provider
+        seen['prompt'] = prompt
+        seen['references'] = list(references or [])
+        seen['conversation_url'] = conversation_url
+        if progress:
+            progress({
+                'provider': provider,
+                'phase': 'generating',
+                'conversation_url': conversation_url or 'https://chatgpt.com/c/new-conv',
+            })
+        return png('yellow'), 'gpt-image', {'conversation_url': conversation_url}
+
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    monkeypatch.setattr(media, '_request_provider_image', fake_request)
+
+    tasks._generate_shot_image(shot.id, job_data['id'], '16:9')
+    db.expire_all()
+
+    assert seen['conversation_url'] == 'https://chatgpt.com/c/existing-conv-123'
+    assert 'Change her jacket to emerald green' in seen['prompt']
+    assert 'Do not duplicate the reference composition' not in seen['prompt']
+    assert [r.reference_type for r in seen['references']] == ['edit_target_fallback', 'edit_attachment']
+
+    updated_shot = db.get(Shot, shot.id)
+    updated_image_takes = [t for t in updated_shot.takes if t.media_type == 'image']
+    assert len(updated_image_takes) == 2
+    take2 = updated_image_takes[-1]
+    assert take2.selected is True
+    assert take2.settings.get('parent_take_id') == take1['id']
+    assert take2.settings.get('edit_prompt') == 'Change her jacket to emerald green'
+    assert take2.settings.get('edit_attachment_count') == 1
+    assert take2.settings.get('conversation_url') == 'https://chatgpt.com/c/existing-conv-123'
+    # Original shot.image_prompt remains intact
+    assert updated_shot.image_prompt == 'Wide view of an empty room'
+

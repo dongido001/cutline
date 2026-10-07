@@ -670,6 +670,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ take_id: takeId }),
     }),
+  editShotImageTake: (shotId: string, takeId: string, prompt: string, files: File[] = []) => {
+    const body = new FormData()
+    body.append('prompt', prompt)
+    for (const file of files) {
+      body.append('files', file)
+    }
+    return request<Job>(`/api/shots/${shotId}/takes/${takeId}/edit`, {
+      method: 'POST',
+      body,
+    })
+  },
   projects: () => request<ProjectSummary[]>('/api/projects'),
   project: (id: string, episodeId?: string) =>
     request<ProjectDetail>(`/api/projects/${id}${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`),

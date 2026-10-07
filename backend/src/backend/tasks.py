@@ -13,7 +13,7 @@ from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
-from .media import delete_media_file, generate_storyboard_image
+from .media import VisualReferenceImage, delete_media_file, generate_storyboard_image
 from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
 from .providers import get_script_provider, normalize_analysis_result
 from .publishing import collect_publish_assets, publish_assets
@@ -422,11 +422,34 @@ def _generate_shot_image(
             return
         if job.status == "cancelled":
             return
+        edit_meta = next(
+            (
+                item
+                for item in (job.attempts or [])
+                if isinstance(item, dict) and item.get("edit_take_id")
+            ),
+            None,
+        )
+        edit_attachment_files: list[str] = [
+            str(f.get("filename") if isinstance(f, dict) else f)
+            for f in ((edit_meta or {}).get("edit_attachment_files") or [])
+            if f
+        ]
+
+        def cleanup_edit_attachments() -> None:
+            for fname in edit_attachment_files:
+                if fname.startswith("edit-ref-") and Path(fname).name == fname:
+                    (settings.media_dir / fname).unlink(missing_ok=True)
+
         try:
             raise_if_cancelled(db, job_id)
             job.status = "running"
             job.progress = 0.15
-            job.message = "Rendering storyboard frame"
+            job.message = (
+                "Applying follow-up image edit"
+                if edit_meta
+                else "Rendering storyboard frame"
+            )
             db.commit()
 
             project = shot.scene.script_version.project
@@ -442,27 +465,89 @@ def _generate_shot_image(
             snapshot = queued_snapshot or get_or_create_shot_snapshot(
                 db, project, shot, target_aspect,
                 character_ids=character_ids,
-                prompt_override=prompt_override,
+                prompt_override=None if edit_meta else prompt_override,
             )
             shot.continuity_snapshot = snapshot
             shot.character_ids = list(snapshot.get("character_ids") or [])
-            prompt = snapshot["effective_image_prompt"]
-            image_reference = queued_reference(job, shot)
-            if not image_reference and should_use_default_reference(job, shot):
-                image_reference = freeze_visual_reference(default_visual_reference(shot, target_aspect))
-            visual_reference = load_visual_reference(image_reference)
-            references = load_cast_references(
-                db, project.id, shot.character_ids,
-                reference_ids=[
-                    reference_id
-                    for character in snapshot.get("characters", [])
-                    for reference_id in character.get("reference_ids", [])
-                ],
-            )
-            if image_reference and visual_reference is None:
-                raise RuntimeError("Selected image reference could not be loaded")
-            if visual_reference is not None:
-                references.append(visual_reference)
+
+            if edit_meta:
+                prompt = str(
+                    edit_meta.get("edit_prompt")
+                    or prompt_override
+                    or snapshot.get("effective_image_prompt")
+                    or ""
+                ).strip()
+                image_reference = None
+                references = []
+                edit_conversation_url = (
+                    str(edit_meta.get("edit_conversation_url") or "").strip() or None
+                )
+                is_latest_in_conv = bool(edit_meta.get("edit_is_latest_in_conversation"))
+                base_filename = str(edit_meta.get("edit_base_filename") or "").strip()
+                base_mime = (
+                    str(edit_meta.get("edit_base_mime_type") or "image/png").strip()
+                    or "image/png"
+                )
+                if base_filename and Path(base_filename).name == base_filename:
+                    base_path = settings.media_dir / base_filename
+                    if base_path.is_file():
+                        ref_type = (
+                            "edit_target_fallback"
+                            if (edit_conversation_url and is_latest_in_conv)
+                            else "edit_target"
+                        )
+                        references.append(
+                            VisualReferenceImage(
+                                mime_type=base_mime,
+                                data=base_path.read_bytes(),
+                                character_name=f"{shot.title} (Take to edit)",
+                                reference_type=ref_type,
+                            )
+                        )
+                for idx, att_item in enumerate(
+                    edit_meta.get("edit_attachment_files") or [], start=1
+                ):
+                    att_filename = str(
+                        att_item.get("filename") if isinstance(att_item, dict) else att_item
+                    ).strip()
+                    att_mime = (
+                        str(
+                            att_item.get("mime_type")
+                            if isinstance(att_item, dict)
+                            else "image/png"
+                        ).strip()
+                        or "image/png"
+                    )
+                    if att_filename and Path(att_filename).name == att_filename:
+                        att_path = settings.media_dir / att_filename
+                        if att_path.is_file():
+                            references.append(
+                                VisualReferenceImage(
+                                    mime_type=att_mime,
+                                    data=att_path.read_bytes(),
+                                    character_name=f"Attachment {idx}",
+                                    reference_type="edit_attachment",
+                                )
+                            )
+            else:
+                prompt = snapshot["effective_image_prompt"]
+                image_reference = queued_reference(job, shot)
+                if not image_reference and should_use_default_reference(job, shot):
+                    image_reference = freeze_visual_reference(default_visual_reference(shot, target_aspect))
+                visual_reference = load_visual_reference(image_reference)
+                references = load_cast_references(
+                    db, project.id, shot.character_ids,
+                    reference_ids=[
+                        reference_id
+                        for character in snapshot.get("characters", [])
+                        for reference_id in character.get("reference_ids", [])
+                    ],
+                )
+                if image_reference and visual_reference is None:
+                    raise RuntimeError("Selected image reference could not be loaded")
+                if visual_reference is not None:
+                    references.append(visual_reference)
+
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
                 provider = str(update.get("provider") or "")
@@ -508,14 +593,26 @@ def _generate_shot_image(
                 job.attempts = meta + provider_attempts
                 db.commit()
 
-            filename, mime_type, provider = generate_storyboard_image(
-                prompt,
-                (snapshot.get("scene") or {}).get("title") or shot.scene.title,
-                snapshot.get("framing") or shot.framing,
-                target_aspect,
-                progress=report_progress,
-                references=references,
-            )
+            if edit_meta:
+                filename, mime_type, provider = generate_storyboard_image(
+                    prompt,
+                    (snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                    snapshot.get("framing") or shot.framing,
+                    target_aspect,
+                    progress=report_progress,
+                    references=references,
+                    conversation_url=edit_conversation_url,
+                    is_followup_edit=True,
+                )
+            else:
+                filename, mime_type, provider = generate_storyboard_image(
+                    prompt,
+                    (snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                    snapshot.get("framing") or shot.framing,
+                    target_aspect,
+                    progress=report_progress,
+                    references=references,
+                )
             if image_reference:
                 prompt = prepare_visual_reference_prompt(prompt)
             generated_filename = filename
@@ -550,6 +647,16 @@ def _generate_shot_image(
                 variant.created_at = now()
             elif not use_legacy:
                 db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=prompt))
+            take_settings: dict = {
+                "continuity_snapshot": snapshot,
+                **({"image_reference": image_reference} if image_reference else {}),
+                **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
+            }
+            if edit_meta:
+                take_settings["parent_take_id"] = edit_meta.get("edit_take_id")
+                take_settings["edit_prompt"] = str(edit_meta.get("edit_prompt") or "")
+                if edit_attachment_files:
+                    take_settings["edit_attachment_count"] = len(edit_attachment_files)
             record_take(
                 db,
                 shot,
@@ -560,11 +667,7 @@ def _generate_shot_image(
                 source="generated",
                 provider=provider,
                 prompt=prompt,
-                settings={
-                    "continuity_snapshot": snapshot,
-                    **({"image_reference": image_reference} if image_reference else {}),
-                    **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
-                },
+                settings=take_settings,
             )
             episode_id = shot.scene.script_version.episode_id if shot.scene and shot.scene.script_version else None
             promote_available_clips(project, db, episode_id=episode_id)
@@ -576,14 +679,17 @@ def _generate_shot_image(
             job.message = "Storyboard ready"
             db.commit()
             generated_filename = None
+            cleanup_edit_attachments()
             if previous_filename != filename:
                 delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
         except JobCancelled:
+            cleanup_edit_attachments()
             delete_media_file(generated_filename)
             return
         except Exception as exc:
             db.rollback()
+            cleanup_edit_attachments()
             delete_media_file(generated_filename)
             job = db.get(Job, job_id)
             if preserve_cancelled(job):

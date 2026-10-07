@@ -1164,6 +1164,39 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  async function editShotImageTake(
+    shotId: string,
+    takeId: string,
+    prompt: string,
+    files: File[] = [],
+  ) {
+    if (!currentProject.value) return
+    const projectId = currentProject.value.id
+    error.value = ''
+    beginShotProcessing(shotId, projectId)
+    try {
+      let job = await api.editShotImageTake(shotId, takeId, prompt, files)
+      const initialJob = withQueueLabel(job)
+      setProjectImageJob(projectId, shotId, initialJob)
+      const finalJob = await watchJob(job.id, (next) => {
+        setProjectImageJob(projectId, shotId, next)
+      })
+      job = finalJob ?? (await api.job(job.id))
+      if (job.status === 'failed') throw new Error(job.error || 'Follow-up image edit failed')
+      if (job.status === 'cancelled') return
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not edit image take'
+      const failed = failActiveJob(imageJobsByProject.value[projectId]?.[shotId], message)
+      if (failed) setProjectImageJob(projectId, shotId, failed)
+      if (currentProject.value?.id === projectId) {
+        error.value = message
+      }
+      throw cause
+    } finally {
+      endShotProcessing(shotId, projectId)
+    }
+  }
+
   async function generateShotClip(
     id: string,
     aspectRatio?: AspectRatio,
@@ -1391,6 +1424,7 @@ export const useStudioStore = defineStore('studio', () => {
     backgroundActiveJobsCount,
     lipsyncShot,
     selectShotTake,
+    editShotImageTake,
     generateShotClip,
     uploadShotClip,
     deleteShotClip,
