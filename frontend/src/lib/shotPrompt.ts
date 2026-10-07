@@ -42,31 +42,95 @@ export function buildShotVideoPrompt(
         const notes = (character.notes || '').trim()
         return `${character.name}${notes ? ` — ${notes}` : ''}`
       })
+  const continuityScene = snapshot?.scene ?? scene
+  const framing = shot.framing?.trim() || snapshot?.framing
+  const action = shot.action?.trim() || snapshot?.action
+  const combinedText = `${action || ''}\n${shot.video_prompt || ''}\n${framing || ''}\n${shot.sound || ''}`
+  const isPhoneShot = /\b(?:phone|cellphone|smartphone|handset|receiver|caller|on the line)\b/i.test(combinedText)
+
+  const onCameraNameSet = new Set<string>()
+  for (const item of snapshotCharacters) {
+    const n = (item.name || '').trim().toUpperCase()
+    if (n) {
+      onCameraNameSet.add(n)
+      onCameraNameSet.add(n.split(/\s+/)[0]!)
+    }
+  }
+  if (!onCameraNameSet.size) {
+    for (const c of characters) {
+      if (selected.has(c.id) && c.name) {
+        const n = c.name.trim().toUpperCase()
+        onCameraNameSet.add(n)
+        onCameraNameSet.add(n.split(/\s+/)[0]!)
+      }
+    }
+  }
+
+  const offscreenPhoneNames: string[] = []
+  const offscreenNameSet = new Set<string>()
+  if (isPhoneShot) {
+    const searchText = `${action || ''}\n${shot.video_prompt || ''}\n${shot.sound || ''}`
+    for (const c of characters) {
+      const canon = (c.name || '').trim().toUpperCase()
+      const first = canon.split(/\s+/)[0] || ''
+      if (!canon || onCameraNameSet.has(canon) || (first && onCameraNameSet.has(first))) continue
+      const escaped = canon.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const escapedFirst = first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const pattern = new RegExp(`\\b(?:${escaped}${escapedFirst ? `|${escapedFirst}` : ''})\\b`, 'i')
+      if (pattern.test(searchText) && !offscreenNameSet.has(canon)) {
+        offscreenNameSet.add(canon)
+        offscreenPhoneNames.push(canon)
+      }
+    }
+  }
+
   const voiceEntries: string[] = []
   const seenVoiceNames = new Set<string>()
-  const addVoiceForCharacter = (char: Character | undefined, fallbackName?: string, fallbackVoice?: string) => {
+  const addVoiceForCharacter = (
+    char: Character | undefined,
+    fallbackName?: string,
+    fallbackVoice?: string,
+    isOffscreenPhone = false,
+  ) => {
     const name = (char?.name || fallbackName || '').trim()
-    const key = name.toUpperCase()
+    const key = name.replace(/\s*\([^)]*\)\s*/g, ' ').trim().toUpperCase()
     const voice = (char?.voice_description || fallbackVoice || '').trim().replace(/\.$/, '')
     if (!key || seenVoiceNames.has(key) || !voice) return
     seenVoiceNames.add(key)
-    voiceEntries.push(`${name}: ${voice}`)
+    if (isOffscreenPhone || offscreenNameSet.has(key)) {
+      voiceEntries.push(
+        `${key} (off-screen phone caller, unseen filtered telephone earpiece voice-over only — never lip-sync on-camera face to this voice): ${voice}`,
+      )
+    } else {
+      voiceEntries.push(`${name}: ${voice}`)
+    }
   }
   if (shot.dialogue && shot.dialogue.length > 0) {
     for (const line of shot.dialogue) {
       const rawSpeaker = (line.character || line.speaker || '').trim()
       if (!rawSpeaker) continue
+      const isOffscreenCue = /\((?:O\.?S\.?|V\.?O\.?|ON PHONE|OVER PHONE|THROUGH PHONE|FILTERED)\)/i.test(rawSpeaker)
       const parts = rawSpeaker.toUpperCase().includes(' AND ')
         ? rawSpeaker.split(/\s+AND\s+/i).map((part) => part.trim()).filter(Boolean)
         : [rawSpeaker]
       for (const speaker of parts) {
-        const speakerUpper = speaker.toUpperCase()
+        const speakerUpper = speaker.replace(/\s*\([^)]*\)\s*/g, ' ').trim().toUpperCase()
+        const isUnselectedSpeaker = Boolean(
+          isPhoneShot &&
+          onCameraNameSet.size > 0 &&
+          !onCameraNameSet.has(speakerUpper) &&
+          !onCameraNameSet.has(speakerUpper.split(/\s+/)[0] || ''),
+        )
+        if ((isOffscreenCue || isUnselectedSpeaker) && speakerUpper && !offscreenNameSet.has(speakerUpper)) {
+          offscreenNameSet.add(speakerUpper)
+          offscreenPhoneNames.push(speakerUpper)
+        }
         const current = characters.find(
           (c) => (c.name || '').toUpperCase() === speakerUpper || (c.name || '').toUpperCase().split(/\s+/)[0] === speakerUpper.split(/\s+/)[0],
         )
         const snapChar = snapshotCharacters.find((c) => (c.name || '').toUpperCase() === speakerUpper)
         const snapVoice = snapshotVoices.find((v) => (v.name || '').toUpperCase() === speakerUpper)?.voice_description
-        addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice)
+        addVoiceForCharacter(current, speaker, snapChar?.voice_description || snapVoice, isOffscreenCue || isUnselectedSpeaker)
       }
     }
   } else if (snapshotCharacters.length) {
@@ -80,10 +144,15 @@ export function buildShotVideoPrompt(
       addVoiceForCharacter(current)
     }
   }
+  for (const offName of offscreenPhoneNames) {
+    const current = characters.find(
+      (c) => (c.name || '').toUpperCase() === offName || (c.name || '').toUpperCase().split(/\s+/)[0] === offName.split(/\s+/)[0],
+    )
+    if (current) {
+      addVoiceForCharacter(current, offName, current.voice_description, true)
+    }
+  }
 
-  const continuityScene = snapshot?.scene ?? scene
-  const framing = shot.framing?.trim() || snapshot?.framing
-  const action = shot.action?.trim() || snapshot?.action
   const identity = cast.length
     ? cast.join('; ')
     : 'Preserve the exact identity and appearance established by the shot description.'
@@ -96,11 +165,24 @@ export function buildShotVideoPrompt(
     continuityScene?.props_notes?.trim() ? `Props: ${continuityScene.props_notes.trim()}` : '',
   ].filter(Boolean)
 
-  const combinedText = `${action || ''}\n${shot.video_prompt || ''}\n${framing || ''}`
-  const isPhoneShot = /\b(?:phone|cellphone|smartphone|handset|receiver|caller|on the line)\b/i.test(combinedText)
-  const onCameraSpeakers = (shot.dialogue || [])
-    .map((line) => (line.character || line.speaker || '').trim())
-    .filter((speaker) => speaker && !/\((?:O\.?S\.?|V\.?O\.?|ON PHONE|OVER PHONE|THROUGH PHONE|FILTERED)\)/i.test(speaker))
+  const onCameraSpeakers: string[] = []
+  const onCameraLines: string[] = []
+  for (const line of shot.dialogue || []) {
+    const rawSpeaker = (line.character || line.speaker || '').trim()
+    const text = (line.text || line.line || '').trim()
+    if (!rawSpeaker || !text) continue
+    if (/\((?:O\.?S\.?|V\.?O\.?|ON PHONE|OVER PHONE|THROUGH PHONE|FILTERED)\)/i.test(rawSpeaker)) continue
+    const canon = rawSpeaker.replace(/\s*\([^)]*\)\s*/g, ' ').trim().toUpperCase()
+    if (offscreenNameSet.has(canon)) continue
+    if (!onCameraSpeakers.includes(rawSpeaker)) onCameraSpeakers.push(rawSpeaker)
+    if (!onCameraLines.includes(text)) onCameraLines.push(text)
+  }
+  const hasOffscreenPhoneSpeech =
+    offscreenPhoneNames.length > 0 ||
+    /\b(?:filtered\s+(?:phone\s+|handset\s+)?(?:voice|line|audio)|handset\s+audio|off-screen\s+phone\s+voice|(?:assistant|caller)\s+says\s*,)/i.test(
+      `${shot.video_prompt || ''}\n${shot.sound || ''}`,
+    )
+
   const lines = [
     `Visual framing: ${value(framing, 'cinematic medium shot')}; ${aspectRatio} aspect ratio; ${location}; ${time}.`,
     `Style and starting image: ${value(snapshot?.effective_image_prompt || shot.image_prompt, 'cinematic live-action, naturalistic detail')}.`,
@@ -110,9 +192,17 @@ export function buildShotVideoPrompt(
     lines.push(`Character voices: ${voiceEntries.join('; ')}.`)
   }
   if (isPhoneShot && onCameraSpeakers.length) {
-    lines.push(
-      `Voice routing: ${Array.from(new Set(onCameraSpeakers)).join(', ')} speaks on camera with their natural, direct, unfiltered chest voice in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech.`,
-    )
+    const speakersLabel = Array.from(new Set(onCameraSpeakers)).join(', ')
+    const baseRouting = `Voice routing: ${speakersLabel} speaks on camera with their natural, direct, unfiltered chest voice in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech.`
+    if (hasOffscreenPhoneSpeech) {
+      const offscreenLabel = offscreenPhoneNames.length ? offscreenPhoneNames.join(', ') : 'the off-screen phone caller'
+      const linesClause = onCameraLines.length ? ` (${onCameraLines.map((l) => `"${l}"`).join(', ')})` : ''
+      lines.push(
+        `${baseRouting} Lip-sync lock: ${offscreenLabel} is an unseen off-screen telephone caller heard ONLY as filtered, band-limited earpiece voice-over — ${speakersLabel}'s lips and jaw MUST remain completely closed and motionless in silent listening while ${offscreenLabel}'s phone line plays, and ${speakersLabel}'s mouth must move ONLY when speaking ${speakersLabel}'s own on-camera dialogue${linesClause}.`,
+      )
+    } else {
+      lines.push(baseRouting)
+    }
   }
   lines.push(
     `Shot action and micro-acting: ${value(action, value(continuityScene?.action, 'subtle, motivated performance'))}.`,

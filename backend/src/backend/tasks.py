@@ -1118,12 +1118,26 @@ def _generate_shot_clip(
             raise
 
 
+_SOUND_QUOTE_RE = re.compile(
+    r"(?:\s*(?:says|speaks|plays)\s*,?\s*|\s*:\s*)([\"\u201c]([^\"\u201d]{6,})[\"\u201d])",
+    re.IGNORECASE,
+)
+
+
 def compose_video_prompt(prompt: str, sound: str) -> str:
     prompt = prompt.strip()
     sound = sound.strip()
     if not sound or sound in prompt:
         return prompt
-    return f"{prompt}\n\nAudio direction: {sound}"
+
+    def _dedup_quote(match: re.Match[str]) -> str:
+        inner = match.group(2).strip()
+        if inner and inner in prompt:
+            return " (off-screen earpiece audio only; no lip movement on camera)"
+        return match.group(0)
+
+    cleaned_sound = _SOUND_QUOTE_RE.sub(_dedup_quote, sound).strip()
+    return f"{prompt}\n\nAudio direction: {cleaned_sound}"
 
 
 @video_huey.task()

@@ -95,4 +95,31 @@ describe('buildShotVideoPrompt', () => {
     expect(prompt).toContain('Mara — early 30s, freckled, athletic build')
     expect(prompt).toContain('Mara: "We have to go."')
   })
+
+  it('includes off-screen phone caller voice profile and lip-sync lock when caller speaks through handset', () => {
+    const gabe = {
+      id: 'gabe',
+      name: 'GABE',
+      notes: '29 years old. Filipino man.',
+      voice_description: 'Steady, resonant 29-year-old Filipino baritone, composed, unhurried delivery',
+    } as Character
+    const mateo = {
+      id: 'mateo',
+      name: 'MATEO',
+      notes: 'Older Filipino field coordinator.',
+      voice_description: 'Deep, weathered older Filipino baritone, low-key coastal delivery',
+    } as Character
+    const phoneCallShot = {
+      ...shot,
+      action: "Gabe answers the phone and listens to Mateo's report from the handset before responding.",
+      video_prompt: 'Gabe listens silently to Mateo on the phone, then replies: "No. My father can wait."',
+      sound: 'Phone connection tone, Mateo filtered phone voice.',
+      dialogue: [{ character: 'GABE', text: 'No. My father can wait.' }],
+      character_ids: ['gabe'],
+    } as Shot
+    const prompt = buildShotVideoPrompt(phoneCallShot, scene, [gabe, mateo], '9:16')
+    expect(prompt).toContain('MATEO (off-screen phone caller, unseen filtered telephone earpiece voice-over only — never lip-sync on-camera face to this voice): Deep, weathered older Filipino baritone')
+    expect(prompt).toContain('Lip-sync lock: MATEO is an unseen off-screen telephone caller heard ONLY as filtered, band-limited earpiece voice-over')
+    expect(prompt).toContain('("No. My father can wait.")')
+  })
 })

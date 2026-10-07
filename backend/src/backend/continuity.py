@@ -200,9 +200,130 @@ def current_shot_snapshot(shot: Shot, aspect_ratio: str) -> dict[str, Any]:
     }
 
 
+_MOUTH_STILL_PHONE_QUOTE_RE = re.compile(
+    r"Keep\s+(?P<listener>[A-Z][a-zA-Z]+)'s\s+(?:mouth|lips)\s+(?:still|closed|shut|motionless)\s+"
+    r"while\s+(?P<caller>[^:\n]+?)\s*:\s*(?P<quote>[\"\u201c][^\"\u201d]+[\"\u201d])",
+    re.IGNORECASE,
+)
+_OFFSCREEN_PHONE_CUE_RE = re.compile(
+    r"\b(?:filtered\s+(?:phone\s+|handset\s+)?(?:voice|line|audio)|"
+    r"handset\s+audio|off-screen\s+phone\s+voice|"
+    r"(?:assistant|caller)\s+says\s*,)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_phone_video_prompt(video_prompt: str) -> str:
+    """Rewrite clauses that place '<Listener>'s mouth' directly before an off-screen caller's quote."""
+    text = _text(video_prompt)
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        listener = match.group("listener").strip()
+        caller_clause = match.group("caller").strip()
+        quote = match.group("quote").strip()
+        return (
+            f"{listener} listens silently with lips firmly closed and jaw motionless. "
+            f"Over the filtered telephone earpiece, unseen caller ({caller_clause}): {quote}"
+        )
+
+    return _MOUTH_STILL_PHONE_QUOTE_RE.sub(_replace, text)
+
+
+def _on_camera_canon_set(snapshot: dict[str, Any], shot: Shot | None = None) -> set[str]:
+    canons: set[str] = set()
+    for item in snapshot.get("characters") or []:
+        if isinstance(item, dict) and _text(item.get("name")):
+            canon = canonical_character_name(_text(item.get("name")))
+            if canon:
+                canons.add(canon)
+                canons.add(canon.split()[0])
+    if not canons and shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
+        project = shot.scene.script_version.project
+        if project is not None:
+            selected = set(shot.character_ids or [])
+            for char in project.characters or []:
+                if char.id in selected and char.name:
+                    canon = canonical_character_name(char.name)
+                    if canon:
+                        canons.add(canon)
+                        canons.add(canon.split()[0])
+    return canons
+
+
+def _detect_offscreen_phone_characters(
+    snapshot: dict[str, Any],
+    video_prompt: str,
+    shot: Shot | None = None,
+) -> list[tuple[str, Character | None, str]]:
+    """Return (display_name, Character | None, voice_description) for off-screen phone speakers in this shot."""
+    action = _text(shot.action if shot is not None else snapshot.get("action"))
+    framing = _text(shot.framing if shot is not None else snapshot.get("framing"))
+    sound = _text(getattr(shot, "sound", "") if shot is not None else snapshot.get("sound"))
+    combined = f"{action}\n{video_prompt}\n{framing}\n{sound}"
+    if not PHONE_CALL_PATTERN.search(combined):
+        return []
+
+    on_camera_canons = _on_camera_canon_set(snapshot, shot)
+    project_chars: list[Character] = []
+    if shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
+        project = shot.scene.script_version.project
+        if project is not None:
+            project_chars = list(project.characters or [])
+    by_name: dict[str, Character] = {}
+    for char in project_chars:
+        key = canonical_character_name(char.name)
+        if key:
+            by_name[key] = char
+            first = key.split()[0]
+            if first not in by_name:
+                by_name[first] = char
+
+    found: list[tuple[str, Character | None, str]] = []
+    seen: set[str] = set()
+
+    dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
+    for line in dialogue:
+        if not isinstance(line, dict):
+            continue
+        raw_speaker = _text(line.get("character") or line.get("speaker"))
+        if not raw_speaker:
+            continue
+        canon = canonical_character_name(raw_speaker)
+        if not canon or canon in seen:
+            continue
+        is_offscreen_cue = bool(OFFSCREEN_SPEAKER_PATTERN.search(raw_speaker))
+        is_unselected_speaker = bool(
+            on_camera_canons
+            and canon not in on_camera_canons
+            and canon.split()[0] not in on_camera_canons
+        )
+        if is_offscreen_cue or is_unselected_speaker:
+            live_char = by_name.get(canon) or (by_name.get(canon.split()[0]) if canon.split() else None)
+            voice_desc = _resolve_character_voice(live_char) if live_char is not None else ""
+            seen.add(canon)
+            found.append((canon, live_char, voice_desc))
+
+    search_text = f"{action}\n{video_prompt}\n{sound}"
+    for char in project_chars:
+        canon = canonical_character_name(char.name)
+        if not canon or canon in seen:
+            continue
+        first = canon.split()[0]
+        if canon in on_camera_canons or first in on_camera_canons:
+            continue
+        if re.search(rf"\b{re.escape(canon)}\b|\b{re.escape(first)}\b", search_text, re.IGNORECASE):
+            seen.add(canon)
+            found.append((canon, char, _resolve_character_voice(char)))
+
+    return found
+
+
 def _collect_voice_entries(
     snapshot: dict[str, Any],
     shot: Shot | None = None,
+    video_prompt: str = "",
 ) -> list[str]:
     characters = snapshot.get("characters") or []
     snapshot_voices = {
@@ -225,10 +346,23 @@ def _collect_voice_entries(
             if first not in by_name:
                 by_name[first] = char
 
+    offscreen_phone_chars = _detect_offscreen_phone_characters(
+        snapshot,
+        video_prompt or _text(getattr(shot, "video_prompt", "") if shot is not None else snapshot.get("video_prompt")),
+        shot=shot,
+    )
+    offscreen_canons = {canon for canon, _, _ in offscreen_phone_chars}
+
     seen_names: set[str] = set()
     entries: list[str] = []
 
-    def add_voice(raw_name: str, char_id: str | None = None, fallback_voice: str = "", fallback_notes: str = "") -> None:
+    def add_voice(
+        raw_name: str,
+        char_id: str | None = None,
+        fallback_voice: str = "",
+        fallback_notes: str = "",
+        is_offscreen_phone: bool = False,
+    ) -> None:
         clean_name = _text(raw_name)
         canon = canonical_character_name(clean_name)
         if not canon or canon in seen_names:
@@ -245,7 +379,12 @@ def _collect_voice_entries(
             voice_desc = infer_voice_description(canon, fallback_notes)
         if voice_desc:
             seen_names.add(canon)
-            entries.append(f"{clean_name}: {voice_desc.rstrip('.')}")
+            if is_offscreen_phone or canon in offscreen_canons:
+                entries.append(
+                    f"{canon} (off-screen phone caller, unseen filtered telephone earpiece voice-over only — never lip-sync on-camera face to this voice): {voice_desc.rstrip('.')}"
+                )
+            else:
+                entries.append(f"{clean_name}: {voice_desc.rstrip('.')}")
 
     dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
     char_by_canon = {
@@ -271,6 +410,7 @@ def _collect_voice_entries(
                     char_id=char_id or None,
                     fallback_voice=_text(item.get("voice_description") or sv.get("voice_description")),
                     fallback_notes=_text(item.get("notes") or sv.get("notes")),
+                    is_offscreen_phone=bool(OFFSCREEN_SPEAKER_PATTERN.search(raw_speaker)),
                 )
     else:
         for item in characters:
@@ -286,6 +426,16 @@ def _collect_voice_entries(
                 fallback_notes=_text(item.get("notes") or sv.get("notes")),
             )
 
+    for canon, live_char, voice_desc in offscreen_phone_chars:
+        if canon not in seen_names:
+            add_voice(
+                canon,
+                char_id=live_char.id if live_char is not None else None,
+                fallback_voice=voice_desc,
+                fallback_notes=_text(live_char.notes) if live_char is not None else "",
+                is_offscreen_phone=True,
+            )
+
     return entries
 
 
@@ -296,24 +446,38 @@ def _phone_routing_instruction(
 ) -> str:
     action = _text(shot.action if shot is not None else snapshot.get("action"))
     framing = _text(shot.framing if shot is not None else snapshot.get("framing"))
-    combined = f"{action}\n{video_prompt}\n{framing}"
+    sound = _text(getattr(shot, "sound", "") if shot is not None else snapshot.get("sound"))
+    combined = f"{action}\n{video_prompt}\n{framing}\n{sound}"
     if not PHONE_CALL_PATTERN.search(combined):
         return ""
 
+    on_camera_canons = _on_camera_canon_set(snapshot, shot)
+    offscreen_phone_chars = _detect_offscreen_phone_characters(snapshot, video_prompt, shot=shot)
+    offscreen_canons = {canon for canon, _, _ in offscreen_phone_chars}
+
     dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
     on_camera_speakers: list[str] = []
+    on_camera_lines: list[str] = []
     for line in dialogue:
         if not isinstance(line, dict):
             continue
         raw_speaker = _text(line.get("character") or line.get("speaker"))
-        text = _text(line.get("text"))
+        text = _text(line.get("text") or line.get("line"))
         if not raw_speaker or not text:
             continue
         if OFFSCREEN_SPEAKER_PATTERN.search(raw_speaker):
             continue
         canon = canonical_character_name(raw_speaker)
+        if canon in offscreen_canons or (
+            on_camera_canons
+            and canon not in on_camera_canons
+            and canon.split()[0] not in on_camera_canons
+        ):
+            continue
         if canon and canon not in on_camera_speakers:
             on_camera_speakers.append(canon)
+        if text not in on_camera_lines:
+            on_camera_lines.append(text)
 
     if not on_camera_speakers and re.search(r'\bspeaks\s*:|["\u201c][^"\u201d]+["\u201d]', video_prompt, re.IGNORECASE):
         for item in snapshot.get("characters") or []:
@@ -324,9 +488,30 @@ def _phone_routing_instruction(
         return ""
 
     speakers_label = ", ".join(on_camera_speakers)
-    return (
+    base_routing = (
         f"Voice routing: {speakers_label} speaks on camera with their natural, direct, unfiltered chest voice "
         "in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech."
+    )
+
+    has_offscreen_phone_speech = bool(
+        offscreen_phone_chars or _OFFSCREEN_PHONE_CUE_RE.search(f"{video_prompt}\n{sound}")
+    )
+    if not has_offscreen_phone_speech:
+        return base_routing
+
+    offscreen_label = (
+        ", ".join(canon for canon, _, _ in offscreen_phone_chars)
+        if offscreen_phone_chars
+        else "the off-screen phone caller"
+    )
+    quoted_lines = ", ".join(f'"{line}"' for line in on_camera_lines)
+    lines_clause = f" ({quoted_lines})" if quoted_lines else ""
+    return (
+        f"{base_routing} "
+        f"Lip-sync lock: {offscreen_label} is an unseen off-screen telephone caller heard ONLY as filtered, "
+        f"band-limited earpiece voice-over — {speakers_label}'s lips and jaw MUST remain completely closed and "
+        f"motionless in silent listening while {offscreen_label}'s phone line plays, and {speakers_label}'s mouth "
+        f"must move ONLY when speaking {speakers_label}'s own on-camera dialogue{lines_clause}."
     )
 
 
@@ -379,9 +564,10 @@ def video_continuity_prompt(
     *,
     shot: Shot | None = None,
 ) -> str:
+    sanitized_video_prompt = _sanitize_phone_video_prompt(video_prompt)
     anchor = "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; preserve its composition, faces, wardrobe, set, and lighting throughout the clip, moving or removing props only as explicitly performed in the shot action."
     if not snapshot:
-        return "\n\n".join(part for part in (video_prompt.strip(), anchor) if part)
+        return "\n\n".join(part for part in (sanitized_video_prompt.strip(), anchor) if part)
     scene = snapshot.get("scene") or {}
     characters = snapshot.get("characters") or []
     cast_names = ", ".join(item.get("name", "") for item in characters if item.get("name"))
@@ -399,10 +585,10 @@ def video_continuity_prompt(
     visual_profiles = _collect_visual_profiles(snapshot, shot=shot)
     if visual_profiles:
         package.append(f"Character visual profiles: {'; '.join(visual_profiles)}.")
-    voice_entries = _collect_voice_entries(snapshot, shot=shot)
+    voice_entries = _collect_voice_entries(snapshot, shot=shot, video_prompt=sanitized_video_prompt)
     if voice_entries:
         package.append(f"Character voices: {'; '.join(voice_entries)}.")
-    phone_routing = _phone_routing_instruction(snapshot, video_prompt, shot=shot)
+    phone_routing = _phone_routing_instruction(snapshot, sanitized_video_prompt, shot=shot)
     if phone_routing:
         package.append(phone_routing)
     for key, label in (
@@ -413,7 +599,7 @@ def video_continuity_prompt(
         value = _text(scene.get(key))
         if value and value.lower() != "unspecified":
             package.append(f"{label} continuity: {value}.")
-    return "\n\n".join([video_prompt.strip(), *package]).strip()
+    return "\n\n".join([sanitized_video_prompt.strip(), *package]).strip()
 
 
 def shot_continuity_status(shot: Shot) -> dict[str, Any]:

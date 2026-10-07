@@ -175,3 +175,52 @@ def test_child_voices_and_duet_cue_expansion():
     assert "SKYLAR: Bright, cheerful 4-year-old young girl voice" in prompt
 
 
+def test_phone_call_offscreen_caller_voice_and_lipsync_lock():
+    from backend.continuity import current_shot_snapshot
+    from backend.tasks import compose_video_prompt
+
+    project = Project(title="Coastal Hold", aspect_ratio="9:16")
+    gabe = Character(
+        id="char-gabe",
+        project=project,
+        name="GABE",
+        notes="29 years old. Filipino man with warm tan skin.",
+        voice_description="Steady, resonant 29-year-old Filipino baritone, composed, unhurried delivery",
+    )
+    mateo = Character(
+        id="char-mateo",
+        project=project,
+        name="MATEO",
+        notes="Older Filipino field coordinator.",
+        voice_description="Deep, weathered older Filipino baritone, low-key coastal delivery",
+    )
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="HIDDEN CALL", location="Walkway", time_of_day="Morning")
+    shot = Shot(
+        scene=scene,
+        order_index=0,
+        title="HIS FATHER OVERRIDES HIM",
+        framing="Medium exterior profile shot",
+        action="Gabe steps onto the walkway and answers the phone. He listens to Mateo's report from the handset and responds firmly. Mateo is not physically present.",
+        dialogue=[{"character": "GABE", "text": "No. My father can wait."}],
+        sound='Coastal breeze, Mateo\'s filtered phone voice says, "The chairman overrode your hold. He wants the Santos purchase offer delivered today.", Gabe\'s audible dialogue.',
+        video_prompt=(
+            "Gabe answers the phone and raises it to his right ear. "
+            'Keep Gabe\'s mouth still while Mateo\'s filtered line plays: "The chairman overrode your hold. He wants the Santos purchase offer delivered today." '
+            'Only then does Gabe speak with accurate lip synchronization: "No. My father can wait."'
+        ),
+        character_ids=[gabe.id],
+    )
+
+    snapshot = current_shot_snapshot(shot, "9:16")
+    continuity_prompt = video_continuity_prompt(snapshot, shot.video_prompt, "9:16", shot=shot)
+    effective_prompt = compose_video_prompt(continuity_prompt, shot.sound)
+
+    assert "Keep Gabe's mouth still while" not in effective_prompt
+    assert "Gabe listens silently with lips firmly closed and jaw motionless." in effective_prompt
+    assert "MATEO (off-screen phone caller, unseen filtered telephone earpiece voice-over only — never lip-sync on-camera face to this voice): Deep, weathered older Filipino baritone" in effective_prompt
+    assert 'Lip-sync lock: MATEO is an unseen off-screen telephone caller heard ONLY as filtered, band-limited earpiece voice-over' in effective_prompt
+    assert 'GABE\'s own on-camera dialogue ("No. My father can wait.")' in effective_prompt
+    assert effective_prompt.count("The chairman overrode your hold. He wants the Santos purchase offer delivered today.") == 1
+
+
