@@ -2980,7 +2980,7 @@ def reset_timeline(
 async def upload_timeline_asset(
     project_id: str,
     file: UploadFile = File(...),
-    label: str = Form("Uploaded image"),
+    label: str = Form("Uploaded asset"),
     episode_id: str | None = None,
     edit: str = "landscape",
     db: Session = Depends(get_db),
@@ -2988,16 +2988,72 @@ async def upload_timeline_asset(
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    extensions = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-    if file.content_type not in extensions:
-        raise HTTPException(status_code=415, detail="Upload a JPG, PNG, or WebP image")
-    content = await file.read(10 * 1024 * 1024 + 1)
-    if not content or len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413 if content else 400, detail="Image must be between 1 byte and 10 MB")
+    image_extensions = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    audio_extensions = {
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/wave": ".wav",
+        "audio/mp4": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/m4a": ".m4a",
+        "audio/aac": ".aac",
+        "audio/ogg": ".ogg",
+        "audio/webm": ".webm",
+        "audio/flac": ".flac",
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+    }
+    ext_to_audio_mime = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+        ".webm": "audio/webm",
+    }
+    from pathlib import Path
     from uuid import uuid4
-    filename = f"timeline-{uuid4()}{extensions[file.content_type]}"
+
+    raw_mime = (file.content_type or "").lower().strip()
+    suffix = Path(file.filename or "").suffix.lower()
+    if raw_mime in {"", "application/octet-stream"} and suffix in ext_to_audio_mime:
+        raw_mime = ext_to_audio_mime[suffix]
+    is_image = raw_mime in image_extensions
+    is_audio = raw_mime in audio_extensions
+    if not is_image and not is_audio:
+        raise HTTPException(
+            status_code=415,
+            detail="Upload a JPG, PNG, WebP image or MP3, WAV, M4A, AAC, OGG, FLAC audio file",
+        )
+    max_bytes = (10 if is_image else 50) * 1024 * 1024
+    content = await file.read(max_bytes + 1)
+    if not content or len(content) > max_bytes:
+        limit_label = "10 MB" if is_image else "50 MB"
+        kind_label = "Image" if is_image else "Audio"
+        raise HTTPException(
+            status_code=413 if content else 400,
+            detail=f"{kind_label} must be between 1 byte and {limit_label}",
+        )
+    ext = image_extensions[raw_mime] if is_image else audio_extensions[raw_mime]
+    stored_mime = raw_mime if is_image else (
+        "audio/mp4" if raw_mime == "video/mp4" else ("audio/webm" if raw_mime == "video/webm" else raw_mime)
+    )
+    filename = f"timeline-{uuid4()}{ext}"
+    settings.media_dir.mkdir(parents=True, exist_ok=True)
     (settings.media_dir / filename).write_bytes(content)
-    asset = TimelineAsset(project_id=project.id, filename=filename, mime_type=file.content_type, label=label[:160] or "Uploaded image")
+    default_label = "Uploaded image" if is_image else "Uploaded audio"
+    clean_label = (label or "").strip()[:160]
+    if not clean_label or clean_label == "Uploaded asset":
+        clean_label = default_label
+    asset = TimelineAsset(
+        project_id=project.id,
+        filename=filename,
+        mime_type=stored_mime,
+        label=clean_label,
+    )
     db.add(asset)
     timeline = ensure_timeline(project, db, episode_id=episode_id)
     timeline.revision += 1
@@ -3022,10 +3078,17 @@ def delete_timeline_asset(
         raise HTTPException(status_code=404, detail="Timeline asset not found")
     project = asset.project
     timeline = ensure_timeline(project, db, episode_id=episode_id)
-    document = TimelineDocument.model_validate(timeline.document)
-    used = any(item.source and item.source.kind == "asset" and item.source.ref_id == asset.id for item in document.primary) or any(item.source.kind == "asset" and item.source.ref_id == asset.id for item in document.image_overlays)
+    docs = [TimelineDocument.model_validate(timeline.document)]
+    if timeline.shorts_document:
+        docs.append(TimelineDocument.model_validate(timeline.shorts_document))
+    used = any(
+        any(item.source and item.source.kind == "asset" and item.source.ref_id == asset.id for item in doc.primary)
+        or any(item.source.kind == "asset" and item.source.ref_id == asset.id for item in doc.image_overlays)
+        or any(item.source.kind == "asset" and item.source.ref_id == asset.id for item in doc.audio_overlays)
+        for doc in docs
+    )
     if used:
-        raise HTTPException(status_code=409, detail="Remove this image from the timeline before deleting it")
+        raise HTTPException(status_code=409, detail="Remove this asset from the timeline before deleting it")
     filename = asset.filename
     db.delete(asset)
     timeline.revision += 1

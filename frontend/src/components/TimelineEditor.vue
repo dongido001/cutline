@@ -2,9 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PublishPanel from '@/components/PublishPanel.vue'
-import { api, type AspectRatio, type OutputVariant, type ProjectDetail, type ProjectTimeline, type Shot, type TimelineGeometry, type TimelinePrimaryItem, type TimelineSource } from '@/lib/api'
+import { api, type AspectRatio, type OutputVariant, type ProjectDetail, type ProjectTimeline, type Shot, type TimelineAudioOverlay, type TimelineGeometry, type TimelinePrimaryItem, type TimelineSource } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
-import { AlignCenter, ChevronLeft, ChevronRight, CopyPlus, Download, Film, GripVertical, ImagePlus, Keyboard, LoaderCircle, MoveLeft, MoveRight, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
+import { AlignCenter, ChevronLeft, ChevronRight, CopyPlus, Download, Film, GripVertical, ImagePlus, Keyboard, LoaderCircle, MoveLeft, MoveRight, Music, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
 
 const props = defineProps<{ project: ProjectDetail; shots: Shot[] }>()
 const emit = defineEmits<{ variantChange: [variant: OutputVariant] }>()
@@ -17,7 +17,7 @@ interface PersistedTimelineUiState {
   isMuted?: boolean
   zoomLevel?: number
   playheadMs?: number
-  selectedKind?: 'primary' | 'image' | 'text'
+  selectedKind?: 'primary' | 'image' | 'text' | 'audio'
   selectedId?: string
   variant?: OutputVariant
   scrollLeft?: number
@@ -59,8 +59,8 @@ const variant = ref<OutputVariant>(
       ? initialUiState.variant
       : props.project.aspect_ratio === '9:16' ? 'shorts' : 'landscape',
 )
-const selectedKind = ref<'primary' | 'image' | 'text'>(
-  initialUiState.selectedKind === 'image' || initialUiState.selectedKind === 'text'
+const selectedKind = ref<'primary' | 'image' | 'text' | 'audio'>(
+  initialUiState.selectedKind === 'image' || initialUiState.selectedKind === 'text' || initialUiState.selectedKind === 'audio'
     ? initialUiState.selectedKind
     : 'primary',
 )
@@ -278,6 +278,8 @@ const trimRangeStyle = computed(() => {
 })
 const selectedImage = computed(() => timeline.value?.document.image_overlays.find((item) => item.id === selectedId.value) ?? null)
 const selectedText = computed(() => timeline.value?.document.text_overlays.find((item) => item.id === selectedId.value) ?? null)
+const audioOverlays = computed(() => timeline.value?.document.audio_overlays ?? [])
+const selectedAudio = computed(() => audioOverlays.value.find((item) => item.id === selectedId.value) ?? null)
 const activeIndex = computed(() => {
   const found = starts.value.findIndex((start, index) => playheadMs.value >= start && playheadMs.value < start + (primary.value[index]?.duration_ms ?? 0))
   return found < 0 ? Math.max(0, primary.value.length - 1) : found
@@ -322,6 +324,21 @@ function resolveSource(source: TimelineSource | null) {
   }
   const shot = props.shots.find((item) => item.id === source.ref_id)
   if (!shot) return null
+  if (source.kind === 'shot_audio') {
+    if (shot.dialogue_audio_filename) {
+      return {
+        url: `/media/${shot.dialogue_audio_filename}`,
+        mime_type: shot.dialogue_audio_mime || 'audio/wav',
+        native: true,
+        label: `${shot.title} dialogue`,
+      }
+    }
+    const clipResolved = shotMedia(shot, 'clip')
+    if (clipResolved) {
+      return { ...clipResolved.media, native: clipResolved.native, label: `${shot.title} audio` }
+    }
+    return null
+  }
   let resolved = shotMedia(shot, source.kind === 'shot_clip' ? 'clip' : 'image')
   if (!resolved && source.kind === 'shot_clip') resolved = shotMedia(shot, 'image')
   if (!resolved) return null
@@ -372,6 +389,7 @@ async function loadTimeline() {
   }
   try {
     timeline.value = await api.timeline(reqProjectId, variant.value, reqEpisodeId)
+    timeline.value.document.audio_overlays ??= []
     loadedProjectId = reqProjectId
     loadedEpisodeId = reqEpisodeId
     const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
@@ -387,6 +405,9 @@ async function loadTimeline() {
         selectedId.value = persisted.selectedId
       } else if (persisted.selectedKind === 'text' && persisted.selectedId && doc.text_overlays.some((item) => item.id === persisted.selectedId)) {
         selectedKind.value = 'text'
+        selectedId.value = persisted.selectedId
+      } else if (persisted.selectedKind === 'audio' && persisted.selectedId && (doc.audio_overlays ?? []).some((item) => item.id === persisted.selectedId)) {
+        selectedKind.value = 'audio'
         selectedId.value = persisted.selectedId
       } else if (persisted.selectedId && doc.primary.some((item) => item.id === persisted.selectedId)) {
         selectedKind.value = 'primary'
@@ -494,7 +515,14 @@ async function saveTimeline() {
       item.start_ms = Math.round(item.start_ms)
       item.duration_ms = Math.round(item.duration_ms)
     }
+    timeline.value.document.audio_overlays ??= []
+    for (const item of timeline.value.document.audio_overlays) {
+      item.start_ms = Math.round(item.start_ms)
+      item.duration_ms = Math.round(item.duration_ms)
+      item.source_in_ms = Math.round(item.source_in_ms || 0)
+    }
     const saved = await api.saveTimeline(targetProjectId, timeline.value, targetVariant, targetEpisodeId)
+    saved.document.audio_overlays ??= []
     if (props.project.id === targetProjectId && (timeline.value?.edit || variant.value) === targetVariant && (store.currentEpisodeId || undefined) === targetEpisodeId) {
       if (!pendingSave && !dirtyDocument) {
         timeline.value = saved
@@ -542,11 +570,16 @@ function removeInterval(start: number, duration: number) {
   })
   timeline.value.document.image_overlays = adjust(timeline.value.document.image_overlays)
   timeline.value.document.text_overlays = adjust(timeline.value.document.text_overlays)
+  timeline.value.document.audio_overlays = adjust(timeline.value.document.audio_overlays ?? [])
 }
 
 function insertInterval(start: number, duration: number) {
   if (!timeline.value) return
-  for (const item of [...timeline.value.document.image_overlays, ...timeline.value.document.text_overlays]) {
+  for (const item of [
+    ...timeline.value.document.image_overlays,
+    ...timeline.value.document.text_overlays,
+    ...(timeline.value.document.audio_overlays ?? []),
+  ]) {
     if (item.start_ms >= start) item.start_ms += duration
   }
 }
@@ -649,6 +682,11 @@ function deleteSelection() {
       timeline.value!.document.image_overlays = timeline.value!.document.image_overlays.filter((item) => item.id !== selectedId.value)
       selectedId.value = primary.value[0]?.id ?? ''
       selectedKind.value = 'primary'
+    } else if (selectedKind.value === 'audio') {
+      timeline.value!.document.audio_overlays = (timeline.value!.document.audio_overlays ?? []).filter((item) => item.id !== selectedId.value)
+      selectedId.value = primary.value[0]?.id ?? ''
+      selectedKind.value = 'primary'
+      syncAudioOverlays()
     } else {
       timeline.value!.document.text_overlays = timeline.value!.document.text_overlays.filter((item) => item.id !== selectedId.value)
       selectedId.value = primary.value[0]?.id ?? ''
@@ -757,6 +795,20 @@ function duplicateSelected() {
       timeline.value!.document.text_overlays.push(duplicate)
       selectedId.value = duplicate.id
     })
+  } else if (selectedKind.value === 'audio') {
+    const item = selectedAudio.value
+    if (!item) return
+    mutate(() => {
+      const duplicate: TimelineAudioOverlay = {
+        ...JSON.parse(JSON.stringify(item)),
+        id: crypto.randomUUID(),
+        label: `${item.label} (copy)`,
+        start_ms: Math.max(0, Math.min(totalMs.value - item.duration_ms, item.start_ms + item.duration_ms)),
+      }
+      timeline.value!.document.audio_overlays ??= []
+      timeline.value!.document.audio_overlays.push(duplicate)
+      selectedId.value = duplicate.id
+    })
   }
 }
 
@@ -857,6 +909,111 @@ function addImageOverlay(source?: TimelineSource) {
   })
 }
 
+function addAudioOverlay(source: TimelineSource, label = 'Audio clip', preferredDurationMs = 3000) {
+  closeAddMenu()
+  if (!timeline.value) return
+  mutate(() => {
+    const maxStart = Math.max(0, totalMs.value - 100)
+    const playhead = Math.min(maxStart, Math.max(0, Math.round(playheadMs.value)))
+    const remaining = Math.max(100, totalMs.value - playhead)
+    const duration = Math.round(Math.min(Math.max(100, preferredDurationMs), remaining))
+    const item: TimelineAudioOverlay = {
+      id: crypto.randomUUID(),
+      label,
+      source,
+      start_ms: playhead,
+      duration_ms: duration,
+      source_in_ms: 0,
+      volume: 1,
+      mute_audio: false,
+    }
+    timeline.value!.document.audio_overlays ??= []
+    timeline.value!.document.audio_overlays.push(item)
+    selectedKind.value = 'audio'
+    selectedId.value = item.id
+  })
+}
+
+function shotHasAudio(shot?: Shot | null): boolean {
+  if (!shot) return false
+  return Boolean(shot.dialogue_audio_filename || shot.clip || shot.media_variants?.some((v) => v.media_type === 'clip'))
+}
+
+const activeShotWithAudio = computed(() => {
+  const refId = selectedPrimary.value?.source?.ref_id || activeItem.value?.source?.ref_id
+  const currentShot = props.shots.find((s) => s.id === refId)
+  if (shotHasAudio(currentShot)) return currentShot!
+  return props.shots.find((s) => shotHasAudio(s)) ?? null
+})
+
+function addShotAudioToTimeline(shot?: Shot | null) {
+  closeAddMenu()
+  const target = shot ?? activeShotWithAudio.value
+  if (!target) return
+  const label = target.dialogue_audio_filename ? `${target.title || 'Shot'} dialogue` : `${target.title || 'Shot'} audio`
+  addAudioOverlay({ kind: 'shot_audio', ref_id: target.id }, label, target.duration_ms || 3000)
+  showAddShotModal.value = false
+}
+
+function probeFileDurationMs(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    if (typeof Audio === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      resolve(3000)
+      return
+    }
+    let settled = false
+    const objectUrl = URL.createObjectURL(file)
+    const finish = (ms: number) => {
+      if (settled) return
+      settled = true
+      try {
+        URL.revokeObjectURL(objectUrl)
+      } catch {}
+      resolve(ms)
+    }
+    const timer = window.setTimeout(() => finish(3000), 1200)
+    try {
+      const audio = new Audio()
+      audio.preload = 'metadata'
+      audio.onloadedmetadata = () => {
+        window.clearTimeout(timer)
+        const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? Math.round(audio.duration * 1000) : 3000
+        finish(dur)
+      }
+      audio.onerror = () => {
+        window.clearTimeout(timer)
+        finish(3000)
+      }
+      audio.src = objectUrl
+    } catch {
+      window.clearTimeout(timer)
+      finish(3000)
+    }
+  })
+}
+
+async function uploadAudioAsset(event: Event) {
+  closeAddMenu()
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !timeline.value) return
+  try {
+    const probedMs = await probeFileDurationMs(file)
+    const cleanLabel = file.name.replace(/\.[^.]+$/, '') || file.name
+    await flushPendingSave()
+    timeline.value = await api.uploadTimelineAsset(props.project.id, file, cleanLabel, variant.value, store.currentEpisodeId || undefined)
+    timeline.value.document.audio_overlays ??= []
+    const asset = timeline.value.assets[timeline.value.assets.length - 1]
+    if (asset) {
+      addAudioOverlay({ kind: 'asset', ref_id: asset.id }, asset.label || cleanLabel, probedMs)
+    }
+  } catch (cause) {
+    localError.value = cause instanceof Error ? cause.message : 'Could not upload audio'
+  } finally {
+    input.value = ''
+  }
+}
+
 async function uploadAsset(event: Event, append: boolean) {
   closeAddMenu()
   const input = event.target as HTMLInputElement
@@ -864,6 +1021,7 @@ async function uploadAsset(event: Event, append: boolean) {
   if (!file || !timeline.value) return
   await flushPendingSave()
   timeline.value = await api.uploadTimelineAsset(props.project.id, file, file.name, variant.value, store.currentEpisodeId || undefined)
+  timeline.value.document.audio_overlays ??= []
   const asset = timeline.value.assets[timeline.value.assets.length - 1]
   if (asset) {
     selectedKind.value = 'primary'
@@ -881,7 +1039,7 @@ async function uploadAsset(event: Event, append: boolean) {
   input.value = ''
 }
 
-function selectItem(kind: 'primary' | 'image' | 'text', id: string, start: number) {
+function selectItem(kind: 'primary' | 'image' | 'text' | 'audio', id: string, start: number) {
   stopPlayback()
   selectedKind.value = kind
   selectedId.value = id
@@ -939,7 +1097,7 @@ function jumpClip(direction: -1 | 1) {
   }
 }
 
-function beginOverlayEdit(event: PointerEvent, kind: 'image' | 'text', item: OverlayItem, mode: OverlayEditMode) {
+function beginOverlayEdit(event: PointerEvent, kind: 'image' | 'text' | 'audio', item: OverlayItem, mode: OverlayEditMode) {
   if (event.button !== 0 || !timeline.value || totalMs.value <= 0) return
   const track = (event.currentTarget as HTMLElement).closest('.overlay-track')
   if (!track) return
@@ -1019,15 +1177,90 @@ function seek(event: Event) {
   persistUiState()
 }
 
+const audioOverlayPlayers = new Map<string, HTMLAudioElement>()
+
+function pauseAllAudioOverlays() {
+  for (const el of audioOverlayPlayers.values()) {
+    try {
+      el.pause()
+    } catch {}
+  }
+}
+
+function syncAudioOverlays() {
+  if (typeof Audio === 'undefined') return
+  const items = audioOverlays.value
+  const activeIds = new Set(items.map((item) => item.id))
+  for (const [id, el] of audioOverlayPlayers.entries()) {
+    if (!activeIds.has(id)) {
+      try {
+        el.pause()
+      } catch {}
+      audioOverlayPlayers.delete(id)
+    }
+  }
+  for (const overlay of items) {
+    const resolved = resolveSource(overlay.source)
+    if (!resolved?.url) {
+      const existing = audioOverlayPlayers.get(overlay.id)
+      if (existing) {
+        try {
+          existing.pause()
+        } catch {}
+        audioOverlayPlayers.delete(overlay.id)
+      }
+      continue
+    }
+    let player = audioOverlayPlayers.get(overlay.id)
+    if (!player) {
+      try {
+        player = new Audio()
+        player.preload = 'auto'
+        audioOverlayPlayers.set(overlay.id, player)
+      } catch {
+        continue
+      }
+    }
+    if (player.dataset.src !== resolved.url) {
+      player.dataset.src = resolved.url
+      player.src = resolved.url
+    }
+    const inWindow = playheadMs.value >= overlay.start_ms && playheadMs.value < overlay.start_ms + overlay.duration_ms
+    const muted = isMuted.value || Boolean(overlay.mute_audio) || (overlay.volume ?? 1) <= 0
+    player.muted = muted
+    player.volume = Math.max(0, Math.min(1, overlay.volume ?? 1))
+    const targetSec = Math.max(0, ((overlay.source_in_ms || 0) + (playheadMs.value - overlay.start_ms)) / 1000)
+    if (playing.value && inWindow && !muted) {
+      try {
+        if (Math.abs((player.currentTime || 0) - targetSec) > 0.25) {
+          player.currentTime = targetSec
+        }
+        if (player.paused) {
+          void player.play()?.catch?.(() => undefined)
+        }
+      } catch {}
+    } else {
+      try {
+        if (!player.paused) player.pause()
+        if (inWindow && Math.abs((player.currentTime || 0) - targetSec) > 0.05) {
+          player.currentTime = targetSec
+        }
+      } catch {}
+    }
+  }
+}
+
 function toggleMute() {
   isMuted.value = !isMuted.value
   if (previewVideo.value) {
     previewVideo.value.muted = isMuted.value || Boolean(activeItem.value?.mute_audio)
   }
+  syncAudioOverlays()
   persistUiState()
 }
 
 function syncVideo() {
+  syncAudioOverlays()
   const video = previewVideo.value
   const item = activeItem.value
   if (!video || !item || !activeMedia.value?.mime_type.startsWith('video')) return
@@ -1039,6 +1272,14 @@ function syncVideo() {
 }
 
 function toggleSelectedAudio() {
+  if (selectedKind.value === 'audio' && selectedAudio.value) {
+    const audioItem = selectedAudio.value
+    mutate(() => {
+      audioItem.mute_audio = !audioItem.mute_audio
+    })
+    syncAudioOverlays()
+    return
+  }
   const item = selectedPrimary.value
   if (!item || item.kind !== 'video') return
   mutate(() => {
@@ -1076,6 +1317,7 @@ function stopPlayback() {
   if (playbackTimer !== undefined) cancelAnimationFrame(playbackTimer)
   playbackTimer = undefined
   previewVideo.value?.pause()
+  pauseAllAudioOverlays()
   if (wasPlaying && !loading.value) persistUiState()
 }
 
@@ -1092,6 +1334,7 @@ function togglePlayback() {
     if (!playing.value) return
     playheadMs.value = Math.min(totalMs.value, playheadMs.value + now - previous)
     previous = now
+    syncAudioOverlays()
     scrollPlayheadIntoView()
     if (playheadMs.value >= totalMs.value) {
       if (loopPlayback.value && totalMs.value > 0) {
@@ -1120,6 +1363,7 @@ async function resetTimeline() {
   dirtyDocument = false
   pendingSave = false
   timeline.value = await api.resetTimeline(props.project.id, store.currentEpisodeId || undefined)
+  timeline.value.document.audio_overlays ??= []
   selectedKind.value = 'primary'
   selectedId.value = timeline.value.document.primary[0]?.id ?? ''
   playheadMs.value = 0
@@ -1471,7 +1715,7 @@ onBeforeUnmount(() => {
         <aside class="timeline-inspector">
           <header class="inspector-header">
             <span class="inspector-eyebrow">Inspector · {{ selectedKind.toUpperCase() }}</span>
-            <strong>{{ selectedPrimary?.label || selectedText?.text || (selectedImage ? 'Image overlay' : 'Nothing selected') }}</strong>
+            <strong>{{ selectedPrimary?.label || selectedText?.text || selectedAudio?.label || (selectedImage ? 'Image overlay' : 'Nothing selected') }}</strong>
           </header>
           <template v-if="selectedPrimary">
             <label>Name<input v-model="selectedPrimary.label" @change="scheduleSave" /></label>
@@ -1541,6 +1785,30 @@ onBeforeUnmount(() => {
             <label>Scale<input v-model.number="geometryFor(selectedImage).scale" type="range" min="0.1" max="2" step="0.05" @change="scheduleSave" /></label>
             <label>Opacity<input v-model.number="selectedImage.opacity" type="range" min="0" max="1" step="0.05" @change="scheduleSave" /></label>
           </template>
+          <template v-else-if="selectedAudio">
+            <label>Label<input v-model="selectedAudio.label" @change="scheduleSave" /></label>
+            <label>Start (ms)<input v-model.number="selectedAudio.start_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
+            <label>Duration (ms)<input v-model.number="selectedAudio.duration_ms" type="number" min="100" step="100" @change="scheduleSave" /></label>
+            <label>Trim in (ms)<input v-model.number="selectedAudio.source_in_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
+            <label>Volume · {{ Math.round((selectedAudio.volume ?? 1) * 100) }}%<input v-model.number="selectedAudio.volume" type="range" min="0" max="2" step="0.05" @input="syncAudioOverlays" @change="scheduleSave" /></label>
+            <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this audio clip (Ctrl+D)">
+              <CopyPlus :size="13" />Duplicate audio clip
+            </button>
+            <div class="inspector-audio-row">
+              <span class="inspector-label"><Music :size="13" />Track audio</span>
+              <button
+                type="button"
+                class="audio-toggle-action"
+                :class="{ muted: selectedAudio.mute_audio }"
+                @click="toggleSelectedAudio"
+                :title="selectedAudio.mute_audio ? 'Unmute audio clip' : 'Mute audio clip'"
+              >
+                <VolumeX v-if="selectedAudio.mute_audio" :size="13" />
+                <Volume2 v-else :size="13" />
+                <span>{{ selectedAudio.mute_audio ? 'Muted' : 'Active' }}</span>
+              </button>
+            </div>
+          </template>
         </aside>
       </div>
 
@@ -1549,16 +1817,16 @@ onBeforeUnmount(() => {
         <button title="Redo (Ctrl+Shift+Z / Ctrl+Y)" :disabled="!future.length" @click="redo"><Redo2 :size="16" /></button>
         <span></span>
         <button title="Split at playhead (S / C)" :disabled="activeItem?.kind !== 'video'" @click="splitAtPlayhead"><Split :size="16" /><span>Split</span></button>
-        <button title="Duplicate selected item (Ctrl+D)" :disabled="!selectedPrimary && !selectedImage && !selectedText" @click="duplicateSelected"><CopyPlus :size="16" /><span>Duplicate</span></button>
+        <button title="Duplicate selected item (Ctrl+D)" :disabled="!selectedPrimary && !selectedImage && !selectedText && !selectedAudio" @click="duplicateSelected"><CopyPlus :size="16" /><span>Duplicate</span></button>
         <button class="add-shot-toolbar-btn" title="Add/insert shot from project into timeline" @click="showAddShotModal = true"><Plus :size="15" /><span>Add shot</span></button>
         <button
           type="button"
-          :title="selectedPrimary?.kind === 'video' ? (selectedPrimary.mute_audio ? 'Unmute clip audio (M)' : 'Mute/remove audio from clip (M)') : 'Mute clip audio (select video)'"
-          :disabled="selectedPrimary?.kind !== 'video'"
-          :class="{ 'item-muted-active': selectedPrimary?.mute_audio }"
+          :title="selectedAudio ? (selectedAudio.mute_audio ? 'Unmute audio clip (M)' : 'Mute audio clip (M)') : selectedPrimary?.kind === 'video' ? (selectedPrimary.mute_audio ? 'Unmute clip audio (M)' : 'Mute/remove audio from clip (M)') : 'Mute clip audio (select video or audio)'"
+          :disabled="selectedPrimary?.kind !== 'video' && !selectedAudio"
+          :class="{ 'item-muted-active': selectedAudio ? selectedAudio.mute_audio : selectedPrimary?.mute_audio }"
           @click="toggleSelectedAudio"
         >
-          <VolumeX v-if="selectedPrimary?.mute_audio" :size="16" />
+          <VolumeX v-if="selectedAudio ? selectedAudio.mute_audio : selectedPrimary?.mute_audio" :size="16" />
           <Volume2 v-else :size="16" />
         </button>
         <button :disabled="!selectedPrimary || selectedPrimaryIndex <= 0" title="Move left" @click="moveSelected(-1)"><MoveLeft :size="16" /></button>
@@ -1570,6 +1838,8 @@ onBeforeUnmount(() => {
         <button title="Add text overlay" @click="addText"><Type :size="16" /><span>Text overlay</span></button>
         <button title="Add image overlay" @click="addImageOverlay()"><ImagePlus :size="16" /><span>Image overlay</span></button>
         <label class="tool-upload" title="Upload image overlay"><Upload :size="16" /><span>Upload image</span><input type="file" aria-label="Upload image overlay" accept="image/png,image/jpeg,image/webp" @change="uploadAsset($event, false)" /></label>
+        <label class="tool-upload" title="Upload audio onto AUDIO track"><Music :size="16" /><span>Upload audio</span><input type="file" aria-label="Upload audio overlay" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm" @change="uploadAudioAsset($event)" /></label>
+        <button v-if="activeShotWithAudio" title="Add shot audio onto AUDIO track" @click="addShotAudioToTimeline()"><Volume2 :size="16" /><span>Shot audio</span></button>
         </div></details>
         <button class="danger-tool" title="Delete selected item (Delete / Backspace)" @click="deleteSelection"><Trash2 :size="16" /></button>
         <span></span>
@@ -1647,6 +1917,7 @@ onBeforeUnmount(() => {
         </div></div>
         <div class="track-row"><strong>IMAGE</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in timeline.document.image_overlays" :key="item.id" class="overlay-block image" :class="{ selected: selectedKind === 'image' && selectedId === item.id }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" title="Drag to move image overlay" @pointerdown="beginOverlayEdit($event, 'image', item, 'move')" @click="selectItem('image', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-start')"></span><span class="overlay-label">IMAGE</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-end')"></span></button></div></div>
         <div class="track-row"><strong>TEXT</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in timeline.document.text_overlays" :key="item.id" class="overlay-block text" :class="{ selected: selectedKind === 'text' && selectedId === item.id }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" title="Drag to move text overlay" @pointerdown="beginOverlayEdit($event, 'text', item, 'move')" @click="selectItem('text', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-start')"></span><span class="overlay-label">{{ item.text }}</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-end')"></span></button></div></div>
+        <div class="track-row"><strong>AUDIO</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in audioOverlays" :key="item.id" class="overlay-block audio" :class="{ selected: selectedKind === 'audio' && selectedId === item.id, 'is-muted': item.mute_audio }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to move)`" @pointerdown="beginOverlayEdit($event, 'audio', item, 'move')" @click="selectItem('audio', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-start')"></span><VolumeX v-if="item.mute_audio" class="overlay-audio-icon muted" :size="11" /><Music v-else class="overlay-audio-icon" :size="11" /><span class="overlay-label">{{ item.label }}</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-end')"></span></button></div></div>
         </section>
       </div>
 
@@ -1671,6 +1942,9 @@ onBeforeUnmount(() => {
                 <strong>{{ shot.title || 'Untitled shot' }}</strong>
                 <span>{{ shot.clip ? 'Video clip' : 'Storyboard still' }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</span>
               </div>
+              <button v-if="shotHasAudio(shot)" type="button" class="add-shot-insert-btn secondary" title="Add shot audio onto AUDIO track" @click="addShotAudioToTimeline(shot)">
+                <Music :size="13" />Audio
+              </button>
               <button type="button" class="add-shot-insert-btn" @click="addShotToTimeline(shot)">
                 <Plus :size="13" />Insert
               </button>
@@ -3065,6 +3339,25 @@ onBeforeUnmount(() => {
   color: #fff;
 }
 
+.overlay-block.audio {
+  background: linear-gradient(180deg, #4b3d73 0%, #352a54 100%);
+  color: #fff;
+}
+
+.overlay-block.audio.is-muted {
+  opacity: 0.65;
+  border-bottom: 2px dashed var(--danger);
+}
+
+.overlay-audio-icon {
+  flex: none;
+  opacity: 0.88;
+}
+
+.overlay-audio-icon.muted {
+  color: var(--danger);
+}
+
 .overlay-block.selected {
   z-index: 4;
 }
@@ -3285,6 +3578,18 @@ onBeforeUnmount(() => {
 
 .add-shot-insert-btn:hover {
   background: var(--accent);
+  color: #fff;
+}
+
+.add-shot-insert-btn.secondary {
+  border-color: var(--line);
+  background: var(--fill-muted);
+  color: var(--text-secondary);
+}
+
+.add-shot-insert-btn.secondary:hover {
+  border-color: rgba(139, 108, 217, 0.55);
+  background: rgba(75, 61, 115, 0.45);
   color: #fff;
 }
 

@@ -5,10 +5,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from backend.database import Base
-from backend.models import Project, Scene, ScriptVersion, Shot, ShotImage
+from backend.models import Project, Scene, ScriptVersion, Shot, ShotImage, TimelineAsset
 from backend.schemas import TimelineDocument
 from backend.settings import settings
-from backend.timeline_render import assemble_timeline
+from backend.timeline_render import _has_audio, assemble_timeline
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is not installed")
@@ -67,4 +67,75 @@ def test_timeline_renders_both_variants_with_text_overlay(tmp_path, monkeypatch)
     assert (shorts.width, shorts.height) == (1080, 1920)
     assert 450 <= landscape.duration_ms <= 600
     assert 450 <= shorts.duration_ms <= 600
+    session.close()
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is not installed")
+def test_timeline_renders_with_audio_overlay(tmp_path, monkeypatch) -> None:
+    import wave
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    engine = create_engine(f"sqlite:///{tmp_path / 'render_audio.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    frame = media_dir / "frame.ppm"
+    frame.write_text("P3\n2 2\n255\n30 90 150  30 90 150\n30 90 150  30 90 150\n")
+
+    wav_path = media_dir / "tone.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x10\x00" * 8000)  # 0.5s mono PCM
+
+    project = Project(title="Audio render test", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. ROOM - DAY")
+    shot = Shot(scene=scene, order_index=0, title="Still", duration_ms=500)
+    shot.image = ShotImage(filename="frame.ppm", mime_type="image/x-portable-pixmap", source="uploaded", provider="test")
+    session.add(project)
+    session.flush()
+    audio_asset = TimelineAsset(project_id=project.id, filename="tone.wav", mime_type="audio/wav", label="Tone")
+    session.add(audio_asset)
+    session.commit()
+
+    document = TimelineDocument.model_validate(
+        {
+            "version": 1,
+            "primary": [
+                {
+                    "id": "still-1",
+                    "kind": "image",
+                    "label": "Still",
+                    "source": {"kind": "shot_image", "ref_id": shot.id},
+                    "duration_ms": 500,
+                    "source_in_ms": 0,
+                    "source_out_ms": None,
+                    "text": "",
+                    "variant": {},
+                }
+            ],
+            "image_overlays": [],
+            "text_overlays": [],
+            "audio_overlays": [
+                {
+                    "id": "aud-1",
+                    "label": "Tone",
+                    "source": {"kind": "asset", "ref_id": audio_asset.id},
+                    "start_ms": 100,
+                    "duration_ms": 300,
+                    "source_in_ms": 50,
+                    "volume": 0.9,
+                    "mute_audio": False,
+                }
+            ],
+        }
+    )
+    rendered = assemble_timeline(project, document, "landscape", session)
+    out_file = media_dir / rendered.filename
+    assert out_file.is_file()
+    assert _has_audio(out_file)
+    assert 450 <= rendered.duration_ms <= 600
     session.close()

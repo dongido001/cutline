@@ -351,7 +351,7 @@ def validate_timeline(document: TimelineDocument, project: Project, db: Session,
                 else:
                     raise ValueError(f"{item.label} duration must match its trim range")
 
-    for overlay in [*document.image_overlays, *document.text_overlays]:
+    for overlay in [*document.image_overlays, *document.text_overlays, *document.audio_overlays]:
         if overlay.start_ms + overlay.duration_ms > total:
             raise ValueError("An overlay extends beyond the timeline")
     for overlay in document.image_overlays:
@@ -359,3 +359,8 @@ def validate_timeline(document: TimelineDocument, project: Project, db: Session,
             raise ValueError("An image overlay uses a missing uploaded asset")
         if overlay.source.kind != "asset" and overlay.source.ref_id not in shots:
             raise ValueError("An image overlay uses a missing shot")
+    for overlay in document.audio_overlays:
+        if overlay.source.kind == "asset" and overlay.source.ref_id not in assets:
+            raise ValueError("An audio overlay uses a missing uploaded asset")
+        if overlay.source.kind != "asset" and overlay.source.ref_id not in shots:
+            raise ValueError("An audio overlay uses a missing shot")

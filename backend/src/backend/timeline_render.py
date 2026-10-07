@@ -281,6 +281,33 @@ def _overlay_position(position: str, width: int, height: int, overlay_width: int
     return x, y
 
 
+def resolve_audio_source(
+    source,
+    project: Project,
+    db: Session,
+    desired_aspect: str,
+) -> Path:
+    if source.kind == "asset":
+        asset = db.get(TimelineAsset, source.ref_id)
+        if not asset or asset.project_id != project.id:
+            raise RuntimeError("A timeline audio asset is missing")
+        path = settings.media_dir / asset.filename
+        if not path.is_file():
+            raise RuntimeError("A timeline audio asset file is missing")
+        return path
+    shot = db.get(Shot, source.ref_id)
+    if not shot:
+        raise RuntimeError("A timeline shot is missing")
+    if source.kind == "shot_audio" and shot.dialogue_audio_filename:
+        candidate = settings.media_dir / shot.dialogue_audio_filename
+        if candidate.is_file():
+            return candidate
+    media = resolve_shot_media(shot, "shot_clip", desired_aspect, "auto")
+    if media and media.path.is_file():
+        return media.path
+    raise RuntimeError(f"{shot.title or 'A shot'} has no usable audio")
+
+
 def _composite_overlays(
     base: Path,
     destination: Path,
@@ -310,7 +337,20 @@ def _composite_overlays(
         )
         command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(rendered)])
         specs.append(("text", overlay, rendered, geometry))
-    if not specs:
+
+    audio_specs: list[tuple[int, object, Path]] = []
+    next_input_index = 1 + len(specs)
+    for overlay in getattr(document, "audio_overlays", []) or []:
+        if getattr(overlay, "mute_audio", False) or getattr(overlay, "volume", 1.0) <= 0:
+            continue
+        audio_path = resolve_audio_source(overlay.source, project, db, desired_aspect)
+        if not _has_audio(audio_path):
+            continue
+        command.extend(["-i", str(audio_path)])
+        audio_specs.append((next_input_index, overlay, audio_path))
+        next_input_index += 1
+
+    if not specs and not audio_specs:
         _run(["ffmpeg", "-y", "-i", str(base), "-c", "copy", str(destination)])
         return
 
@@ -330,9 +370,29 @@ def _composite_overlays(
         end = (overlay.start_ms + overlay.duration_ms) / 1000
         filters.append(f"[{current}][{prepared}]overlay={x}:{y}:enable='between(t,{start},{end})'[{next_label}]")
         current = next_label
+
+    if audio_specs:
+        for aud_idx, (input_index, overlay, _audio_path) in enumerate(audio_specs, start=1):
+            trim_start = max(0.0, getattr(overlay, "source_in_ms", 0) / 1000)
+            dur = max(0.1, overlay.duration_ms / 1000)
+            vol = max(0.0, min(2.0, float(getattr(overlay, "volume", 1.0))))
+            delay_ms = max(0, int(overlay.start_ms))
+            filters.append(
+                f"[{input_index}:a]atrim=start={trim_start}:duration={dur},asetpts=PTS-STARTPTS,"
+                f"volume={vol},aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"adelay={delay_ms}|{delay_ms}[aud{aud_idx}]"
+            )
+        mix_inputs = "[0:a]" + "".join(f"[aud{i}]" for i in range(1, len(audio_specs) + 1))
+        filters.append(
+            f"{mix_inputs}amix=inputs={1 + len(audio_specs)}:duration=first:dropout_transition=0:normalize=0[aout]"
+        )
+        audio_map = ["-map", "[aout]"]
+    else:
+        audio_map = ["-map", "0:a?"]
+
     command.extend(
         [
-            "-filter_complex", ";".join(filters), "-map", f"[{current}]", "-map", "0:a?",
+            "-filter_complex", ";".join(filters), "-map", f"[{current}]", *audio_map,
             "-t", str(total_seconds),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(destination),

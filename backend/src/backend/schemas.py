@@ -507,7 +507,7 @@ class ProjectDetail(ProjectSummary):
 
 
 class TimelineSource(BaseModel):
-    kind: Literal["shot_clip", "shot_image", "asset"]
+    kind: Literal["shot_clip", "shot_image", "shot_audio", "asset"]
     ref_id: str
 
 
@@ -582,11 +582,32 @@ class TimelineTextOverlay(BaseModel):
     variant: dict[str, TimelineVariantGeometry] = {}
 
 
+class TimelineAudioOverlay(BaseModel):
+    id: str
+    label: str = Field(default="Audio clip", max_length=200)
+    source: TimelineSource
+    start_ms: int = Field(ge=0)
+    duration_ms: int = Field(ge=100, le=300_000)
+    source_in_ms: int = Field(default=0, ge=0)
+    volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    mute_audio: bool = False
+
+    @field_validator("start_ms", "duration_ms", "source_in_ms", mode="before")
+    @classmethod
+    def _coerce_audio_ms(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
+
+
 class TimelineDocument(BaseModel):
     version: Literal[1] = 1
     primary: list[TimelinePrimaryItem]
     image_overlays: list[TimelineImageOverlay] = []
     text_overlays: list[TimelineTextOverlay] = []
+    audio_overlays: list[TimelineAudioOverlay] = []
 
 
 class TimelineUpdate(BaseModel):

@@ -451,7 +451,7 @@ export interface TimelineGeometry {
 }
 
 export interface TimelineSource {
-  kind: 'shot_clip' | 'shot_image' | 'asset'
+  kind: 'shot_clip' | 'shot_image' | 'shot_audio' | 'asset'
   ref_id: string
 }
 
@@ -489,11 +489,23 @@ export interface TimelineTextOverlay {
   variant: Partial<Record<OutputVariant, TimelineGeometry>>
 }
 
+export interface TimelineAudioOverlay {
+  id: string
+  label: string
+  source: TimelineSource
+  start_ms: number
+  duration_ms: number
+  source_in_ms: number
+  volume: number
+  mute_audio?: boolean
+}
+
 export interface TimelineDocument {
   version: 1
   primary: TimelinePrimaryItem[]
   image_overlays: TimelineImageOverlay[]
   text_overlays: TimelineTextOverlay[]
+  audio_overlays?: TimelineAudioOverlay[]
 }
 
 export interface TimelineAsset {
@@ -868,11 +880,20 @@ export const api = {
       start_ms: Math.round(overlay.start_ms),
       duration_ms: Math.round(overlay.duration_ms),
     })
+    const sanitizeAudioOverlay = (overlay: TimelineAudioOverlay): TimelineAudioOverlay => ({
+      ...overlay,
+      start_ms: Math.round(overlay.start_ms),
+      duration_ms: Math.round(overlay.duration_ms),
+      source_in_ms: Math.round(overlay.source_in_ms || 0),
+      volume: Number.isFinite(overlay.volume) ? Math.max(0, Math.min(2, Number(overlay.volume))) : 1,
+      mute_audio: Boolean(overlay.mute_audio),
+    })
     const cleanDoc = {
       ...timeline.document,
       primary: (timeline.document.primary || []).map(sanitizePrimary),
       image_overlays: (timeline.document.image_overlays || []).map(sanitizeOverlay),
       text_overlays: (timeline.document.text_overlays || []).map(sanitizeOverlay),
+      audio_overlays: (timeline.document.audio_overlays || []).map(sanitizeAudioOverlay),
     }
     const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
     return request<ProjectTimeline>(`/api/projects/${id}/timeline${qs}`, {

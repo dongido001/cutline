@@ -612,6 +612,10 @@ def _remap_timeline_doc(
         source = item.get("source") if isinstance(item, dict) else None
         if isinstance(source, dict) and source.get("ref_id") in shot_id_map:
             source["ref_id"] = shot_id_map[source["ref_id"]]
+    for item in remapped.get("audio_overlays") or []:
+        source = item.get("source") if isinstance(item, dict) else None
+        if isinstance(source, dict) and source.get("ref_id") in shot_id_map:
+            source["ref_id"] = shot_id_map[source["ref_id"]]
     return remapped
 
 

@@ -241,3 +241,93 @@ def test_timeline_persists_mute_audio_across_episode_1_adoption(tmp_path, monkey
         app.dependency_overrides.clear()
         session.close()
 
+
+def test_timeline_audio_asset_upload_and_audio_overlays_persistence(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'timeline_audio.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Audio timeline test", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. ROOM - DAY")
+    shot = Shot(
+        scene=scene,
+        order_index=0,
+        title="Opening shot",
+        duration_ms=3000,
+        image_prompt="A room",
+        video_prompt="Pan across",
+    )
+    session.add(project)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        upload_res = client.post(
+            f"/api/projects/{project.id}/timeline/assets",
+            files={"file": ("theme.mp3", b"ID3-fake-mp3-bytes", "audio/mpeg")},
+            data={"label": "Theme Music"},
+        )
+        assert upload_res.status_code == 200, upload_res.text
+        tl = upload_res.json()
+        assert len(tl["assets"]) == 1
+        asset = tl["assets"][0]
+        assert asset["mime_type"] == "audio/mpeg"
+        assert asset["label"] == "Theme Music"
+
+        tl["document"]["audio_overlays"] = [
+            {
+                "id": "aud-1",
+                "label": "Theme Music",
+                "source": {"kind": "asset", "ref_id": asset["id"]},
+                "start_ms": 200.4,
+                "duration_ms": 1500.6,
+                "source_in_ms": 100.2,
+                "volume": 0.85,
+                "mute_audio": False,
+            },
+            {
+                "id": "aud-2",
+                "label": "Opening shot audio",
+                "source": {"kind": "shot_audio", "ref_id": shot.id},
+                "start_ms": 0,
+                "duration_ms": 1200,
+                "source_in_ms": 0,
+                "volume": 1.0,
+                "mute_audio": True,
+            },
+        ]
+        saved_res = client.put(
+            f"/api/projects/{project.id}/timeline",
+            json={"revision": tl["revision"], "document": tl["document"]},
+        )
+        assert saved_res.status_code == 200, saved_res.text
+        saved_doc = saved_res.json()["document"]
+        assert len(saved_doc["audio_overlays"]) == 2
+        assert saved_doc["audio_overlays"][0]["start_ms"] == 200
+        assert saved_doc["audio_overlays"][0]["duration_ms"] == 1501
+        assert saved_doc["audio_overlays"][0]["source_in_ms"] == 100
+        assert saved_doc["audio_overlays"][0]["volume"] == 0.85
+        assert saved_doc["audio_overlays"][1]["mute_audio"] is True
+
+        # Deleting an in-use audio asset is rejected with 409
+        del_conflict = client.delete(f"/api/projects/{project.id}/timeline/assets/{asset['id']}")
+        assert del_conflict.status_code == 409
+
+        # Remove the asset audio overlay and delete the asset cleanly
+        saved_doc["audio_overlays"] = [saved_doc["audio_overlays"][1]]
+        saved_res2 = client.put(
+            f"/api/projects/{project.id}/timeline",
+            json={"revision": saved_res.json()["revision"], "document": saved_doc},
+        )
+        assert saved_res2.status_code == 200
+        del_ok = client.delete(f"/api/projects/{project.id}/timeline/assets/{asset['id']}")
+        assert del_ok.status_code == 204
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+

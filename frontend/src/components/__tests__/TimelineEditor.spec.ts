@@ -28,6 +28,7 @@ vi.mock('@/lib/api', async () => {
       timeline: vi.fn<typeof actual.api.timeline>(),
       saveTimeline: vi.fn<typeof actual.api.saveTimeline>(),
       resetTimeline: vi.fn<typeof actual.api.resetTimeline>(),
+      uploadTimelineAsset: vi.fn<typeof actual.api.uploadTimelineAsset>(),
     },
   }
 })
@@ -104,6 +105,7 @@ function makeTimeline(): ProjectTimeline {
       ],
       image_overlays: [],
       text_overlays: [],
+      audio_overlays: [],
     },
   }
 }
@@ -277,5 +279,40 @@ describe('TimelineEditor state persistence', () => {
     expect(wrapper.find('button[aria-label="Play timeline"]').exists()).toBe(true)
 
     wrapper.unmount()
+  })
+
+  it('supports adding, inspecting, duplicating, and muting audio overlays on the AUDIO track', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const trackNames = wrapper.findAll('.track-row > strong').map((el) => el.text())
+    expect(trackNames).toEqual(['PRIMARY', 'IMAGE', 'TEXT', 'AUDIO'])
+
+    // Add shot audio onto AUDIO track from Add media & text menu
+    await wrapper.get('button[title="Add shot audio onto AUDIO track"]').trigger('click')
+    await flushPromises()
+
+    const audioBlocks = wrapper.findAll('.overlay-block.audio')
+    expect(audioBlocks).toHaveLength(1)
+    expect(audioBlocks[0]!.classes()).toContain('selected')
+    expect(wrapper.find('.inspector-eyebrow').text()).toBe('Inspector · AUDIO')
+    expect(wrapper.find('.inspector-header strong').text()).toBe('Shot 1 audio')
+
+    // Mute the audio overlay via inspector toggle
+    await wrapper.get('.audio-toggle-action').trigger('click')
+    expect(wrapper.find('.overlay-block.audio').classes()).toContain('is-muted')
+
+    // Duplicate the selected audio overlay
+    await wrapper.get('button[title="Duplicate this audio clip (Ctrl+D)"]').trigger('click')
+    expect(wrapper.findAll('.overlay-block.audio')).toHaveLength(2)
+
+    wrapper.unmount()
+    await flushPromises()
+
+    expect(api.saveTimeline).toHaveBeenCalled()
+    const calls = vi.mocked(api.saveTimeline).mock.calls
+    const lastSaved = calls[calls.length - 1]?.[1]
+    expect(lastSaved?.document.audio_overlays).toHaveLength(2)
+    expect(lastSaved?.document.audio_overlays?.[0]?.mute_audio).toBe(true)
   })
 })
