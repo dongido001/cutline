@@ -162,150 +162,182 @@ def generate_flowkit_clip(
                 continue
             ref_mime = mimetypes.guess_type(ref_path.name)[0] or "image/png"
             ref_b64 = base64.b64encode(ref_path.read_bytes()).decode("ascii")
+            ref_payload = {
+                "image_base64": ref_b64,
+                "mime_type": ref_mime,
+                "file_name": ref_path.name,
+                "project_id": project_id,
+            }
             ref_upload = client.post(
                 f"{base_url}/upload-image",
-                json={
-                    "image_base64": ref_b64,
-                    "mime_type": ref_mime,
-                    "file_name": ref_path.name,
-                    "project_id": project_id,
-                },
+                json=ref_payload,
             )
+            if getattr(ref_upload, "status_code", 200) in (502, 503):
+                time.sleep(2)
+                ref_upload = client.post(
+                    f"{base_url}/upload-image",
+                    json=ref_payload,
+                )
             ref_upload.raise_for_status()
             ref_uploaded = ref_upload.json()
             ref_media_id = ref_uploaded.get("media_id")
             if ref_media_id:
                 extra_media_ids.append(str(ref_media_id))
 
+        attempt_extra_sets: list[list[str]] = [extra_media_ids]
+        if len(extra_media_ids) > 1:
+            attempt_extra_sets.append(extra_media_ids[:1])
         if extra_media_ids:
-            payload = {
-                "reference_media_ids": [media_id, *extra_media_ids],
-                "prompt": prompt,
-                "project_id": project_id,
-                "scene_id": scene_id,
-                "duration_s": duration_s,
-                "resolution": "720p",
-                "aspect_ratio": flow_aspect_ratio,
-                "model_family": settings.flowkit_model_family,
-            }
-            submit = client.post(f"{base_url}/generate-video-refs", json=payload)
-        else:
-            payload = {
-                "start_image_media_id": media_id,
-                "prompt": prompt,
-                "project_id": project_id,
-                "scene_id": scene_id,
-                "duration_s": duration_s,
-                "resolution": "720p",
-                "aspect_ratio": flow_aspect_ratio,
-                "model_family": settings.flowkit_model_family,
-            }
-            submit = client.post(f"{base_url}/generate-video", json=payload)
-        try:
-            submit.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            err_text = submit.text
-            if "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
-                raise RuntimeError(
-                    "Google Flow video quota reached for this account. Please wait for the daily quota to reset, switch accounts on flow.google.com, or switch provider to Runway."
-                ) from exc
-            raise RuntimeError(
-                f"FlowKit video generation failed ({submit.status_code}): {err_text}"
-            ) from exc
-        submitted = submit.json()
-
-        polling = submitted.get("flowkitPolling") or {}
-        operations = submitted.get("operations") or polling.get("operations") or []
-        workflows = submitted.get("workflows") or polling.get("workflows")
-        project_id = (
-            submitted.get("project_id")
-            or polling.get("project_id")
-            or project_id
-            or initial_project_id
-        )
-        if project_id and callable(on_flow_project_id):
-            on_flow_project_id(str(project_id))
-        if not operations and not workflows:
-            raise RuntimeError(f"FlowKit returned no operation/workflow: {submitted}")
+            attempt_extra_sets.append([])
 
         deadline = time.monotonic() + settings.flowkit_timeout_seconds
-        while time.monotonic() < deadline:
-            status_payload = {
-                "operations": operations,
-                "project_id": project_id,
-                "include_encoded_video": True,
-            }
-            if workflows:
-                status_payload["workflows"] = workflows
+        for attempt_idx, current_extra_ids in enumerate(attempt_extra_sets):
+            has_fallback = attempt_idx + 1 < len(attempt_extra_sets)
+            if current_extra_ids:
+                payload = {
+                    "reference_media_ids": [media_id, *current_extra_ids],
+                    "prompt": prompt,
+                    "project_id": project_id,
+                    "scene_id": scene_id,
+                    "duration_s": duration_s,
+                    "resolution": "720p",
+                    "aspect_ratio": flow_aspect_ratio,
+                    "model_family": settings.flowkit_model_family,
+                }
+                submit = client.post(f"{base_url}/generate-video-refs", json=payload)
+            else:
+                payload = {
+                    "start_image_media_id": media_id,
+                    "prompt": prompt,
+                    "project_id": project_id,
+                    "scene_id": scene_id,
+                    "duration_s": duration_s,
+                    "resolution": "720p",
+                    "aspect_ratio": flow_aspect_ratio,
+                    "model_family": settings.flowkit_model_family,
+                }
+                submit = client.post(f"{base_url}/generate-video", json=payload)
             try:
-                status = client.post(f"{base_url}/check-status", json=status_payload)
-                if getattr(status, "status_code", 200) in (502, 503):
+                submit.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                err_text = submit.text
+                if "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
+                    raise RuntimeError(
+                        "Google Flow video quota reached for this account. Please wait for the daily quota to reset, switch accounts on flow.google.com, or switch provider to Runway."
+                    ) from exc
+                if has_fallback:
+                    continue
+                raise RuntimeError(
+                    f"FlowKit video generation failed ({submit.status_code}): {err_text}"
+                ) from exc
+            submitted = submit.json()
+
+            polling = submitted.get("flowkitPolling") or {}
+            operations = submitted.get("operations") or polling.get("operations") or []
+            workflows = submitted.get("workflows") or polling.get("workflows")
+            project_id = (
+                submitted.get("project_id")
+                or polling.get("project_id")
+                or project_id
+                or initial_project_id
+            )
+            if project_id and callable(on_flow_project_id):
+                on_flow_project_id(str(project_id))
+            if not operations and not workflows:
+                if has_fallback:
+                    continue
+                raise RuntimeError(f"FlowKit returned no operation/workflow: {submitted}")
+
+            discarded_for_fallback = False
+            while time.monotonic() < deadline:
+                status_payload = {
+                    "operations": operations,
+                    "project_id": project_id,
+                    "include_encoded_video": True,
+                }
+                if workflows:
+                    status_payload["workflows"] = workflows
+                try:
+                    status = client.post(f"{base_url}/check-status", json=status_payload)
+                    if getattr(status, "status_code", 200) in (502, 503):
+                        time.sleep(2)
+                        continue
+                    status.raise_for_status()
+                    body = status.json()
+                except (httpx.HTTPStatusError, httpx.RequestError) as poll_err:
+                    if isinstance(poll_err, httpx.HTTPStatusError) and poll_err.response.status_code not in (502, 503):
+                        raise
                     time.sleep(2)
                     continue
-                status.raise_for_status()
-                body = status.json()
-            except (httpx.HTTPStatusError, httpx.RequestError) as poll_err:
-                if isinstance(poll_err, httpx.HTTPStatusError) and poll_err.response.status_code not in (502, 503):
-                    raise
+
+                results = (
+                    body.get("results")
+                    or body.get("videos")
+                    or body.get("workflows")
+                    or body.get("operations")
+                    or []
+                )
+                if isinstance(results, dict):
+                    results = [results]
+                found_video = False
+                for result in results:
+                    if not isinstance(result, dict):
+                        continue
+                    status_val = str(result.get("status") or "").upper()
+                    err_val = result.get("error") or result.get("complaint")
+                    if "FAIL" in status_val:
+                        err_lower = str(err_val or "").lower()
+                        if has_fallback and (
+                            "discarded operation" in err_lower
+                            or "media not found" in err_lower
+                            or "failed: [5]" in err_lower
+                        ):
+                            discarded_for_fallback = True
+                            break
+                        raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")
+                    media_info = result.get("media") if isinstance(result.get("media"), dict) else {}
+                    operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+                    metadata = operation.get("metadata") if isinstance(operation.get("metadata"), dict) else {}
+                    operation_video = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
+                    encoded = (
+                        result.get("encoded_video")
+                        or result.get("video_base64")
+                        or result.get("encodedVideo")
+                        or media_info.get("encoded_video")
+                        or media_info.get("video_base64")
+                        or media_info.get("encodedVideo")
+                    )
+                    if encoded:
+                        content = base64.b64decode(encoded)
+                        filename = f"clip-{uuid.uuid4()}.mp4"
+                        (settings.media_dir / filename).write_bytes(content)
+                        return filename, "video/mp4", "flowkit"
+                    url = (
+                        result.get("video_url")
+                        or result.get("url")
+                        or result.get("media_url")
+                        or media_info.get("video_url")
+                        or media_info.get("url")
+                        or media_info.get("media_url")
+                        or operation_video.get("fifeUrl")
+                        or operation_video.get("videoUrl")
+                        or operation_video.get("url")
+                    )
+                    if url:
+                        found_video = True
+                        media = client.get(url)
+                        media.raise_for_status()
+                        filename = f"clip-{uuid.uuid4()}.mp4"
+                        (settings.media_dir / filename).write_bytes(media.content)
+                        return filename, media.headers.get("content-type", "video/mp4"), "flowkit"
+
+                if discarded_for_fallback:
+                    break
+                if body.get("done") is True and not found_video:
+                    if has_fallback:
+                        break
+                    raise RuntimeError(f"FlowKit generation completed without video: {body}")
                 time.sleep(2)
-                continue
-
-            results = (
-                body.get("results")
-                or body.get("videos")
-                or body.get("workflows")
-                or body.get("operations")
-                or []
-            )
-            if isinstance(results, dict):
-                results = [results]
-            found_video = False
-            for result in results:
-                if not isinstance(result, dict):
-                    continue
-                status_val = str(result.get("status") or "").upper()
-                err_val = result.get("error") or result.get("complaint")
-                if "FAIL" in status_val:
-                    raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")
-                media_info = result.get("media") if isinstance(result.get("media"), dict) else {}
-                operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
-                metadata = operation.get("metadata") if isinstance(operation.get("metadata"), dict) else {}
-                operation_video = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
-                encoded = (
-                    result.get("encoded_video")
-                    or result.get("video_base64")
-                    or result.get("encodedVideo")
-                    or media_info.get("encoded_video")
-                    or media_info.get("video_base64")
-                    or media_info.get("encodedVideo")
-                )
-                if encoded:
-                    content = base64.b64decode(encoded)
-                    filename = f"clip-{uuid.uuid4()}.mp4"
-                    (settings.media_dir / filename).write_bytes(content)
-                    return filename, "video/mp4", "flowkit"
-                url = (
-                    result.get("video_url")
-                    or result.get("url")
-                    or result.get("media_url")
-                    or media_info.get("video_url")
-                    or media_info.get("url")
-                    or media_info.get("media_url")
-                    or operation_video.get("fifeUrl")
-                    or operation_video.get("videoUrl")
-                    or operation_video.get("url")
-                )
-                if url:
-                    found_video = True
-                    media = client.get(url)
-                    media.raise_for_status()
-                    filename = f"clip-{uuid.uuid4()}.mp4"
-                    (settings.media_dir / filename).write_bytes(media.content)
-                    return filename, media.headers.get("content-type", "video/mp4"), "flowkit"
-
-            if body.get("done") is True and not found_video:
-                raise RuntimeError(f"FlowKit generation completed without video: {body}")
-            time.sleep(2)
 
     raise TimeoutError("FlowKit video generation timed out")
 

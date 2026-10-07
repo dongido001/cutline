@@ -321,6 +321,16 @@ export const useStudioStore = defineStore('studio', () => {
     return job
   }
 
+  function failActiveJob(job: Job | undefined, fallbackMessage: string): Job | null {
+    if (!job || (job.status !== 'queued' && job.status !== 'running')) return null
+    return {
+      ...job,
+      status: 'failed',
+      message: fallbackMessage,
+      error: job.error || fallbackMessage,
+    }
+  }
+
   async function watchJob(
     jobId: string,
     onUpdate: (job: Job) => void,
@@ -358,7 +368,7 @@ export const useStudioStore = defineStore('studio', () => {
         let job = await fetchJob()
         emit(job)
         let delayMs = 800
-        const deadline = Date.now() + 15 * 60 * 1000
+        const deadline = Date.now() + 25 * 60 * 1000
         while (job.status === 'queued' || job.status === 'running') {
           if (Date.now() > deadline) {
             throw new Error('Timed out waiting for job status')
@@ -406,11 +416,20 @@ export const useStudioStore = defineStore('studio', () => {
           setProjectCastJob(projectId, characterId, job)
           void watchJob(job.id, (next) => {
             setProjectCastJob(projectId, characterId, next)
-          }).then((finalJob) => {
-            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
-              error.value = String(finalJob.error || 'Face reference generation failed')
-            }
           })
+            .then((finalJob) => {
+              if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
+                error.value = String(finalJob.error || 'Face reference generation failed')
+              }
+            })
+            .catch((cause) => {
+              const message = cause instanceof Error ? cause.message : 'Face reference generation failed'
+              const failed = failActiveJob(castJobsByProject.value[projectId]?.[characterId], message)
+              if (failed) setProjectCastJob(projectId, characterId, failed)
+              if (currentProject.value?.id === projectId) {
+                error.value = message
+              }
+            })
           continue
         }
         if (job.kind === 'shot_image') {
@@ -420,12 +439,23 @@ export const useStudioStore = defineStore('studio', () => {
           setProjectImageJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
             setProjectImageJob(projectId, shotId, next)
-          }).then((finalJob) => {
-            endShotProcessing(shotId, projectId)
-            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
-              error.value = String(finalJob.error || 'Image generation failed')
-            }
           })
+            .then((finalJob) => {
+              if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
+                error.value = String(finalJob.error || 'Image generation failed')
+              }
+            })
+            .catch((cause) => {
+              const message = cause instanceof Error ? cause.message : 'Image generation failed'
+              const failed = failActiveJob(imageJobsByProject.value[projectId]?.[shotId], message)
+              if (failed) setProjectImageJob(projectId, shotId, failed)
+              if (currentProject.value?.id === projectId) {
+                error.value = message
+              }
+            })
+            .finally(() => {
+              endShotProcessing(shotId, projectId)
+            })
           continue
         }
         if (job.kind === 'shot_clip') {
@@ -435,12 +465,23 @@ export const useStudioStore = defineStore('studio', () => {
           setProjectClipJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
             setProjectClipJob(projectId, shotId, next)
-          }).then((finalJob) => {
-            endClipProcessing(shotId, projectId)
-            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
-              error.value = String(finalJob.error || 'Could not generate video')
-            }
           })
+            .then((finalJob) => {
+              if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
+                error.value = String(finalJob.error || 'Could not generate video')
+              }
+            })
+            .catch((cause) => {
+              const message = cause instanceof Error ? cause.message : 'Could not generate video'
+              const failed = failActiveJob(clipJobsByProject.value[projectId]?.[shotId], message)
+              if (failed) setProjectClipJob(projectId, shotId, failed)
+              if (currentProject.value?.id === projectId) {
+                error.value = message
+              }
+            })
+            .finally(() => {
+              endClipProcessing(shotId, projectId)
+            })
           continue
         }
         if (job.kind === 'shot_lipsync') {
@@ -450,12 +491,23 @@ export const useStudioStore = defineStore('studio', () => {
           setProjectLipsyncJob(projectId, shotId, job)
           void watchJob(job.id, (next) => {
             setProjectLipsyncJob(projectId, shotId, next)
-          }).then((finalJob) => {
-            endLipsyncProcessing(shotId, projectId)
-            if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
-              error.value = String(finalJob.error || 'Dialogue lip-sync failed')
-            }
           })
+            .then((finalJob) => {
+              if (currentProject.value?.id === projectId && finalJob?.status === 'failed') {
+                error.value = String(finalJob.error || 'Dialogue lip-sync failed')
+              }
+            })
+            .catch((cause) => {
+              const message = cause instanceof Error ? cause.message : 'Dialogue lip-sync failed'
+              const failed = failActiveJob(lipsyncJobsByProject.value[projectId]?.[shotId], message)
+              if (failed) setProjectLipsyncJob(projectId, shotId, failed)
+              if (currentProject.value?.id === projectId) {
+                error.value = message
+              }
+            })
+            .finally(() => {
+              endLipsyncProcessing(shotId, projectId)
+            })
           continue
         }
         if (job.kind === 'create_draft') {
@@ -464,13 +516,25 @@ export const useStudioStore = defineStore('studio', () => {
           void watchJob(job.id, (next) => {
             if (currentProject.value?.id !== projectId) return
             draftJob.value = next
-          }).then((finalJob) => {
-            if (currentProject.value?.id !== projectId) return
-            creatingDraft.value = false
-            if (finalJob?.status === 'failed') {
-              error.value = String(finalJob.error || 'Create draft failed')
-            }
           })
+            .then((finalJob) => {
+              if (currentProject.value?.id !== projectId) return
+              if (finalJob?.status === 'failed') {
+                error.value = String(finalJob.error || 'Create draft failed')
+              }
+            })
+            .catch((cause) => {
+              if (currentProject.value?.id !== projectId) return
+              const message = cause instanceof Error ? cause.message : 'Create draft failed'
+              const failed = failActiveJob(draftJob.value ?? undefined, message)
+              if (failed) draftJob.value = failed
+              error.value = message
+            })
+            .finally(() => {
+              if (currentProject.value?.id === projectId) {
+                creatingDraft.value = false
+              }
+            })
         }
       }
     } catch {
@@ -488,11 +552,17 @@ export const useStudioStore = defineStore('studio', () => {
       if (finalCutJob.value?.id === jobId) finalCutJob.value = job
       for (const [pid, pJobs] of Object.entries(imageJobsByProject.value)) {
         const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
-        if (shotId) setProjectImageJob(pid, shotId, job)
+        if (shotId) {
+          setProjectImageJob(pid, shotId, job)
+          endShotProcessing(shotId, pid)
+        }
       }
       for (const [pid, pJobs] of Object.entries(clipJobsByProject.value)) {
         const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
-        if (shotId) setProjectClipJob(pid, shotId, job)
+        if (shotId) {
+          setProjectClipJob(pid, shotId, job)
+          endClipProcessing(shotId, pid)
+        }
       }
       for (const [pid, pJobs] of Object.entries(castJobsByProject.value)) {
         const charId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
@@ -500,7 +570,10 @@ export const useStudioStore = defineStore('studio', () => {
       }
       for (const [pid, pJobs] of Object.entries(lipsyncJobsByProject.value)) {
         const shotId = Object.entries(pJobs).find(([, item]) => item.id === jobId)?.[0]
-        if (shotId) setProjectLipsyncJob(pid, shotId, job)
+        if (shotId) {
+          setProjectLipsyncJob(pid, shotId, job)
+          endLipsyncProcessing(shotId, pid)
+        }
       }
       return job
     } catch (cause) {
@@ -800,8 +873,11 @@ export const useStudioStore = defineStore('studio', () => {
       if (job.status === 'failed') throw new Error(job.error || 'Image generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not generate image'
+      const failed = failActiveJob(imageJobsByProject.value[projectId]?.[id], message)
+      if (failed) setProjectImageJob(projectId, id, failed)
       if (currentProject.value?.id === projectId) {
-        error.value = cause instanceof Error ? cause.message : 'Could not generate image'
+        error.value = message
       }
       throw cause
     } finally {
@@ -944,8 +1020,11 @@ export const useStudioStore = defineStore('studio', () => {
       if (job.status === 'failed') throw new Error(job.error || 'Face reference generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not generate face reference'
+      const failed = failActiveJob(castJobsByProject.value[projectId]?.[id], message)
+      if (failed) setProjectCastJob(projectId, id, failed)
       if (currentProject.value?.id === projectId) {
-        error.value = cause instanceof Error ? cause.message : 'Could not generate face reference'
+        error.value = message
       }
       throw cause
     }
@@ -1051,8 +1130,11 @@ export const useStudioStore = defineStore('studio', () => {
       if (job.status === 'failed') throw new Error(job.error || 'Lip-sync generation failed')
       return job
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not generate lip-sync'
+      const failed = failActiveJob(lipsyncJobsByProject.value[projectId]?.[id], message)
+      if (failed) setProjectLipsyncJob(projectId, id, failed)
       if (currentProject.value?.id === projectId) {
-        error.value = cause instanceof Error ? cause.message : 'Could not generate lip-sync'
+        error.value = message
       }
       throw cause
     } finally {
@@ -1108,8 +1190,11 @@ export const useStudioStore = defineStore('studio', () => {
       if (job.status === 'failed') throw new Error(job.error || 'Video generation failed')
       if (job.status === 'cancelled') return
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not generate video'
+      const failed = failActiveJob(clipJobsByProject.value[projectId]?.[id], message)
+      if (failed) setProjectClipJob(projectId, id, failed)
       if (currentProject.value?.id === projectId && currentEpisodeId.value === episodeId) {
-        error.value = cause instanceof Error ? cause.message : 'Could not generate video'
+        error.value = message
       }
       throw cause
     } finally {

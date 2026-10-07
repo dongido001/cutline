@@ -529,3 +529,115 @@ def test_flowkit_with_reference_images_uses_generate_video_refs(monkeypatch, tmp
     assert submitted_payload["reference_media_ids"] == ["media-continuity.png", "media-rosa-ref.png"]
 
 
+def test_flowkit_multi_reference_discard_falls_back_cleanly(monkeypatch, tmp_path):
+    from backend import video
+
+    submitted_calls: list[tuple[str, dict]] = []
+
+    class FakeResponse:
+        def __init__(self, payload=None, content=b"video-bytes", status_code=200):
+            self._payload = payload or {}
+            self.content = content
+            self.headers = {"content-type": "video/mp4"}
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise video.httpx.HTTPStatusError("err", request=None, response=self)
+
+    class FakeClient:
+        def __init__(self):
+            self.attempt = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, json=None):
+            if url.endswith("/upload-image"):
+                fname = json.get("file_name", "")
+                return FakeResponse(
+                    {
+                        "media_id": f"media-{fname}",
+                        "project_id": "flow-proj-1",
+                    }
+                )
+            if url.endswith("/generate-video-refs") or url.endswith("/generate-video"):
+                self.attempt += 1
+                submitted_calls.append((url, dict(json or {})))
+                return FakeResponse(
+                    {
+                        "project_id": "flow-proj-1",
+                        "operations": [{"name": f"op-{self.attempt}"}],
+                    }
+                )
+            if url.endswith("/check-status"):
+                if self.attempt == 1:
+                    return FakeResponse(
+                        {
+                            "done": True,
+                            "results": [
+                                {
+                                    "status": "MEDIA_GENERATION_STATUS_FAILED",
+                                    "error": "Flow video operation was discarded by Google Flow (Media not found.)",
+                                }
+                            ],
+                        }
+                    )
+                return FakeResponse(
+                    {
+                        "done": True,
+                        "results": [
+                            {
+                                "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                                "video_url": "https://example.test/video.mp4",
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(url)
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(video.httpx, "Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(video.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(video.settings, "flowkit_base_url", "http://flowkit.test/api/flow")
+    monkeypatch.setattr(video.settings, "flowkit_project_id", "")
+
+    frame_path = tmp_path / "continuity.png"
+    frame_path.write_bytes(b"frame")
+    maya_path = tmp_path / "maya-ref.png"
+    maya_path.write_bytes(b"maya")
+    gabe_path = tmp_path / "gabe-ref.png"
+    gabe_path.write_bytes(b"gabe")
+
+    video.generate_flowkit_clip(
+        image_path=frame_path,
+        prompt="Maya turns around to face Gabe",
+        duration_ms=6000,
+        aspect_ratio="9:16",
+        scene_id="scene-15",
+        reference_image_paths=[maya_path, gabe_path],
+    )
+
+    assert len(submitted_calls) == 2
+    assert submitted_calls[0][0].endswith("/generate-video-refs")
+    assert submitted_calls[0][1]["reference_media_ids"] == [
+        "media-continuity.png",
+        "media-maya-ref.png",
+        "media-gabe-ref.png",
+    ]
+    assert submitted_calls[1][0].endswith("/generate-video-refs")
+    assert submitted_calls[1][1]["reference_media_ids"] == [
+        "media-continuity.png",
+        "media-maya-ref.png",
+    ]
+
+
+
