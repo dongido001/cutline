@@ -1,26 +1,28 @@
 from .image_references import default_visual_reference, freeze_visual_reference, load_visual_reference, queued_reference, should_use_default_reference
 from .media import prepare_visual_reference_prompt
 from copy import deepcopy
+from dataclasses import replace
 import re
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from .cast import cast_portrait_prompt, is_usable_reference_image, load_cast_references, sync_project_cast
+from .cast import cast_portrait_prompt, extract_mention_element_ids, is_usable_reference_image, load_cast_references, sync_project_cast
 from .continuity import current_shot_snapshot, get_or_create_shot_snapshot, video_continuity_prompt
 from .database import SessionLocal
 from .final_cut import invalidate_final_cut
 
+from .job_limits import JobCapacityExceeded, raise_if_over_capacity
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
-from .media import VisualReferenceImage, delete_media_file, generate_storyboard_image
-from .models import Character, CharacterReference, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
+from .media import FaceReferenceImage, VisualReferenceImage, delete_media_file, generate_storyboard_image
+from .models import Character, CharacterReference, Compilation, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
 from .providers import get_script_provider, normalize_analysis_result
 from .publishing import collect_publish_assets, publish_assets
 from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
-from .screenplay_parser import parse_structured_screenplay
+from .screenplay_parser import canonical_character_name, parse_structured_screenplay
 from .settings import settings
-from .timeline import append_missing_shots, ensure_timeline, promote_available_clips
+from .timeline import append_missing_shots, ensure_compilation_timeline, ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .schemas import TimelineDocument
 from .video import generate_shot_clip as render_shot_clip, clip_source_image
@@ -426,7 +428,7 @@ def _generate_shot_image(
             (
                 item
                 for item in (job.attempts or [])
-                if isinstance(item, dict) and item.get("edit_take_id")
+                if isinstance(item, dict) and (item.get("edit_take_id") or item.get("edit_reference"))
             ),
             None,
         )
@@ -535,17 +537,34 @@ def _generate_shot_image(
                 if not image_reference and should_use_default_reference(job, shot):
                     image_reference = freeze_visual_reference(default_visual_reference(shot, target_aspect))
                 visual_reference = load_visual_reference(image_reference)
-                references = load_cast_references(
-                    db, project.id, shot.character_ids,
-                    reference_ids=[
-                        reference_id
-                        for character in snapshot.get("characters", [])
-                        for reference_id in character.get("reference_ids", [])
-                    ],
-                )
                 if image_reference and visual_reference is None:
                     raise RuntimeError("Selected image reference could not be loaded")
+                is_aspect_conversion = bool(
+                    image_reference and image_reference.get("mode") == "aspect_conversion"
+                )
+                references = (
+                    []
+                    if (is_aspect_conversion and visual_reference is not None)
+                    else load_cast_references(
+                        db, project.id, shot.character_ids,
+                        reference_ids=[
+                            reference_id
+                            for character in snapshot.get("characters", [])
+                            for reference_id in character.get("reference_ids", [])
+                        ],
+                    )
+                )
+                fallback_conv_url = shot.conversation_url or next(
+                    (
+                        (take.settings or {}).get("conversation_url")
+                        for take in reversed(shot.takes or [])
+                        if take.media_type == "image" and (take.settings or {}).get("conversation_url")
+                    ),
+                    None,
+                )
                 if visual_reference is not None:
+                    if is_aspect_conversion and fallback_conv_url:
+                        visual_reference = replace(visual_reference, reference_type="edit_target_fallback")
                     references.append(visual_reference)
 
             def report_progress(update: dict) -> None:
@@ -593,9 +612,153 @@ def _generate_shot_image(
                 job.attempts = meta + provider_attempts
                 db.commit()
 
-            if edit_meta:
-                filename, mime_type, provider = generate_storyboard_image(
+            attempt_meta = next(
+                (
+                    item
+                    for item in (job.attempts or [])
+                    if isinstance(item, dict) and item.get("shot_id") == shot.id
+                ),
+                {},
+            )
+            chatgpt_dual = bool(attempt_meta.get("chatgpt_dual")) and not edit_meta
+
+            if chatgpt_dual:
+                from .media import generate_storyboard_chatgpt_dual
+                invalidate_final_cut(project, db)
+                (fn_16_9, mime_16_9), (fn_9_16, mime_9_16), provider = generate_storyboard_chatgpt_dual(
                     prompt,
+                    (snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                    snapshot.get("framing") or shot.framing,
+                    progress=report_progress,
+                    references=references,
+                    conversation_url=shot.conversation_url or fallback_conv_url,
+                )
+
+                # 16:9 variant & take
+                variant_16 = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == "16:9"), None)
+                if project.aspect_ratio == "16:9":
+                    if shot.image:
+                        shot.image.filename = fn_16_9
+                        shot.image.mime_type = mime_16_9
+                        shot.image.source = "generated"
+                        shot.image.provider = provider
+                        shot.image.prompt = prompt
+                        shot.image.created_at = now()
+                    else:
+                        shot.image = ShotImage(
+                            shot_id=shot.id,
+                            filename=fn_16_9,
+                            mime_type=mime_16_9,
+                            source="generated",
+                            provider=provider,
+                            prompt=prompt,
+                        )
+                if variant_16:
+                    variant_16.filename = fn_16_9
+                    variant_16.mime_type = mime_16_9
+                    variant_16.source = "generated"
+                    variant_16.provider = provider
+                    variant_16.prompt = prompt
+                    variant_16.created_at = now()
+                else:
+                    shot.media_variants.append(
+                        ShotMediaVariant(
+                            shot_id=shot.id,
+                            media_type="image",
+                            aspect_ratio="16:9",
+                            filename=fn_16_9,
+                            mime_type=mime_16_9,
+                            source="generated",
+                            provider=provider,
+                            prompt=prompt,
+                        )
+                    )
+                record_take(
+                    db,
+                    shot,
+                    media_type="image",
+                    aspect_ratio="16:9",
+                    filename=fn_16_9,
+                    mime_type=mime_16_9,
+                    source="generated",
+                    provider=provider,
+                    prompt=prompt,
+                    settings={
+                        "continuity_snapshot": snapshot,
+                        **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
+                    },
+                )
+
+                # 9:16 variant & take
+                variant_9 = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == "9:16"), None)
+                if project.aspect_ratio == "9:16":
+                    if shot.image:
+                        shot.image.filename = fn_9_16
+                        shot.image.mime_type = mime_9_16
+                        shot.image.source = "generated"
+                        shot.image.provider = provider
+                        shot.image.prompt = prompt
+                        shot.image.created_at = now()
+                    else:
+                        shot.image = ShotImage(
+                            shot_id=shot.id,
+                            filename=fn_9_16,
+                            mime_type=mime_9_16,
+                            source="generated",
+                            provider=provider,
+                            prompt=prompt,
+                        )
+                if variant_9:
+                    variant_9.filename = fn_9_16
+                    variant_9.mime_type = mime_9_16
+                    variant_9.source = "generated"
+                    variant_9.provider = provider
+                    variant_9.prompt = prompt
+                    variant_9.created_at = now()
+                else:
+                    shot.media_variants.append(
+                        ShotMediaVariant(
+                            shot_id=shot.id,
+                            media_type="image",
+                            aspect_ratio="9:16",
+                            filename=fn_9_16,
+                            mime_type=mime_9_16,
+                            source="generated",
+                            provider=provider,
+                            prompt=prompt,
+                        )
+                    )
+                record_take(
+                    db,
+                    shot,
+                    media_type="image",
+                    aspect_ratio="9:16",
+                    filename=fn_9_16,
+                    mime_type=mime_9_16,
+                    source="generated",
+                    provider=provider,
+                    prompt=prompt,
+                    settings={
+                        "continuity_snapshot": snapshot,
+                        **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
+                    },
+                )
+
+                episode_id = shot.scene.script_version.episode_id if shot.scene and shot.scene.script_version else None
+                promote_available_clips(project, db, episode_id=episode_id)
+                raise_if_cancelled(db, job_id)
+                shot.status = "image_ready"
+                job.status = "completed"
+                job.progress = 1.0
+                job.message = "Storyboard frames ready (16:9 + 9:16)"
+                db.commit()
+                return
+
+            if edit_meta:
+                from .media import expand_color_retouch_prompt
+                effective_edit_prompt = expand_color_retouch_prompt(prompt)
+                filename, mime_type, provider = generate_storyboard_image(
+                    effective_edit_prompt,
                     (snapshot.get("scene") or {}).get("title") or shot.scene.title,
                     snapshot.get("framing") or shot.framing,
                     target_aspect,
@@ -612,10 +775,23 @@ def _generate_shot_image(
                     target_aspect,
                     progress=report_progress,
                     references=references,
+                    conversation_url=fallback_conv_url if is_aspect_conversion else None,
                 )
             if image_reference:
-                prompt = prepare_visual_reference_prompt(prompt)
+                prompt = prepare_visual_reference_prompt(prompt, references=references)
             generated_filename = filename
+            attempt_meta = next(
+                (
+                    item
+                    for item in (job.attempts or [])
+                    if isinstance(item, dict) and item.get("shot_id") == shot.id
+                ),
+                {},
+            )
+            both_aspects = bool(attempt_meta.get("both_aspects")) and not edit_meta
+            generate_video = bool(attempt_meta.get("generate_video"))
+            include_cast_refs = bool(attempt_meta.get("include_cast_references"))
+
             variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
             use_legacy = target_aspect == project.aspect_ratio
             previous_filename = (shot.image.filename if shot.image else None) if use_legacy else (variant.filename if variant else None)
@@ -628,15 +804,13 @@ def _generate_shot_image(
                 shot.image.prompt = prompt
                 shot.image.created_at = now()
             elif use_legacy:
-                db.add(
-                    ShotImage(
-                        shot_id=shot.id,
-                        filename=filename,
-                        mime_type=mime_type,
-                        source="generated",
-                        provider=provider,
-                        prompt=prompt,
-                    )
+                shot.image = ShotImage(
+                    shot_id=shot.id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    source="generated",
+                    provider=provider,
+                    prompt=prompt,
                 )
             if variant:
                 variant.filename = filename
@@ -646,17 +820,53 @@ def _generate_shot_image(
                 variant.prompt = prompt
                 variant.created_at = now()
             elif not use_legacy:
-                db.add(ShotMediaVariant(shot_id=shot.id, media_type="image", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=prompt))
+                shot.media_variants.append(
+                    ShotMediaVariant(
+                        shot_id=shot.id,
+                        media_type="image",
+                        aspect_ratio=target_aspect,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="generated",
+                        provider=provider,
+                        prompt=prompt,
+                    )
+                )
             take_settings: dict = {
                 "continuity_snapshot": snapshot,
                 **({"image_reference": image_reference} if image_reference else {}),
                 **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
             }
             if edit_meta:
-                take_settings["parent_take_id"] = edit_meta.get("edit_take_id")
+                if edit_meta.get("edit_take_id"):
+                    take_settings["parent_take_id"] = edit_meta.get("edit_take_id")
                 take_settings["edit_prompt"] = str(edit_meta.get("edit_prompt") or "")
                 if edit_attachment_files:
                     take_settings["edit_attachment_count"] = len(edit_attachment_files)
+                if edit_meta.get("edit_reference"):
+                    ext = Path(filename).suffix or ".png"
+                    src_file = settings.media_dir / filename
+                    if src_file.is_file():
+                        ref_obj = next(
+                            (item for item in shot.image_references if item.aspect_ratio == target_aspect),
+                            None,
+                        )
+                        cont_obj = next(
+                            (item for item in shot.continuity_frames if item.aspect_ratio == target_aspect),
+                            None,
+                        )
+                        if ref_obj:
+                            new_ref_fn = f"image-reference-repainted-{uuid4()}{ext}"
+                            shutil.copy2(str(src_file), str(settings.media_dir / new_ref_fn))
+                            ref_obj.filename = new_ref_fn
+                            ref_obj.mime_type = mime_type
+                            ref_obj.created_at = now()
+                        elif cont_obj:
+                            new_cont_fn = f"continuity-repainted-{uuid4()}{ext}"
+                            shutil.copy2(str(src_file), str(settings.media_dir / new_cont_fn))
+                            cont_obj.filename = new_cont_fn
+                            cont_obj.mime_type = mime_type
+                            cont_obj.created_at = now()
             record_take(
                 db,
                 shot,
@@ -673,16 +883,144 @@ def _generate_shot_image(
             promote_available_clips(project, db, episode_id=episode_id)
             raise_if_cancelled(db, job_id)
             shot.status = "image_ready"
+
+            if both_aspects:
+                other_aspect = "9:16" if target_aspect == "16:9" else "16:9"
+                job.progress = 0.5
+                job.message = f"Generating {other_aspect} storyboard (2/2)"
+                db.commit()
+                generated_filename = None
+                if previous_filename != filename:
+                    delete_media_file(previous_filename, db=db)
+                previous_filename = None
+                if generate_video:
+                    _enqueue_chained_shot_clip(
+                        db, project, shot, target_aspect, include_cast_references=include_cast_refs
+                    )
+
+                other_snapshot = get_or_create_shot_snapshot(
+                    db, project, shot, other_aspect, character_ids=shot.character_ids
+                )
+                other_prompt = other_snapshot["effective_image_prompt"]
+                other_ref = default_visual_reference(shot, other_aspect)
+                if other_ref:
+                    other_ref = freeze_visual_reference(other_ref)
+                other_visual = load_visual_reference(other_ref)
+                other_conv_url = job.conversation_url or shot.conversation_url or fallback_conv_url
+                if other_visual is not None and other_conv_url:
+                    other_visual = replace(other_visual, reference_type="edit_target_fallback")
+                other_refs = [other_visual] if other_visual is not None else []
+                if not other_refs and not other_conv_url:
+                    other_refs = load_cast_references(
+                        db, project.id, shot.character_ids,
+                        reference_ids=[
+                            reference_id
+                            for character in other_snapshot.get("characters", [])
+                            for reference_id in character.get("reference_ids", [])
+                        ],
+                    )
+                other_filename, other_mime_type, other_provider = generate_storyboard_image(
+                    other_prompt,
+                    (other_snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                    other_snapshot.get("framing") or shot.framing,
+                    other_aspect,
+                    progress=report_progress,
+                    references=other_refs,
+                    conversation_url=other_conv_url,
+                )
+                generated_filename = other_filename
+                if other_ref:
+                    other_prompt = prepare_visual_reference_prompt(other_prompt, references=other_refs)
+                other_variant = next(
+                    (
+                        item
+                        for item in shot.media_variants
+                        if item.media_type == "image" and item.aspect_ratio == other_aspect
+                    ),
+                    None,
+                )
+                other_use_legacy = other_aspect == project.aspect_ratio
+                other_previous = (
+                    (shot.image.filename if shot.image else None)
+                    if other_use_legacy
+                    else (other_variant.filename if other_variant else None)
+                )
+                if other_use_legacy and shot.image:
+                    shot.image.filename = other_filename
+                    shot.image.mime_type = other_mime_type
+                    shot.image.source = "generated"
+                    shot.image.provider = other_provider
+                    shot.image.prompt = other_prompt
+                    shot.image.created_at = now()
+                elif other_use_legacy:
+                    shot.image = ShotImage(
+                        shot_id=shot.id,
+                        filename=other_filename,
+                        mime_type=other_mime_type,
+                        source="generated",
+                        provider=other_provider,
+                        prompt=other_prompt,
+                    )
+                if other_variant:
+                    other_variant.filename = other_filename
+                    other_variant.mime_type = other_mime_type
+                    other_variant.source = "generated"
+                    other_variant.provider = other_provider
+                    other_variant.prompt = other_prompt
+                    other_variant.created_at = now()
+                elif not other_use_legacy:
+                    shot.media_variants.append(
+                        ShotMediaVariant(
+                            shot_id=shot.id,
+                            media_type="image",
+                            aspect_ratio=other_aspect,
+                            filename=other_filename,
+                            mime_type=other_mime_type,
+                            source="generated",
+                            provider=other_provider,
+                            prompt=other_prompt,
+                        )
+                    )
+                record_take(
+                    db,
+                    shot,
+                    media_type="image",
+                    aspect_ratio=other_aspect,
+                    filename=other_filename,
+                    mime_type=other_mime_type,
+                    source="generated",
+                    provider=other_provider,
+                    prompt=other_prompt,
+                    settings={
+                        "continuity_snapshot": other_snapshot,
+                        **({"image_reference": other_ref} if other_ref else {}),
+                        **({"conversation_url": job.conversation_url} if job.conversation_url else {}),
+                    },
+                )
+                raise_if_cancelled(db, job_id)
+                if other_previous and other_previous != other_filename:
+                    delete_media_file(other_previous, db=db)
+
             job.status = "completed"
             job.provider_phase = "completed"
             job.progress = 1
-            job.message = "Storyboard ready"
+            job.message = "16:9 + 9:16 storyboards ready" if both_aspects else "Storyboard ready"
             db.commit()
             generated_filename = None
             cleanup_edit_attachments()
-            if previous_filename != filename:
+            if previous_filename and previous_filename != filename:
                 delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
+            if generate_video:
+                if both_aspects:
+                    other_aspect = "9:16" if target_aspect == "16:9" else "16:9"
+                    _enqueue_chained_shot_clip(
+                        db, project, shot, other_aspect, include_cast_references=include_cast_refs
+                    )
+                else:
+                    _enqueue_chained_shot_clip(
+                        db, project, shot, target_aspect, include_cast_references=include_cast_refs
+                    )
         except JobCancelled:
             cleanup_edit_attachments()
             delete_media_file(generated_filename)
@@ -743,12 +1081,58 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
             return
         try:
             raise_if_cancelled(db, job_id)
+            char_kind = (getattr(character, "kind", None) or "character").strip().lower()
+            look_key = (look or "").strip().lower()
+            if look_key in {"3d_view", "turnaround", "3d"}:
+                target_view_type = "3d_view"
+                target_aspect = "16:9"
+                target_framing = "16:9 Character 3D Turnaround Sheet"
+                label_noun = "3D turnaround view"
+            elif char_kind == "scene" or look_key == "scene":
+                target_view_type = "scene"
+                target_aspect = "16:9"
+                target_framing = "Wide establishing set view"
+                label_noun = "scene reference"
+            elif char_kind == "prop" or look_key == "prop":
+                target_view_type = "prop"
+                target_aspect = "16:9"
+                target_framing = "Isolated studio prop view"
+                label_noun = "prop reference"
+            else:
+                target_view_type = "main"
+                target_aspect = "9:16"
+                target_framing = "Close-up"
+                label_noun = "face reference"
+
             job.status = "running"
             job.progress = 0.15
-            job.message = f"Generating face reference for {character.name}"
+            job.message = f"Generating {label_noun} for {character.name}"
             db.commit()
 
             prompt = cast_portrait_prompt(character, look=look)
+
+            seed_references: list[FaceReferenceImage] = []
+            if target_view_type == "3d_view" and character.references:
+                main_candidates = [
+                    r for r in character.references if getattr(r, "view_type", "main") != "3d_view"
+                ] or list(character.references)
+                for ref in reversed(main_candidates):
+                    ref_path = settings.media_dir / ref.filename
+                    try:
+                        ref_bytes = ref_path.read_bytes()
+                    except OSError:
+                        continue
+                    if is_usable_reference_image(ref_bytes):
+                        seed_references.append(
+                            FaceReferenceImage(
+                                character_name=character.name,
+                                mime_type=ref.mime_type,
+                                data=ref_bytes,
+                                reference_id=ref.id,
+                                character_id=character.id,
+                            )
+                        )
+                        break
 
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
@@ -757,9 +1141,9 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
                 labels = {"chatgpt_web": "ChatGPT Web", "gemini_web": "Gemini Web"}
                 messages = {
                     "submitting": f"Submitting {character.name} to {labels.get(provider, provider)}",
-                    "generating": f"Generating {character.name} face with {labels.get(provider, provider)}",
-                    "downloading": "Downloading face reference",
-                    "saving": "Saving face reference",
+                    "generating": f"Generating {character.name} {label_noun} with {labels.get(provider, provider)}",
+                    "downloading": f"Downloading {label_noun}",
+                    "saving": f"Saving {label_noun}",
                     "failed": f"{labels.get(provider, provider)} attempt failed",
                 }
                 job.provider = provider or job.provider
@@ -786,12 +1170,21 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
                 job.progress = min(0.9, max(job.progress, 0.2))
                 db.commit()
 
+            import inspect
+            extra_gen_kwargs: dict[str, object] = {"progress": report_progress}
+            if seed_references:
+                try:
+                    if "references" in inspect.signature(generate_storyboard_image).parameters:
+                        extra_gen_kwargs["references"] = seed_references
+                except (TypeError, ValueError):
+                    pass
+
             filename, mime_type, provider = generate_storyboard_image(
                 prompt,
                 f"Cast · {character.name}",
-                "Close-up",
-                "9:16",
-                progress=report_progress,
+                target_framing,
+                target_aspect,
+                **extra_gen_kwargs,
             )
             generated_filename = filename
             # Normalize to cast-ref-* naming used by uploads.
@@ -808,6 +1201,7 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
             db.add(
                 CharacterReference(
                     character_id=character.id,
+                    view_type=target_view_type,
                     filename=cast_filename,
                     mime_type=mime_type,
                 )
@@ -816,7 +1210,7 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
             job.provider = provider
             job.provider_phase = "completed"
             job.progress = 1
-            job.message = f"Face reference ready for {character.name}"
+            job.message = f"{label_noun.capitalize()} ready for {character.name}"
             db.commit()
             generated_filename = None
         except JobCancelled:
@@ -857,7 +1251,21 @@ def _resolve_video_cast_references(
     continuity_frame,
     image_ref,
 ) -> tuple[list[Path], list[str]]:
-    tagged_ids = [str(cid) for cid in (shot.character_ids or []) if cid]
+    all_chars = list(
+        db.scalars(
+            select(Character)
+            .where(Character.project_id == project.id)
+            .options(selectinload(Character.references))
+        ).all()
+    )
+    mention_ids = extract_mention_element_ids(
+        all_chars, shot.video_prompt, shot.image_prompt, shot.action
+    )
+    tagged_ids = list(
+        dict.fromkeys(
+            [str(cid) for cid in (shot.character_ids or []) if cid] + mention_ids
+        )
+    )
     if not tagged_ids:
         return [], []
 
@@ -874,21 +1282,18 @@ def _resolve_video_cast_references(
             if missing_ids:
                 candidate_ids = missing_ids
 
-    characters = list(
-        db.scalars(
-            select(Character)
-            .where(Character.project_id == project.id, Character.id.in_(candidate_ids))
-            .options(selectinload(Character.references))
-        ).all()
-    )
-    by_id = {char.id: char for char in characters}
+    by_id = {char.id: char for char in all_chars}
     ref_paths: list[Path] = []
     char_names: list[str] = []
     for cid in candidate_ids:
         char = by_id.get(cid)
         if not char or not char.references:
             continue
-        for ref in char.references:
+        ordered_refs = sorted(
+            char.references,
+            key=lambda r: 0 if getattr(r, "view_type", "main") == "3d_view" else 1,
+        )
+        for ref in ordered_refs:
             path = settings.media_dir / ref.filename
             if path.is_file():
                 ref_paths.append(path)
@@ -899,12 +1304,183 @@ def _resolve_video_cast_references(
     return ref_paths, char_names
 
 
+def _resolve_r2v_element_references(
+    db,
+    project: Project,
+    shot: Shot,
+    continuity_frame,
+    image_ref,
+    *,
+    element_ids: list[str] | None = None,
+    include_scene_reference: bool = True,
+) -> tuple[list[Path], list[dict[str, str]]]:
+    """Collect up to 7 multi-modal Reference-to-Video (R2V) images: Characters (3D view preferred), Scenes, Props, and Continuity."""
+    all_chars = list(
+        db.scalars(
+            select(Character)
+            .where(Character.project_id == project.id)
+            .options(selectinload(Character.references))
+        ).all()
+    )
+    by_id = {char.id: char for char in all_chars}
+    mention_ids = extract_mention_element_ids(
+        all_chars, shot.video_prompt, shot.image_prompt, shot.action
+    )
+    base_ids = (
+        [str(cid) for cid in element_ids if cid]
+        if element_ids is not None
+        else [str(cid) for cid in (shot.character_ids or []) if cid]
+    )
+    selected_ids = list(dict.fromkeys([*base_ids, *mention_ids]))
+
+    if include_scene_reference and shot.scene:
+        has_scene_elem = any(
+            (getattr(by_id.get(cid), "kind", "character") or "character") == "scene"
+            for cid in selected_ids
+            if cid in by_id
+        )
+        if not has_scene_elem:
+            raw_loc = (shot.scene.location or shot.scene.title or "").strip()
+            cleaned_loc = re.sub(
+                r"^(?:SCENE\s*\d+\s*[:\-–—]?\s*)?(?:INT\.?/EXT\.?|INT\.?|EXT\.?)\s*",
+                "",
+                raw_loc,
+                flags=re.IGNORECASE,
+            )
+            cleaned_loc = re.sub(
+                r"\s*[-–—]\s*(?:DAY|NIGHT|MORNING|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME(?:\s+TIME)?).*$",
+                "",
+                cleaned_loc,
+                flags=re.IGNORECASE,
+            ).strip()
+            loc_key = canonical_character_name(cleaned_loc)
+            if loc_key:
+                for char in all_chars:
+                    if (getattr(char, "kind", "character") or "character") == "scene":
+                        c_key = canonical_character_name(char.name)
+                        if c_key == loc_key or (loc_key in c_key) or (c_key in loc_key):
+                            selected_ids.append(char.id)
+                            break
+
+    ref_paths: list[Path] = []
+    ref_descriptors: list[dict[str, str]] = []
+    seen_paths: set[Path] = set()
+
+    for cid in selected_ids:
+        char = by_id.get(cid)
+        if not char or not char.references:
+            continue
+        ordered_refs = sorted(
+            char.references,
+            key=lambda r: 0 if getattr(r, "view_type", "main") == "3d_view" else 1,
+        )
+        for ref in ordered_refs:
+            path = settings.media_dir / ref.filename
+            if path.is_file() and path not in seen_paths:
+                seen_paths.add(path)
+                ref_paths.append(path)
+                key = canonical_character_name(char.name) or char.name.upper()
+                slug = "_".join(key.split())
+                ref_descriptors.append(
+                    {
+                        "id": char.id,
+                        "name": char.name,
+                        "tag": f"@{slug}",
+                        "kind": (getattr(char, "kind", "character") or "character"),
+                        "view_type": (getattr(ref, "view_type", "main") or "main"),
+                    }
+                )
+                break
+        if len(ref_paths) >= 7:
+            break
+
+    if include_scene_reference and len(ref_paths) < 7:
+        for frame_ref in (continuity_frame, image_ref):
+            if frame_ref is None:
+                continue
+            f_path = settings.media_dir / frame_ref.filename
+            if f_path.is_file() and f_path not in seen_paths:
+                seen_paths.add(f_path)
+                ref_paths.append(f_path)
+                ref_descriptors.append(
+                    {
+                        "id": getattr(frame_ref, "id", "continuity"),
+                        "name": getattr(frame_ref, "source_shot_title", None) or "Previous Shot Continuity",
+                        "tag": "@SCENE_CONTINUITY",
+                        "kind": "scene",
+                        "view_type": "continuity",
+                    }
+                )
+                break
+
+    return ref_paths[:7], ref_descriptors[:7]
+
+
+def _enqueue_chained_shot_clip(
+    db,
+    project: Project,
+    shot: Shot,
+    aspect_ratio: str,
+    include_cast_references: bool = False,
+) -> Job | None:
+    if not (shot.video_prompt or "").strip():
+        return None
+    if not clip_source_image(shot, aspect_ratio):
+        return None
+    active_jobs = db.scalars(
+        select(Job).where(
+            Job.project_id == project.id,
+            Job.kind == "shot_clip",
+            Job.status.in_(["queued", "running"]),
+        )
+    ).all()
+    for existing in active_jobs:
+        if any(
+            isinstance(attempt, dict)
+            and attempt.get("shot_id") == shot.id
+            and attempt.get("aspect_ratio", project.aspect_ratio) == aspect_ratio
+            for attempt in (existing.attempts or [])
+        ):
+            return existing
+    attempt_meta: dict[str, object] = {"shot_id": shot.id, "aspect_ratio": aspect_ratio}
+    if include_cast_references:
+        attempt_meta["include_cast_references"] = True
+    try:
+        raise_if_over_capacity(db, project.id, "shot_clip")
+    except JobCapacityExceeded:
+        return None
+    clip_job = Job(
+        project_id=project.id,
+        episode_id=(
+            shot.scene.script_version.episode_id
+            if shot.scene and shot.scene.script_version
+            else None
+        ),
+        kind="shot_clip",
+        message=f"Queued {aspect_ratio} shot clip",
+        attempts=[attempt_meta],
+    )
+    db.add(clip_job)
+    shot.status = "generating_clip"
+    db.commit()
+    task = (
+        enqueue_shot_clip(shot.id, clip_job.id, aspect_ratio, include_cast_references=True)
+        if include_cast_references
+        else enqueue_shot_clip(shot.id, clip_job.id, aspect_ratio)
+    )
+    if task is not None and hasattr(task, "id"):
+        clip_job.task_id = task.id
+        db.commit()
+    return clip_job
+
+
 def _generate_shot_clip(
     shot_id: str,
     job_id: str,
     aspect_ratio: str | None = None,
     prompt_override: str | None = None,
     include_cast_references: bool = False,
+    _is_second_aspect: bool = False,
 ) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
@@ -916,25 +1492,59 @@ def _generate_shot_clip(
         filename = None
         try:
             raise_if_cancelled(db, job_id)
-            if not include_cast_references and job.attempts:
+            attempt_dicts = [item for item in (job.attempts or []) if isinstance(item, dict)]
+            if not include_cast_references and attempt_dicts:
                 include_cast_references = any(
-                    bool(item.get("include_cast_references"))
-                    for item in job.attempts
-                    if isinstance(item, dict)
+                    bool(item.get("include_cast_references")) for item in attempt_dicts
                 )
+            video_mode = next(
+                (
+                    str(item.get("video_mode")).strip().lower()
+                    for item in attempt_dicts
+                    if item.get("video_mode") in {"i2v", "r2v"}
+                ),
+                "i2v",
+            )
+            include_scene_reference = next(
+                (
+                    bool(item.get("include_scene_reference"))
+                    for item in attempt_dicts
+                    if "include_scene_reference" in item
+                ),
+                True,
+            )
+            explicit_element_ids = next(
+                (
+                    [str(eid) for eid in item.get("element_ids") if eid]
+                    for item in attempt_dicts
+                    if isinstance(item.get("element_ids"), list)
+                ),
+                None,
+            )
+            both_aspects = (
+                any(bool(item.get("both_aspects")) for item in attempt_dicts)
+                and not _is_second_aspect
+            )
             job.status = "running"
-            job.progress = 0.1
+            if not _is_second_aspect:
+                job.progress = 0.1
             provider_name = (settings.video_provider or "runway").strip().lower()
             provider_labels = {
                 "runway": "Runway",
                 "flowkit": "Google Flow",
                 "comfyui": "ComfyUI",
             }
-            job.message = f"Sending shot to {provider_labels.get(provider_name, provider_name.title())}"
-            db.commit()
-
             project = shot.scene.script_version.project
             target_aspect = aspect_ratio or project.aspect_ratio
+            other_aspect = "9:16" if target_aspect == "16:9" else "16:9"
+            mode_badge = " (R2V)" if video_mode == "r2v" else ""
+            if _is_second_aspect:
+                job.message = f"Sending {target_aspect} shot{mode_badge} to {provider_labels.get(provider_name, provider_name.title())} (2/2)"
+            elif both_aspects:
+                job.message = f"Sending {target_aspect} shot{mode_badge} to {provider_labels.get(provider_name, provider_name.title())} (1/2)"
+            else:
+                job.message = f"Sending shot{mode_badge} to {provider_labels.get(provider_name, provider_name.title())}"
+            db.commit()
             continuity_frame = next(
                 (
                     frame
@@ -951,20 +1561,74 @@ def _generate_shot_clip(
                 ),
                 None,
             )
+            cross_aspect_continuity = (
+                next(
+                    (
+                        frame
+                        for frame in shot.continuity_frames
+                        if frame.aspect_ratio == other_aspect
+                    ),
+                    None,
+                )
+                or next(
+                    (
+                        ref
+                        for ref in shot.image_references
+                        if ref.aspect_ratio == other_aspect
+                    ),
+                    None,
+                )
+            )
             source_image = clip_source_image(shot, target_aspect)
-            if not source_image:
+            r2v_ref_paths: list[Path] = []
+            r2v_descriptors: list[dict[str, str]] = []
+            if video_mode == "r2v":
+                r2v_ref_paths, r2v_descriptors = _resolve_r2v_element_references(
+                    db,
+                    project,
+                    shot,
+                    continuity_frame or cross_aspect_continuity,
+                    image_ref,
+                    element_ids=explicit_element_ids,
+                    include_scene_reference=include_scene_reference,
+                )
+                if not r2v_ref_paths and source_image:
+                    src_p = settings.media_dir / source_image.filename
+                    if src_p.is_file():
+                        r2v_ref_paths = [src_p]
+                        r2v_descriptors = [
+                            {
+                                "id": shot.id,
+                                "name": shot.title,
+                                "tag": "@SHOT_FRAME",
+                                "kind": "scene",
+                                "view_type": "frame",
+                            }
+                        ]
+                if not r2v_ref_paths:
+                    raise RuntimeError(
+                        "Attach at least one Character, Scene, or Prop reference image (or @mention an element with a reference) to generate in Reference-to-Video (R2V) mode"
+                    )
+            elif not source_image:
                 raise RuntimeError(f"Generate or upload a {target_aspect} shot image first")
+
             base_prompt = (prompt_override or shot.video_prompt).strip()
             if target_aspect == "9:16" and not prompt_override:
                 base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
             from .continuity import current_shot_snapshot, video_continuity_prompt
             from .takes import record_take
 
-            matching_image_takes = [
-                take for take in shot.takes
-                if take.media_type == "image" and take.aspect_ratio == target_aspect
-                and take.filename == source_image.filename
-            ]
+            matching_image_takes = (
+                [
+                    take
+                    for take in shot.takes
+                    if take.media_type == "image"
+                    and take.aspect_ratio == target_aspect
+                    and take.filename == source_image.filename
+                ]
+                if source_image
+                else []
+            )
             image_take = next(
                 (take for take in matching_image_takes if take.id == shot.selected_image_take_id),
                 max(matching_image_takes, key=lambda take: take.created_at, default=None),
@@ -973,7 +1637,7 @@ def _generate_shot_clip(
                 (image_take.settings or {}).get("continuity_snapshot")
                 if image_take else None
             )
-            if not snapshot and not continuity_frame and getattr(source_image, "source", None) == "generated":
+            if not snapshot and not continuity_frame and source_image and getattr(source_image, "source", None) == "generated":
                 candidate = shot.continuity_snapshot
                 if candidate and candidate.get("aspect_ratio") == target_aspect:
                     snapshot = candidate
@@ -983,30 +1647,56 @@ def _generate_shot_clip(
                 video_continuity_prompt(snapshot, base_prompt, target_aspect, shot=shot),
                 shot.sound,
             )
-            if continuity_frame or image_ref:
-                effective_prompt = "\n\n".join(
-                    part
-                    for part in (
-                        effective_prompt,
-                        "Continue directly from the selected frame of the previous shot. Preserve its background, set layout, lighting, props, and overall visual composition as the exact opening state.",
+            if video_mode == "r2v":
+                binding_lines: list[str] = ["Reference-to-Video (R2V) visual elements attached in order:"]
+                for idx, desc in enumerate(r2v_descriptors, start=1):
+                    kind_label = (
+                        "Character 3D turnaround sheet (portrait + front/side/back full-body)"
+                        if desc.get("view_type") == "3d_view"
+                        else (
+                            "Scene environment reference"
+                            if desc.get("kind") == "scene"
+                            else (
+                                "Prop object reference"
+                                if desc.get("kind") == "prop"
+                                else "Character identity reference"
+                            )
+                        )
                     )
-                    if part
+                    binding_lines.append(
+                        f"- Reference {idx} ({desc['tag']} — {desc['name']}, {kind_label}): preserve exact visual identity, proportions, materials, and wardrobe."
+                    )
+                binding_lines.append(
+                    "Maintain character orientation and eyeline consistency across shots. Do not flip the left-right axis between shots. Prioritize natural body movement over rigid spatial keywords."
                 )
-            cast_ref_paths: list[Path] = []
-            cast_ref_names: list[str] = []
-            if include_cast_references:
-                cast_ref_paths, cast_ref_names = _resolve_video_cast_references(
-                    db, project, shot, continuity_frame, image_ref
+                effective_prompt = "\n\n".join(
+                    part for part in (effective_prompt, "\n".join(binding_lines)) if part
                 )
-                if cast_ref_names:
+            else:
+                if continuity_frame or image_ref or cross_aspect_continuity:
                     effective_prompt = "\n\n".join(
                         part
                         for part in (
                             effective_prompt,
-                            f"Reference images: Use the first image as the opening scene frame, and use the additional character reference portrait(s) for the exact facial identity, hair, and wardrobe of: {', '.join(cast_ref_names)}.",
+                            "Continue directly from the selected frame of the previous shot. Preserve its background, set layout, lighting, props, and overall visual composition as the exact opening state.",
                         )
                         if part
                     )
+                cast_ref_paths: list[Path] = []
+                cast_ref_names: list[str] = []
+                if include_cast_references:
+                    cast_ref_paths, cast_ref_names = _resolve_video_cast_references(
+                        db, project, shot, continuity_frame or cross_aspect_continuity, image_ref
+                    )
+                    if cast_ref_names:
+                        effective_prompt = "\n\n".join(
+                            part
+                            for part in (
+                                effective_prompt,
+                                f"Reference images: Use the first image as the opening scene frame, and use the additional character reference portrait(s) for the exact facial identity, hair, and wardrobe of: {', '.join(cast_ref_names)}.",
+                            )
+                            if part
+                        )
             take_settings: dict[str, object] = {}
             if continuity_frame:
                 take_settings["continuity_frame"] = {
@@ -1014,7 +1704,10 @@ def _generate_shot_clip(
                     "source_shot_title": continuity_frame.source_shot_title,
                     "source_time_ms": continuity_frame.source_time_ms,
                 }
-            if include_cast_references:
+            if video_mode == "r2v":
+                take_settings["video_mode"] = "r2v"
+                take_settings["r2v_elements"] = [desc["name"] for desc in r2v_descriptors]
+            elif include_cast_references:
                 take_settings["include_cast_references"] = True
                 if cast_ref_names:
                     take_settings["cast_reference_characters"] = cast_ref_names
@@ -1022,18 +1715,26 @@ def _generate_shot_clip(
 
             resolved_flow_projects: list[str] = []
             render_kwargs: dict[str, object] = {"scene_id": str(shot.scene.id)}
+            active_ref_paths = r2v_ref_paths if video_mode == "r2v" else cast_ref_paths
             try:
                 sig = inspect.signature(render_shot_clip)
                 if "flow_project_id" in sig.parameters:
                     render_kwargs["flow_project_id"] = project.flow_project_id
                 if "on_flow_project_id" in sig.parameters:
                     render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
-                if cast_ref_paths and "reference_image_paths" in sig.parameters:
-                    render_kwargs["reference_image_paths"] = cast_ref_paths
+                if active_ref_paths and "reference_image_paths" in sig.parameters:
+                    render_kwargs["reference_image_paths"] = active_ref_paths
+                if video_mode == "r2v" and "video_mode" in sig.parameters:
+                    render_kwargs["video_mode"] = "r2v"
             except (TypeError, ValueError):
                 pass
+            opening_image_path = (
+                r2v_ref_paths[0]
+                if video_mode == "r2v"
+                else (settings.media_dir / source_image.filename)
+            )
             filename, mime_type, provider = render_shot_clip(
-                settings.media_dir / source_image.filename,
+                opening_image_path,
                 effective_prompt,
                 shot.duration_ms,
                 target_aspect,
@@ -1078,6 +1779,46 @@ def _generate_shot_clip(
                 variant.created_at = now()
             elif not use_legacy:
                 shot.media_variants.append(ShotMediaVariant(shot_id=shot.id, media_type="clip", aspect_ratio=target_aspect, filename=filename, mime_type=mime_type, source="generated", provider=provider, prompt=effective_prompt))
+
+            other_aspect = "9:16" if target_aspect == "16:9" else "16:9"
+            other_variant = next(
+                (item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == other_aspect),
+                None,
+            )
+            other_use_legacy = other_aspect == project.aspect_ratio
+            other_has_legacy = bool(other_use_legacy and shot.clip and shot.clip.filename and getattr(shot.clip, "source", "") != "adapted")
+            other_has_native = bool(other_variant and other_variant.source != "adapted") or other_has_legacy
+
+            if not other_has_native:
+                if other_variant:
+                    other_variant.filename = filename
+                    other_variant.mime_type = mime_type
+                    other_variant.source = "adapted"
+                    other_variant.provider = provider
+                    other_variant.prompt = effective_prompt
+                    other_variant.created_at = now()
+                elif other_use_legacy and not shot.clip:
+                    shot.clip = ShotClip(
+                        shot_id=shot.id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="adapted",
+                        provider=provider,
+                        prompt=effective_prompt,
+                    )
+                else:
+                    shot.media_variants.append(
+                        ShotMediaVariant(
+                            shot_id=shot.id,
+                            media_type="clip",
+                            aspect_ratio=other_aspect,
+                            filename=filename,
+                            mime_type=mime_type,
+                            source="adapted",
+                            provider=provider,
+                            prompt=effective_prompt,
+                        )
+                    )
             record_take(
                 db,
                 shot,
@@ -1090,17 +1831,34 @@ def _generate_shot_clip(
                 prompt=effective_prompt,
                 settings=take_settings or None,
             )
-            if project.timeline and not promote_available_clips(project, db):
-                project.timeline.revision += 1
+            episode_id = shot.scene.script_version.episode_id if shot.scene and shot.scene.script_version else None
+            promote_available_clips(project, db, episode_id=episode_id)
             raise_if_cancelled(db, job_id)
             shot.status = "clip_ready"
-            job.status = "completed"
-            job.progress = 1
-            job.message = "Shot clip ready"
+            has_other_source = bool(
+                both_aspects
+                and (video_mode == "r2v" or clip_source_image(shot, other_aspect))
+            )
+            if has_other_source:
+                job.progress = 0.5
+                job.message = f"Generating {other_aspect} shot clip (2/2)"
+            else:
+                job.status = "completed"
+                job.progress = 1
+                job.message = "16:9 + 9:16 shot clips ready" if _is_second_aspect else "Shot clip ready"
             db.commit()
             if previous_filename != filename:
                 delete_media_file(previous_filename, db=db)
             delete_media_file(final_cut_filename)
+            if has_other_source:
+                _generate_shot_clip(
+                    shot_id,
+                    job_id,
+                    other_aspect,
+                    prompt_override,
+                    include_cast_references,
+                    _is_second_aspect=True,
+                )
         except JobCancelled:
             db.rollback()
             delete_media_file(filename)
@@ -1137,7 +1895,22 @@ def compose_video_prompt(prompt: str, sound: str) -> str:
         return match.group(0)
 
     cleaned_sound = _SOUND_QUOTE_RE.sub(_dedup_quote, sound).strip()
-    return f"{prompt}\n\nAudio direction: {cleaned_sound}"
+    if re.search(r"\bone\b.*\btwo\b.*\bthree\b", prompt, re.IGNORECASE | re.DOTALL):
+        cleaned_sound = re.sub(
+            r"^(?:approximately\s+)?(?:two-second|brief)\s+(?:quiet\s+)?(?:viewer\s+)?(?:response\s+)?pause,?\s*(?:then\s*)?",
+            "",
+            cleaned_sound,
+            flags=re.IGNORECASE,
+        )
+        cleaned_sound = re.sub(
+            r"\b(?:two|three|four|five|six|seven|eight|nine|ten)\s+(?=(?:clear|gentle|light|soft|rising)\b)",
+            "",
+            cleaned_sound,
+            flags=re.IGNORECASE,
+        )
+        cleaned_sound = cleaned_sound.strip()
+    return f"{prompt}\n\nAudio direction: {cleaned_sound}" if cleaned_sound else prompt
+
 
 
 @video_huey.task()
@@ -1249,9 +2022,19 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
             db.commit()
 
             episode_id = job.episode_id
-            timeline = ensure_timeline(project, db, episode_id=episode_id)
-            promote_available_clips(project, db, episode_id=episode_id)
-            append_missing_shots(project, db, episode_id=episode_id)
+            compilation_id = getattr(job, "compilation_id", None)
+            if compilation_id:
+                compilation = db.get(Compilation, compilation_id)
+                if not compilation:
+                    raise ValueError(f"Compilation {compilation_id} not found")
+                timeline = ensure_compilation_timeline(db, compilation)
+                # Keep still→video promotions in sync without re-appending curated membership.
+                promote_available_clips(project, db, compilation_id=compilation_id)
+            else:
+                timeline = ensure_timeline(project, db, episode_id=episode_id)
+                promote_available_clips(project, db, episode_id=episode_id)
+                append_missing_shots(project, db, episode_id=episode_id)
+
             if variant == "shorts":
                 if not timeline.shorts_document:
                     timeline.shorts_document = deepcopy(timeline.document)
@@ -1268,8 +2051,12 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
 
             result = assemble_timeline(project, document, variant, db, update_progress)
             query = select(ProjectVariantExport).where(ProjectVariantExport.project_id == project.id, ProjectVariantExport.variant == variant)
-            if episode_id:
+            if compilation_id:
+                query = query.where(ProjectVariantExport.compilation_id == compilation_id)
+            elif episode_id:
                 query = query.where(ProjectVariantExport.episode_id == episode_id)
+            else:
+                query = query.where(ProjectVariantExport.episode_id.is_(None), ProjectVariantExport.compilation_id.is_(None))
             export = db.scalar(query)
             previous_filename = export.filename if export else None
             if export:
@@ -1280,13 +2067,15 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
                 export.clip_count = result.clip_count
                 export.fallback_count = result.fallback_count
                 export.timeline_revision = timeline.revision
-                export.episode_id = episode_id
+                export.episode_id = episode_id if not compilation_id else None
+                export.compilation_id = compilation_id
                 export.created_at = now()
             else:
                 db.add(
                     ProjectVariantExport(
                         project_id=project.id,
-                        episode_id=episode_id,
+                        episode_id=episode_id if not compilation_id else None,
+                        compilation_id=compilation_id,
                         variant=variant,
                         filename=result.filename,
                         duration_ms=result.duration_ms,
@@ -1480,4 +2269,8 @@ def enqueue_deep_review_draft(
     if provider == "gemini_web":
         return deep_review_draft_gemini(run_id, finding_id, job_id)
     return deep_review_draft_general(run_id, finding_id, job_id)
+
+
+from .draft import create_draft_worker  # noqa: E402, F401
+
 

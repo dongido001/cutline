@@ -94,6 +94,32 @@ def test_prepare_face_reference_prompt_names_characters() -> None:
     assert prepared.endswith("MARA walks into the room")
 
 
+def test_prepare_face_reference_prompt_with_3d_turnaround() -> None:
+    from backend.media import FaceReferenceImage, _reference_payload, prepare_face_reference_prompt
+
+    refs = [
+        FaceReferenceImage(character_name="GABE", mime_type="image/png", data=b"turnaround_bytes", view_type="3d_view"),
+        FaceReferenceImage(character_name="GABE", mime_type="image/png", data=b"face_bytes", view_type="main"),
+        FaceReferenceImage(character_name="ROSA", mime_type="image/jpeg", data=b"rosa_face", view_type="main"),
+    ]
+    prepared = prepare_face_reference_prompt(
+        "GABE sits by ROSA",
+        refs,
+    )
+
+    assert "Character 3D turnaround reference sheet(s)" in prepared
+    assert "attached for: GABE" in prepared
+    assert "clothing/wardrobe, body build, and proportions" in prepared
+    assert "Identity references are attached for: ROSA" in prepared
+    assert prepared.endswith("GABE sits by ROSA")
+
+    payload = _reference_payload(refs)
+    assert payload[0]["reference_type"] == "character_3d"
+    assert payload[1]["reference_type"] == "face_identity"
+    assert payload[2]["reference_type"] == "face_identity"
+
+
+
 def test_image_generation_passes_references_to_provider(tmp_path, monkeypatch) -> None:
     from backend.media import FaceReferenceImage
 
@@ -128,3 +154,93 @@ def test_image_generation_passes_references_to_provider(tmp_path, monkeypatch) -
     assert seen["conversation_url"] is None
     assert "Identity references are attached for: MARA" in seen["prompt"]
     assert (settings.media_dir / filename).is_file()
+
+
+def test_image_generation_passes_conversation_url_without_followup_edit(tmp_path, monkeypatch) -> None:
+    from backend.media import VisualReferenceImage
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "image_providers", "chatgpt_web")
+    monkeypatch.setattr(media, "image_provider_statuses", lambda: [
+        {"id": "chatgpt_web", "label": "ChatGPT Web", "available": True},
+    ])
+    seen = {}
+
+    def request(provider, prompt, aspect_ratio, progress=None, references=None, conversation_url=None):
+        seen["conversation_url"] = conversation_url
+        seen["prompt"] = prompt
+        return b"\x89PNG\r\n\x1a\nimage", "model", {}
+
+    monkeypatch.setattr(media, "_request_provider_image", request)
+    ref = VisualReferenceImage(data=b"frame", mime_type="image/png", reference_type="edit_target_fallback")
+    filename, mime_type, provider = generate_storyboard_image(
+        "A quiet morning by the shore",
+        "Shore",
+        "Medium",
+        "16:9",
+        references=[ref],
+        conversation_url="https://chatgpt.com/c/active-thread",
+        is_followup_edit=False,
+    )
+
+    assert provider == "chatgpt_web"
+    assert seen["conversation_url"] == "https://chatgpt.com/c/active-thread"
+    assert "Aspect ratio conversion: Reframe and expand/outpaint" in seen["prompt"]
+    assert (settings.media_dir / filename).is_file()
+
+
+def test_generate_storyboard_chatgpt_dual(tmp_path, monkeypatch) -> None:
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    import httpx
+    from backend.media import generate_storyboard_chatgpt_dual
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(media, "image_provider_statuses", lambda: [
+        {"id": "chatgpt_web", "label": "ChatGPT Web", "available": True},
+    ])
+
+    buf1 = BytesIO()
+    Image.new("RGB", (32, 18), color="red").save(buf1, format="PNG")
+    b64_16_9 = base64.b64encode(buf1.getvalue()).decode("ascii")
+
+    buf2 = BytesIO()
+    Image.new("RGB", (18, 32), color="blue").save(buf2, format="PNG")
+    b64_9_16 = base64.b64encode(buf2.getvalue()).decode("ascii")
+
+    sent_payload = {}
+
+    def mock_post(url, headers=None, json=None, timeout=None):
+        sent_payload.update(json or {})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"b64_json": b64_9_16},  # Send 9:16 first to test aspect ratio classifier
+                    {"b64_json": b64_16_9},
+                ],
+                "provider_metadata": {"conversation_url": "https://chatgpt.com/c/dual-test"},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", mock_post)
+
+    (fn_16_9, mime_16_9), (fn_9_16, mime_9_16), provider = generate_storyboard_chatgpt_dual(
+        "A detective in an alley",
+        "Alley",
+        "Medium",
+    )
+
+    assert provider == "chatgpt_web"
+    assert "Create two images, first 16:9 and 9:16" in sent_payload["prompt"]
+    assert sent_payload["n"] == 2
+    assert (settings.media_dir / fn_16_9).is_file()
+    assert (settings.media_dir / fn_9_16).is_file()
+
+    # Verify that fn_16_9 is actually the landscape image and fn_9_16 is portrait
+    with Image.open(settings.media_dir / fn_16_9) as im:
+        assert im.width > im.height
+    with Image.open(settings.media_dir / fn_9_16) as im:
+        assert im.height > im.width

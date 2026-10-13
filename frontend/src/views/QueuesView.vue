@@ -39,6 +39,7 @@ import {
   Zap,
 } from '@lucide/vue'
 import { api, type QueueJobItem, type QueueStat, type QueueSystemStatus, type BridgeStatus, type SystemService } from '@/lib/api'
+import { cutlineWs } from '@/lib/ws'
 import { UiBadge, UiButton, UiCard, UiDialog, UiIconButton, UiInput, UiSelect, UiTooltip } from '@/components/ui'
 
 const router = useRouter()
@@ -498,12 +499,32 @@ function statusTone(status: string): 'success' | 'danger' | 'accent' | 'neutral'
   }
 }
 
+let unsubscribeWs: (() => void) | null = null
+
 onMounted(() => {
   void loadData()
   startPolling()
+  unsubscribeWs = cutlineWs.subscribe((event) => {
+    if (!autoRefresh.value) return
+    if (event.type === 'job.updated') {
+      const idx = jobs.value.findIndex((j) => j.id === event.job.id)
+      if (idx !== -1) {
+        jobs.value[idx] = { ...jobs.value[idx], ...event.job }
+        if (selectedJob.value?.id === event.job.id) {
+          selectedJob.value = jobs.value[idx]
+        }
+      } else {
+        void loadData(true)
+      }
+    }
+  }, null)
 })
 
 onUnmounted(() => {
+  if (unsubscribeWs) {
+    unsubscribeWs()
+    unsubscribeWs = null
+  }
   stopPolling()
   stopLogsPolling()
 })

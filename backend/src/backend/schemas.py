@@ -41,6 +41,35 @@ class EpisodeSummary(BaseModel):
     updated_at: datetime
 
 
+class CompilationCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    episode_ids: list[str] = Field(min_length=1)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompilationUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    episode_ids: list[str] | None = None
+    settings: dict[str, Any] | None = None
+
+
+class CompilationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    title: str
+    description: str | None = None
+    episode_ids: list[str] = []
+    settings: dict[str, Any] = {}
+    created_at: datetime
+    updated_at: datetime
+    duration_ms: int = 0
+    clip_count: int = 0
+
+
 class ProjectUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     episode_label: str | None = Field(default=None, min_length=1, max_length=32)
@@ -111,6 +140,9 @@ class ShotImageRead(BaseModel):
     provider: str
     prompt: str
     created_at: datetime
+    color_boost_strength: float = 0.0
+    can_undo_color: bool = False
+    can_redo_color: bool = False
 
 
 class ShotMediaVariantRead(ShotImageRead):
@@ -133,6 +165,9 @@ class ShotContinuityFrameRead(BaseModel):
     source_shot_title: str
     source_time_ms: int
     created_at: datetime
+    color_boost_strength: float = 0.0
+    can_undo_color: bool = False
+    can_redo_color: bool = False
 
 
 class ShotImageReferenceRead(BaseModel):
@@ -152,6 +187,9 @@ class ShotImageReferenceRead(BaseModel):
     source_time_ms: int | None
     mode: Literal["visual_continuity"]
     created_at: datetime
+    color_boost_strength: float = 0.0
+    can_undo_color: bool = False
+    can_redo_color: bool = False
 
 
 class ShotTakeRead(BaseModel):
@@ -225,7 +263,7 @@ class ShotCreate(BaseModel):
     action: str = Field(default="", max_length=10000)
     dialogue: list[dict[str, Any]] = Field(default_factory=list)
     sound: str = Field(default="", max_length=1000)
-    duration_ms: int = Field(default=5000, ge=1000, le=30000)
+    duration_ms: int = Field(default=5000, ge=1000, le=3_600_000)
 
     @field_validator("duration_ms", mode="before")
     @classmethod
@@ -243,7 +281,7 @@ class ShotCreate(BaseModel):
 
 class ShotUpdate(BaseModel):
     framing: str = Field(min_length=1, max_length=200)
-    duration_ms: int = Field(ge=1000, le=30000)
+    duration_ms: int = Field(ge=1000, le=3_600_000)
 
     @field_validator("duration_ms", mode="before")
     @classmethod
@@ -288,7 +326,7 @@ class SceneRead(BaseModel):
 
 
 class CreateDraftRequest(BaseModel):
-    variant: Literal["landscape", "shorts"] = "landscape"
+    variant: Literal["landscape", "shorts", "both"] = "landscape"
     retry_failed_only: bool = False
 
 
@@ -308,6 +346,11 @@ class SuggestionRead(BaseModel):
     before_value: Any = None
     after_value: Any = None
     status: str
+
+
+class ScriptVersionRestoreRequest(BaseModel):
+    expected_version_id: str
+    expected_fingerprint: str
 
 
 class ScriptVersionRead(BaseModel):
@@ -334,6 +377,7 @@ class CharacterReferenceRead(BaseModel):
     id: str
     url: str
     mime_type: str
+    view_type: str = "main"
     created_at: datetime
 
 
@@ -376,6 +420,7 @@ class CharacterRead(BaseModel):
 
     id: str
     name: str
+    kind: Literal["character", "scene", "prop"] = "character"
     notes: str
     voice_description: str = ""
     voice_provider: str = "vibevoice"
@@ -387,6 +432,7 @@ class CharacterRead(BaseModel):
 
 class CharacterCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    kind: Literal["character", "scene", "prop"] = "character"
     notes: str = Field(default="", max_length=2000)
     voice_description: str = Field(default="", max_length=1000)
     voice_provider: str = "vibevoice"
@@ -396,6 +442,7 @@ class CharacterCreate(BaseModel):
 
 class CharacterUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
+    kind: Literal["character", "scene", "prop"] | None = None
     notes: str | None = Field(default=None, max_length=2000)
     voice_description: str | None = Field(default=None, max_length=1000)
     voice_provider: str | None = Field(default=None, max_length=40)
@@ -409,10 +456,18 @@ class ShotImageGenerateRequest(BaseModel):
     image_reference_id: str | None = Field(default=None, min_length=1)
     aspect_ratio: str | None = None
     use_default_image_reference: bool = False
+    both_aspects: bool = False
+    generate_video: bool = False
+    include_cast_references: bool = False
+    chatgpt_dual: bool = False
 
 
 class ShotClipGenerateRequest(BaseModel):
     include_cast_references: bool = False
+    both_aspects: bool = False
+    video_mode: Literal["i2v", "r2v"] = "i2v"
+    include_scene_reference: bool = True
+    element_ids: list[str] | None = None
 
 
 
@@ -504,6 +559,7 @@ class ProjectDetail(ProjectSummary):
     variant_exports: list[ProjectVariantExportRead] = []
     characters: list[CharacterRead] = []
     publishes: list[PublishRecordRead] = []
+    compilations: list[CompilationRead] = []
 
 
 class TimelineSource(BaseModel):
@@ -517,8 +573,16 @@ class TimelineVariantGeometry(BaseModel):
     focal_x: float = Field(default=0.5, ge=0, le=1)
     focal_y: float = Field(default=0.5, ge=0, le=1)
     zoom: float = Field(default=1, ge=1, le=3)
-    position: Literal["top-left", "top", "top-right", "center", "bottom-left", "bottom", "bottom-right"] = "center"
+    position: Literal["top-left", "top", "top-right", "center", "bottom-left", "bottom", "bottom-right", "full-frame"] = "center"
     scale: float = Field(default=1, ge=0.05, le=2)
+    crop_top: float = Field(default=0, ge=0, le=0.85)
+    crop_bottom: float = Field(default=0, ge=0, le=0.85)
+    crop_left: float = Field(default=0, ge=0, le=0.85)
+    crop_right: float = Field(default=0, ge=0, le=0.85)
+    offset_x: float = Field(default=0, ge=-1.0, le=1.0)
+    offset_y: float = Field(default=0, ge=-1.0, le=1.0)
+    lut: str = "none"
+    lut_strength: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class TimelinePrimaryItem(BaseModel):
@@ -526,7 +590,7 @@ class TimelinePrimaryItem(BaseModel):
     kind: Literal["video", "image", "title"]
     label: str = Field(default="Timeline item", max_length=200)
     source: TimelineSource | None = None
-    duration_ms: int = Field(ge=100, le=300_000)
+    duration_ms: int = Field(ge=100, le=3_600_000)
     source_in_ms: int = Field(default=0, ge=0)
     source_out_ms: int | None = Field(default=None, ge=1)
     text: str = Field(default="", max_length=1000)
@@ -543,11 +607,33 @@ class TimelinePrimaryItem(BaseModel):
         return value
 
 
+class TimelineVideoOverlay(BaseModel):
+    id: str
+    label: str = Field(default="Video layer", max_length=200)
+    source: TimelineSource
+    start_ms: int = Field(ge=0)
+    duration_ms: int = Field(ge=100, le=3_600_000)
+    source_in_ms: int = Field(default=0, ge=0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    mute_audio: bool = False
+    variant: dict[str, TimelineVariantGeometry] = {}
+
+    @field_validator("start_ms", "duration_ms", "source_in_ms", mode="before")
+    @classmethod
+    def _coerce_video_overlay_ms(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(value)
+        return value
+
+
 class TimelineImageOverlay(BaseModel):
     id: str
     source: TimelineSource
     start_ms: int = Field(ge=0)
-    duration_ms: int = Field(ge=100, le=300_000)
+    duration_ms: int = Field(ge=100, le=3_600_000)
     opacity: float = Field(default=1, ge=0, le=1)
     variant: dict[str, TimelineVariantGeometry] = {}
 
@@ -565,7 +651,7 @@ class TimelineTextOverlay(BaseModel):
     id: str
     text: str = Field(min_length=1, max_length=1000)
     start_ms: int = Field(ge=0)
-    duration_ms: int = Field(ge=100, le=300_000)
+    duration_ms: int = Field(ge=100, le=3_600_000)
 
     @field_validator("start_ms", "duration_ms", mode="before")
     @classmethod
@@ -587,7 +673,7 @@ class TimelineAudioOverlay(BaseModel):
     label: str = Field(default="Audio clip", max_length=200)
     source: TimelineSource
     start_ms: int = Field(ge=0)
-    duration_ms: int = Field(ge=100, le=300_000)
+    duration_ms: int = Field(ge=100, le=3_600_000)
     source_in_ms: int = Field(default=0, ge=0)
     volume: float = Field(default=1.0, ge=0.0, le=2.0)
     mute_audio: bool = False
@@ -605,6 +691,7 @@ class TimelineAudioOverlay(BaseModel):
 class TimelineDocument(BaseModel):
     version: Literal[1] = 1
     primary: list[TimelinePrimaryItem]
+    video_overlays: list[TimelineVideoOverlay] = []
     image_overlays: list[TimelineImageOverlay] = []
     text_overlays: list[TimelineTextOverlay] = []
     audio_overlays: list[TimelineAudioOverlay] = []
@@ -647,6 +734,8 @@ class JobRead(BaseModel):
 
     id: str
     project_id: str
+    episode_id: str | None = None
+    compilation_id: str | None = None
     kind: str
     status: str
     progress: float
@@ -698,6 +787,12 @@ class ProviderStatus(BaseModel):
     available: bool
     model: str
     detail: str
+    active_preset: str | None = None
+    presets: list[dict[str, str]] | None = None
+
+
+class FlowModelUpdateRequest(BaseModel):
+    preset: str
 
 
 class ImageProviderStatus(ProviderStatus):

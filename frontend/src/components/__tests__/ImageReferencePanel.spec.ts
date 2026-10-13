@@ -209,4 +209,52 @@ describe('ImageReferencePanel', () => {
     expect((chooseBtn.element as HTMLButtonElement).disabled).toBe(false)
     expect(wrapper.text()).not.toContain('References become available after the first shot.')
   })
+
+  it('triggers Boost Color, step adjustments, undo/redo/reset, and AI Repaint when a reference frame is active', async () => {
+    const wrapper = mountPanel(makeShot({ image_references: [{
+      id: 'ref-1',
+      aspect_ratio: '16:9',
+      mode: 'visual_continuity',
+      created_at: new Date().toISOString(),
+      ...sourceClip,
+      filename: 'image-reference-ref-1.png',
+      source_time_ms: 9967,
+      color_boost_strength: 0.75,
+      can_undo_color: true,
+      can_redo_color: true,
+    }] }))
+    const store = useStudioStore()
+    store.retouchShotReferenceColor = vi.fn().mockResolvedValue(undefined)
+    store.repaintShotReference = vi.fn().mockResolvedValue(undefined)
+
+    const boostBtn = wrapper.get('.reference-retouch-btn')
+    expect(boostBtn.text()).toContain('Boost Color')
+    expect(boostBtn.text()).toContain('+75%')
+    await boostBtn.trigger('click')
+    await flushPromises()
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9')
+
+    await wrapper.get('button[aria-label="Reduce color boost"]').trigger('click')
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9', { action: 'decrease', strength: undefined })
+
+    await wrapper.get('button[aria-label="Increase color boost"]').trigger('click')
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9', { action: 'increase', strength: undefined })
+
+    await wrapper.get('button[aria-label="Undo color change"]').trigger('click')
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9', { action: 'undo', strength: undefined })
+
+    await wrapper.get('button[aria-label="Redo color change"]').trigger('click')
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9', { action: 'redo', strength: undefined })
+
+    await wrapper.get('button[aria-label="Reset color boost"]').trigger('click')
+    expect(store.retouchShotReferenceColor).toHaveBeenCalledWith('shot-3', '16:9', { action: 'reset', strength: undefined })
+
+    const repaintBtn = wrapper.get('.reference-repaint-btn')
+    expect(repaintBtn.text()).toContain('AI Repaint')
+    await repaintBtn.trigger('click')
+    await flushPromises()
+    expect(store.repaintShotReference).toHaveBeenCalledWith('shot-3', '16:9', 'repaint this image')
+  })
 })
+
+

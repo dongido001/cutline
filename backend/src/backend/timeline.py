@@ -1,10 +1,11 @@
+from copy import deepcopy
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .final_cut import probe_duration_ms
-from .models import Episode, Project, ProjectTimeline, Scene, ScriptVersion, Shot, TimelineAsset
+from .models import Compilation, Episode, Project, ProjectTimeline, Scene, ScriptVersion, Shot, TimelineAsset
 from .schemas import TimelineDocument, TimelinePrimaryItem, TimelineSource, TimelineTextOverlay
 from .settings import settings
 
@@ -56,11 +57,13 @@ def initial_document(project: Project, db: Session, episode_id: str | None = Non
     text_overlays: list[dict] = []
     elapsed = 0
     for index, shot in enumerate(latest_shots(project.id, db, episode_id=episode_id)):
-        kind = "video" if shot.clip else "image"
-        source_kind = "shot_clip" if shot.clip else "shot_image"
+        has_clip = bool(shot.clip or any(m.media_type == "clip" for m in shot.media_variants))
+        kind = "video" if has_clip else "image"
+        source_kind = "shot_clip" if has_clip else "shot_image"
         duration_ms = shot.duration_ms
-        if shot.clip:
-            clip_path = settings.media_dir / shot.clip.filename
+        clip_obj = shot.clip or next((m for m in shot.media_variants if m.media_type == "clip"), None)
+        if clip_obj and clip_obj.filename:
+            clip_path = settings.media_dir / clip_obj.filename
             if clip_path.is_file():
                 try:
                     duration_ms = probe_duration_ms(clip_path)
@@ -98,6 +101,7 @@ def initial_document(project: Project, db: Session, episode_id: str | None = Non
     return TimelineDocument(
         version=1,
         primary=primary,
+        video_overlays=[],
         image_overlays=[],
         text_overlays=text_overlays,
     ).model_dump(mode="json")
@@ -163,26 +167,165 @@ def ensure_timeline(project: Project, db: Session, episode_id: str | None = None
     return timeline
 
 
-def promote_available_clips(project: Project, db: Session, episode_id: str | None = None) -> int:
+def _concat_episode_timelines(
+    project: Project,
+    db: Session,
+    episode_ids: list[str],
+    *,
+    prefer_shorts: bool = False,
+) -> dict:
+    """Concatenate episode timelines into one compilation document.
+
+    When prefer_shorts=True, each episode contributes its shorts_document
+    (falling back to landscape document when shorts is missing).
+    """
+    primary: list[dict] = []
+    video_overlays: list[dict] = []
+    image_overlays: list[dict] = []
+    text_overlays: list[dict] = []
+    audio_overlays: list[dict] = []
+    current_offset_ms = 0
+
+    for ep_id in episode_ids or []:
+        ep_timeline = ensure_timeline(project, db, episode_id=ep_id)
+        if prefer_shorts:
+            doc = ep_timeline.shorts_document or ep_timeline.document
+        else:
+            doc = ep_timeline.document
+        if not doc:
+            doc = initial_document(project, db, episode_id=ep_id)
+        ep_duration = 0
+        for item in doc.get("primary", []):
+            item_copy = deepcopy(item)
+            item_copy["id"] = _id()
+            primary.append(item_copy)
+            ep_duration += int(item_copy.get("duration_ms", 0) or 0)
+
+        for vid in doc.get("video_overlays", []):
+            vid_copy = deepcopy(vid)
+            vid_copy["id"] = _id()
+            vid_copy["start_ms"] = int(vid_copy.get("start_ms", 0) or 0) + current_offset_ms
+            video_overlays.append(vid_copy)
+
+        for img in doc.get("image_overlays", []):
+            img_copy = deepcopy(img)
+            img_copy["id"] = _id()
+            img_copy["start_ms"] = int(img_copy.get("start_ms", 0) or 0) + current_offset_ms
+            image_overlays.append(img_copy)
+
+        for txt in doc.get("text_overlays", []):
+            txt_copy = deepcopy(txt)
+            txt_copy["id"] = _id()
+            txt_copy["start_ms"] = int(txt_copy.get("start_ms", 0) or 0) + current_offset_ms
+            text_overlays.append(txt_copy)
+
+        for aud in doc.get("audio_overlays", []):
+            aud_copy = deepcopy(aud)
+            aud_copy["id"] = _id()
+            aud_copy["start_ms"] = int(aud_copy.get("start_ms", 0) or 0) + current_offset_ms
+            audio_overlays.append(aud_copy)
+
+        current_offset_ms += ep_duration
+
+    return TimelineDocument(
+        version=1,
+        primary=primary,
+        video_overlays=video_overlays,
+        image_overlays=image_overlays,
+        text_overlays=text_overlays,
+        audio_overlays=audio_overlays,
+    ).model_dump(mode="json")
+
+
+def ensure_compilation_timeline(db: Session, compilation: Compilation) -> ProjectTimeline:
+    timeline = db.scalar(
+        select(ProjectTimeline).where(
+            ProjectTimeline.project_id == compilation.project_id,
+            ProjectTimeline.compilation_id == compilation.id,
+        )
+    )
+    if timeline:
+        return timeline
+
+    project = db.get(Project, compilation.project_id)
+    if not project:
+        raise ValueError("Project not found for compilation")
+
+    landscape_doc = _concat_episode_timelines(
+        project, db, list(compilation.episode_ids or []), prefer_shorts=False
+    )
+    shorts_doc = _concat_episode_timelines(
+        project, db, list(compilation.episode_ids or []), prefer_shorts=True
+    )
+
+    timeline = ProjectTimeline(
+        project_id=compilation.project_id,
+        compilation_id=compilation.id,
+        revision=1,
+        document=landscape_doc,
+        shorts_document=shorts_doc,
+    )
+    db.add(timeline)
+    db.flush()
+    return timeline
+
+
+def rebuild_compilation_timeline(db: Session, compilation: Compilation) -> ProjectTimeline:
+    """Replace a compilation timeline with a fresh concat of its current episodes."""
+    existing = db.scalar(
+        select(ProjectTimeline).where(
+            ProjectTimeline.project_id == compilation.project_id,
+            ProjectTimeline.compilation_id == compilation.id,
+        )
+    )
+    if existing:
+        db.delete(existing)
+        db.flush()
+    return ensure_compilation_timeline(db, compilation)
+
+
+def promote_available_clips(
+    project: Project,
+    db: Session,
+    episode_id: str | None = None,
+    compilation_id: str | None = None,
+) -> int:
     """Promote default storyboard blocks when their shot now has video media.
 
     Existing timeline timing, trims, and per-variant framing are kept intact.
     Only the source type changes from the shot's still image to its video.
     """
-    if episode_id:
+    if compilation_id:
+        timeline = db.scalar(
+            select(ProjectTimeline).where(
+                ProjectTimeline.project_id == project.id,
+                ProjectTimeline.compilation_id == compilation_id,
+            )
+        )
+        compilation = db.get(Compilation, compilation_id)
+        shots: list[Shot] = []
+        seen: set[str] = set()
+        for ep_id in list(getattr(compilation, "episode_ids", None) or []):
+            for shot in latest_shots(project.id, db, episode_id=ep_id):
+                if shot.id in seen:
+                    continue
+                seen.add(shot.id)
+                shots.append(shot)
+    elif episode_id:
         timeline = db.scalar(
             select(ProjectTimeline).where(
                 ProjectTimeline.project_id == project.id,
                 ProjectTimeline.episode_id == episode_id,
             )
         )
+        shots = latest_shots(project.id, db, episode_id=episode_id)
     else:
         timeline = project.timeline or db.scalar(
             select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)
         )
+        shots = latest_shots(project.id, db, episode_id=episode_id)
     if not timeline:
         return 0
-    shots = latest_shots(project.id, db, episode_id=episode_id)
     clips_by_shot = {
         shot.id: shot
         for shot in shots
@@ -205,8 +348,9 @@ def promote_available_clips(project: Project, db: Session, episode_id: str | Non
                 continue
             shot = clips_by_shot[item.source.ref_id]
             clip_dur = None
-            if shot.clip:
-                clip_path = settings.media_dir / shot.clip.filename
+            clip_obj = shot.clip or next((m for m in shot.media_variants if m.media_type == "clip"), None)
+            if clip_obj and clip_obj.filename:
+                clip_path = settings.media_dir / clip_obj.filename
                 if clip_path.is_file():
                     try:
                         clip_dur = probe_duration_ms(clip_path)
@@ -314,12 +458,19 @@ def timeline_duration(document: TimelineDocument | dict) -> int:
     return sum(item.duration_ms for item in parsed.primary)
 
 
-def validate_timeline(document: TimelineDocument, project: Project, db: Session, episode_id: str | None = None) -> None:
+def validate_timeline(
+    document: TimelineDocument,
+    project: Project,
+    db: Session,
+    episode_id: str | None = None,
+    max_duration_ms: int = 180 * 60 * 1000,
+) -> None:
     total = timeline_duration(document)
     if not document.primary:
         raise ValueError("The timeline needs at least one primary item")
-    if total > 30 * 60 * 1000:
-        raise ValueError("The timeline cannot exceed 30 minutes")
+    if total > max_duration_ms:
+        minutes = max_duration_ms // (60 * 1000)
+        raise ValueError(f"The timeline cannot exceed {minutes} minutes")
 
     ep_shots = {shot.id for shot in latest_shots(project.id, db, episode_id=episode_id)}
     project_shots = set(
@@ -351,9 +502,14 @@ def validate_timeline(document: TimelineDocument, project: Project, db: Session,
                 else:
                     raise ValueError(f"{item.label} duration must match its trim range")
 
-    for overlay in [*document.image_overlays, *document.text_overlays, *document.audio_overlays]:
+    for overlay in [*document.video_overlays, *document.image_overlays, *document.text_overlays, *document.audio_overlays]:
         if overlay.start_ms + overlay.duration_ms > total:
             raise ValueError("An overlay extends beyond the timeline")
+    for overlay in document.video_overlays:
+        if overlay.source.kind == "asset" and overlay.source.ref_id not in assets:
+            raise ValueError("A video overlay uses a missing uploaded asset")
+        if overlay.source.kind != "asset" and overlay.source.ref_id not in shots:
+            raise ValueError("A video overlay uses a missing shot")
     for overlay in document.image_overlays:
         if overlay.source.kind == "asset" and overlay.source.ref_id not in assets:
             raise ValueError("An image overlay uses a missing uploaded asset")

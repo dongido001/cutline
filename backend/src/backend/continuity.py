@@ -211,24 +211,34 @@ _OFFSCREEN_PHONE_CUE_RE = re.compile(
     r"(?:assistant|caller)\s+says\s*,)",
     re.IGNORECASE,
 )
+_OFFSCREEN_CALLER_QUOTE_RE = re.compile(
+    r"(?:Over the (?:filtered\s+)?telephone\s+earpiece,\s+)?(?:unseen\s+caller\s+)?(?P<caller>[A-Z][a-zA-Z0-9_\s\x27-]+?)(?:\x27s\s+[^,\n]+?)?\s+(?:says|delivers[^,\n]*),\s*[\"\u201c](?P<quote>[^\"\u201d]+)[\"\u201d]",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_phone_video_prompt(video_prompt: str) -> str:
-    """Rewrite clauses that place '<Listener>'s mouth' directly before an off-screen caller's quote."""
+    """Rewrite clauses that place '<Listener>'s mouth' directly before an off-screen caller's quote,
+    and sanitize off-screen caller quoted speech so video models do not lip-sync the visible actor."""
     text = _text(video_prompt)
     if not text:
         return text
 
-    def _replace(match: re.Match[str]) -> str:
-        listener = match.group("listener").strip()
-        caller_clause = match.group("caller").strip()
-        quote = match.group("quote").strip()
-        return (
-            f"{listener} listens silently with lips firmly closed and jaw motionless. "
-            f"Over the filtered telephone earpiece, unseen caller ({caller_clause}): {quote}"
-        )
+    text = _MOUTH_STILL_PHONE_QUOTE_RE.sub(
+        lambda m: (
+            f"{m.group('listener').strip()} listens silently with lips firmly closed and jaw motionless. "
+            f"Over the filtered telephone earpiece, unseen caller ({m.group('caller').strip()}): {m.group('quote').strip()}"
+        ),
+        text,
+    )
 
-    return _MOUTH_STILL_PHONE_QUOTE_RE.sub(_replace, text)
+    def _replace_offscreen_quote(match: re.Match[str]) -> str:
+        caller = match.group("caller").strip()
+        return f"Over the filtered telephone earpiece, unseen caller {caller} speaks while the listener remains completely silent with mouth closed and jaw motionless."
+
+    text = _OFFSCREEN_CALLER_QUOTE_RE.sub(_replace_offscreen_quote, text)
+    return text
+
 
 
 def _on_camera_canon_set(snapshot: dict[str, Any], shot: Shot | None = None) -> set[str]:
@@ -306,6 +316,8 @@ def _detect_offscreen_phone_characters(
             found.append((canon, live_char, voice_desc))
 
     search_text = f"{action}\n{video_prompt}\n{sound}"
+    # Strip quoted dialogue strings so names mentioned within dialogue (e.g. "Isabel, send a car...") are not treated as offscreen speakers
+    clean_search = re.sub(r'["\u201c\u201d][^"\u201c\u201d]*["\u201c\u201d]|\'[^\']*\'', ' ', search_text)
     for char in project_chars:
         canon = canonical_character_name(char.name)
         if not canon or canon in seen:
@@ -313,7 +325,17 @@ def _detect_offscreen_phone_characters(
         first = canon.split()[0]
         if canon in on_camera_canons or first in on_camera_canons:
             continue
-        if re.search(rf"\b{re.escape(canon)}\b|\b{re.escape(first)}\b", search_text, re.IGNORECASE):
+        c_pattern = rf"\b(?:{re.escape(canon)}|{re.escape(first)})\b"
+        cue_pattern = re.compile(
+            rf"(?:"
+            rf"{c_pattern}(?:'s)?\s+(?:filtered|phone|handset|earpiece|voice|line|report|speech|audio|call|speaks|says|replies|talking)\b|"
+            rf"(?:listens to|hears|answering|on the (?:phone|line|call) with)\s+{c_pattern}\b|"
+            rf"(?:filtered|phone|handset|earpiece)\s+(?:voice|line|speech|audio)\s+(?:of|from)\s+{c_pattern}\b|"
+            rf"{c_pattern}\s+on the (?:phone|line|other end|call)\b"
+            rf")",
+            re.IGNORECASE,
+        )
+        if cue_pattern.search(clean_search):
             seen.add(canon)
             found.append((canon, char, _resolve_character_voice(char)))
 
@@ -412,7 +434,7 @@ def _collect_voice_entries(
                     fallback_notes=_text(item.get("notes") or sv.get("notes")),
                     is_offscreen_phone=bool(OFFSCREEN_SPEAKER_PATTERN.search(raw_speaker)),
                 )
-    else:
+    elif not re.search(r'\b(?:no\s+(?:spoken\s+words|speech|dialogue|voice|audible)|complete\s+silence|without\s+saying\s+any\s+words)\b', video_prompt, re.IGNORECASE):
         for item in characters:
             if not isinstance(item, dict):
                 continue
@@ -493,11 +515,37 @@ def _phone_routing_instruction(
         "in the local space; do not apply telephone, radio, or speakerphone filtering to on-camera speech."
     )
 
+    raw_on_camera_names: list[str] = []
+    for item in snapshot.get("characters") or []:
+        if isinstance(item, dict) and _text(item.get("name")):
+            name = canonical_character_name(_text(item.get("name")))
+            if name and name not in raw_on_camera_names:
+                raw_on_camera_names.append(name)
+    if not raw_on_camera_names and shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
+        project = shot.scene.script_version.project
+        if project is not None:
+            selected = set(shot.character_ids or [])
+            for char in project.characters or []:
+                if char.id in selected and char.name:
+                    name = canonical_character_name(char.name)
+                    if name and name not in raw_on_camera_names:
+                        raw_on_camera_names.append(name)
+
+    silent_on_camera = [
+        name for name in raw_on_camera_names
+        if name not in on_camera_speakers and name.split()[0] not in on_camera_speakers
+    ]
+    silent_clause = (
+        f" Silent character lock: {', '.join(silent_on_camera)}'s lips and jaw MUST remain completely closed and motionless at all times — do NOT lip-sync {', '.join(silent_on_camera)} to any speech or audio."
+        if silent_on_camera
+        else ""
+    )
+
     has_offscreen_phone_speech = bool(
         offscreen_phone_chars or _OFFSCREEN_PHONE_CUE_RE.search(f"{video_prompt}\n{sound}")
     )
     if not has_offscreen_phone_speech:
-        return base_routing
+        return f"{base_routing}{silent_clause}"
 
     offscreen_label = (
         ", ".join(canon for canon, _, _ in offscreen_phone_chars)
@@ -511,7 +559,7 @@ def _phone_routing_instruction(
         f"Lip-sync lock: {offscreen_label} is an unseen off-screen telephone caller heard ONLY as filtered, "
         f"band-limited earpiece voice-over — {speakers_label}'s lips and jaw MUST remain completely closed and "
         f"motionless in silent listening while {offscreen_label}'s phone line plays, and {speakers_label}'s mouth "
-        f"must move ONLY when speaking {speakers_label}'s own on-camera dialogue{lines_clause}."
+        f"must move ONLY when speaking {speakers_label}'s own on-camera dialogue{lines_clause}.{silent_clause}"
     )
 
 

@@ -11,9 +11,23 @@ SHOT_HEADING = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 FIELD_HEADING = re.compile(
-    r"^(?P<field>Scene|Location|Time of day|Time|Framing|Action|Dialogue|(?:Final )?Sound|Image prompt|Video prompt):\s*(?P<value>.*)$",
+    r"^(?P<field>Scene|Location|Set|Props|Time of day|Time|Framing|Cast|Characters|Action|Dialogue|(?:Final )?Sound|Image prompt|Video prompt):\s*(?P<value>.*)$",
     re.IGNORECASE,
 )
+
+
+def parse_explicit_cast_names(raw: str) -> list[str]:
+    """Parse comma/and separated character names from a 'Cast:' or 'Characters:' line."""
+    cleaned = raw.strip()
+    if not cleaned or cleaned.lower() in {"none", "none.", "n/a", "nobody", "no one", "-", "empty"}:
+        return []
+    parts = re.split(r",|\band\b|&|/|;", cleaned, flags=re.IGNORECASE)
+    names: list[str] = []
+    for part in parts:
+        name = part.strip().strip("\"'").strip()
+        if name and name.lower() not in {"none", "n/a", "nobody", "no one"}:
+            names.append(name)
+    return names
 TIME_RANGE = re.compile(
     r"(?P<start>\d{1,2}:\d{2}(?::\d{2})?)\s*[\u2014\u2013-]\s*"
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?)"
@@ -25,7 +39,7 @@ CHARACTER_SECTION_STOP = re.compile(
     r"(?im)^(?:#{1,6}\s*)?(?:Location|Genre|Duration|Format|Aspect ratio|SHOT\s+\d+|SCENE|OPENING|---)\b"
 )
 CHARACTER_LINE = re.compile(
-    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9' .\-,/\"\u201c\u201d\u2018\u2019\(\)]{0,80}?)(?:\*\*)?"
+    r"^(?:\*\*)?(?P<name>[A-Z][A-Z0-9_' .\-,/\"\u201c\u201d\u2018\u2019\(\)]{0,80}?)(?:\*\*)?"
     r"(?:\s*\((?P<role>[^)]+)\))?"
     r"\s*[—–\-:]\s*(?P<notes>.+)$"
 )
@@ -285,7 +299,46 @@ def _is_character_cue(value: str) -> bool:
 
 
 def _clean_dialogue_text(value: str) -> str:
-    return value.strip().strip('"\'\u201c\u201d\u2018\u2019').strip()
+    cleaned = value.strip()
+    cleaned = re.sub(
+        r"\s*\(\s*Alternative\b[^)]*\)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    lead_paren = re.match(
+        r"^\([^)]+\)\s*[\"\'\u201c\u2018]+(.+?)[\"\'\u201d\u2019]*$",
+        cleaned,
+    )
+    if lead_paren:
+        cleaned = lead_paren.group(1).strip()
+    return cleaned.strip('"\'\u201c\u201d\u2018\u2019').strip()
+
+
+def _split_inline_quote_and_action(value: str) -> tuple[str, str]:
+    """If a dialogue string has a closing quote followed by narrative action, split them."""
+    cleaned = value.strip()
+    cleaned = re.sub(
+        r"\s*\(\s*Alternative\b[^)]*\)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    match = re.match(
+        r"^(?:\([^)]+\)\s*)?[\"\u201c]?(.+?)[\"\u201d]\s+(.+)$",
+        cleaned,
+    )
+    if not match:
+        return _clean_dialogue_text(cleaned), ""
+    speech = _clean_dialogue_text(match.group(1))
+    tail = match.group(2).strip()
+    tail = re.sub(
+        r"\s*None after [^.]+(?:\.|$)",
+        "",
+        tail,
+        flags=re.IGNORECASE,
+    ).strip()
+    return speech, tail
 
 
 def _is_none_marker(value: str) -> bool:
@@ -305,9 +358,12 @@ def _split_dialogue_and_interleaved_action(
 
     def flush() -> None:
         nonlocal character, text_lines, in_quoted_dialogue
-        text_value = _clean_dialogue_text(" ".join(text_lines))
+        raw_joined = " ".join(text_lines)
+        text_value, trailing_action = _split_inline_quote_and_action(raw_joined)
         if character and text_value and not _is_none_marker(text_value):
             dialogue.append({"character": character, "text": text_value})
+        if trailing_action and not _is_none_marker(trailing_action):
+            extra_action.append(trailing_action)
         character = None
         text_lines = []
         in_quoted_dialogue = False
@@ -325,19 +381,27 @@ def _split_dialogue_and_interleaved_action(
             character = stripped.rstrip(":").strip()
             continue
         if character is not None:
-            starts_quoted = stripped.startswith(OPEN_QUOTES)
-            ends_quoted = stripped.endswith(CLOSE_QUOTES) and len(stripped) > 1
+            cleaned_line = re.sub(
+                r"\s*\(\s*Alternative\b[^)]*\)\s*$",
+                "",
+                stripped,
+                flags=re.IGNORECASE,
+            ).strip()
+            starts_quoted = cleaned_line.startswith(OPEN_QUOTES) or bool(
+                re.match(r"^\([^)]+\)\s*[\"\'\u201c\u2018]", cleaned_line)
+            )
+            ends_quoted = cleaned_line.endswith(CLOSE_QUOTES) and len(cleaned_line) > 1
             if not text_lines:
                 in_quoted_dialogue = starts_quoted
-                text_lines.append(stripped)
+                text_lines.append(cleaned_line)
                 if in_quoted_dialogue and ends_quoted:
                     flush()
             elif in_quoted_dialogue:
-                text_lines.append(stripped)
+                text_lines.append(cleaned_line)
                 if ends_quoted:
                     flush()
             else:
-                text_lines.append(stripped)
+                text_lines.append(cleaned_line)
         else:
             extra_action.append(stripped)
 
@@ -485,6 +549,12 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
                 fields.setdefault(current_field, [])
                 if heading.group("value").strip():
                     fields[current_field].append(heading.group("value").strip())
+            elif re.match(
+                r"^(?:[=\-*_]{4,}|END\s+OF\s+(?:EPISODE|SCRIPT|ACT|PART|SCENE)\b.*|THE\s+END\.?)$",
+                line,
+                re.IGNORECASE,
+            ):
+                current_field = None
             elif current_field is not None:
                 fields[current_field].append(line)
 
@@ -530,6 +600,13 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
             )
         )
 
+        explicit_cast_field = _field_text(fields, "cast") or _field_text(fields, "characters")
+        explicit_cast = (
+            parse_explicit_cast_names(explicit_cast_field)
+            if ("cast" in fields or "characters" in fields)
+            else None
+        )
+
         shot = {
             "order_index": 0,
             "title": title,
@@ -542,6 +619,7 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
             "framing": framing or "Unspecified",
             "image_prompt": image_prompt,
             "video_prompt": video_prompt,
+            "explicit_cast": explicit_cast,
         }
         scenes.append(
             {

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   BookOpen,
   Bot,
+  Boxes,
   Check,
   ChevronDown,
   ChevronRight,
@@ -15,16 +16,22 @@ import {
   ExternalLink,
   FileText,
   Film,
+  History,
   Image,
   ListChecks,
+  Maximize2,
   MessageSquare,
   MessageSquareText,
   Mic,
+  Minus,
   MoreHorizontal,
+  Palette,
   Pause,
   Play,
   Plus,
+  Redo2,
   RefreshCw,
+  RotateCcw,
   Save,
   Scissors,
   Settings,
@@ -32,12 +39,13 @@ import {
   SkipForward,
   Sparkles,
   Trash2,
+  Undo2,
   Upload,
   Video,
   Volume2,
   X,
 } from '@lucide/vue'
-import { api, type AspectRatio, type Character, type OutputVariant, type ProjectInput, type ProjectSummary, type Scene, type Shot, type ShotTake, type Suggestion } from '@/lib/api'
+import { api, DEFAULT_FLOW_PRESETS, videoColorBoostFilter, type AspectRatio, type Character, type ElementKind, type OutputVariant, type ProjectInput, type ProjectSummary, type ReferenceColorRetouchAction, type Scene, type Shot, type ShotTake, type Suggestion } from '@/lib/api'
 import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
@@ -47,6 +55,8 @@ import CastManagerModal from '@/components/CastManagerModal.vue'
 import DeepReviewPanel from '@/components/DeepReviewPanel.vue'
 import EpisodeSwitcher from '@/components/EpisodeSwitcher.vue'
 import OriginalScriptModal from '@/components/OriginalScriptModal.vue'
+import ScriptHistoryModal from '@/components/ScriptHistoryModal.vue'
+import CompilationManagerModal from '@/components/CompilationManagerModal.vue'
 
 interface DisplaySuggestion {
   id: string | number
@@ -104,6 +114,13 @@ const castRefTargetId = ref<string | null>(null)
 const selectedCharacterIds = ref<string[]>([])
 const newCharacterName = ref('')
 const castingBusy = ref(false)
+const activeElementTab = ref<ElementKind>('character')
+const videoGenerationMode = ref<'i2v' | 'r2v'>('i2v')
+const includeSceneRefInR2V = ref(true)
+const mentionField = ref<'video_prompt' | 'image_prompt' | null>(null)
+const mentionQuery = ref('')
+const mentionStartIndex = ref(-1)
+const mentionActiveIdx = ref(0)
 const clipUploadInput = ref<HTMLInputElement | null>(null)
 const produceDetailOpen = ref(false)
 const showPromptEditor = ref(false)
@@ -111,8 +128,17 @@ const pendingPromptEditor = ref(false)
 const expandedProduceShotIds = ref<string[]>([])
 const continuityDrafts = reactive<Record<string, { set_notes: string; lighting_notes: string; wardrobe_notes: string; props_notes: string }>>({})
 const continuitySavingIds = ref<string[]>([])
-const mediaAspect = ref<AspectRatio>('16:9')
-const finalCutAspect = ref<AspectRatio>('16:9')
+function parseAspectParam(raw: unknown): AspectRatio | null {
+  if (typeof raw !== 'string') return null
+  const normalized = raw.trim().toLowerCase()
+  if (normalized === '16:9' || normalized === '16x9' || normalized === 'landscape') return '16:9'
+  if (normalized === '9:16' || normalized === '9x16' || normalized === 'shorts' || normalized === 'portrait') return '9:16'
+  return null
+}
+
+const mediaAspect = ref<AspectRatio>(parseAspectParam(route.query.aspect ?? route.query.variant) ?? '16:9')
+const finalCutAspect = ref<AspectRatio>(parseAspectParam(route.query.variant ?? route.query.aspect) ?? '16:9')
+const generateBothAspects = ref(false)
 const previewVideo = ref<HTMLVideoElement | null>(null)
 const storyboardVideo = ref<HTMLVideoElement | null>(null)
 const continuationForm = reactive({ script: '', target_duration_seconds: 30 })
@@ -126,13 +152,15 @@ Requirements:
 - Number every shot consecutively.
 - Timings must be continuous, with no gaps or overlaps.
 - The final shot must end at the declared total duration.
-- Every shot must include framing, visible action, sound, an image prompt, and a video prompt.
+- Every shot must include framing, cast, visible action, sound, an image prompt, and a video prompt.
+- Explicitly declare "Cast: [Character names separated by commas]" or "Cast: None" for each shot.
 - Give consecutive shots the same compact Scene label when they share a production sequence.
-- Put spoken dialogue under the action using an uppercase character cue.
+- Put spoken dialogue under the action using a clean uppercase character cue (e.g. GABE:).
 - Write "Dialogue: None." when nobody speaks.
-- Keep character appearance, clothing, location, lighting, and important props consistent between shots.
-- Image prompts must describe one clear starting frame.
-- Video prompts must describe movement, camera motion, expressions, and continuity for that exact shot.
+- Define Characters, Locations, and Props in the preamble so reference assets are locked across shots.
+- Use uppercase @mentions (e.g. @CHARACTER_NAME, @PROP_NAME, @LOCATION_NAME) in Image prompt, Video prompt, and Action so references lock to them.
+- Image prompts must describe one clear starting frame using @mentions for characters, props, and location.
+- Video prompts must describe camera motion, character movement, expressions, and continuity using @mentions.
 - Return only the screenplay. Do not add explanations or Markdown fences.
 
 Follow this exact structure:
@@ -146,29 +174,33 @@ Aspect ratio: [ratio]
 
 Character consistency
 
-[Describe each recurring character precisely.]
+[CHARACTER_NAME] — [Describe physical appearance, age, distinctive features, wardrobe, and speaking voice profile.]
 
 Location: [Describe the primary location and visual continuity.]
+Set: [Describe architectural set details, furnishings, and lighting atmosphere.]
+Props: [Semicolon-separated list of recurring hero props with visual descriptions, e.g. Gold fountain pen; Folded settlement document]
 
 SHOT 1 - [SHOT TITLE]
 
 Scene: [COMPACT SCENE LABEL]
+Location: [SHOT LOCATION]
 Time: 00:00-00:06
 Framing: [framing]
+Cast: [Character names separated by commas, or "None"]
 
 Action:
-[Visible action during this shot.]
+[Visible action during this shot. Reference @CHARACTER_NAME and @PROP_NAME when interacting.]
 
-[CHARACTER NAME]:
+[CHARACTER_NAME]:
 "[Dialogue]"
 
 Sound: [Ambient sound, speech, music, and sound effects.]
 
 Image prompt:
-[Describe the starting frame, character identity, clothing, location, lighting, composition, style, aspect ratio, and exclusions.]
+[Describe the starting frame featuring @CHARACTER_NAME, @PROP_NAME, and @LOCATION_NAME with composition, style, lighting, and aspect ratio.]
 
 Video prompt:
-[Describe animation, character movement, camera movement, expressions, lip synchronization when needed, environmental motion, and identity preservation.]
+[Describe camera motion, movement of @CHARACTER_NAME interacting with @PROP_NAME in @LOCATION_NAME, facial expressions, and continuity.]
 
 Continue with SHOT 2 and the same fields until the declared duration is reached.`
 const shotDraft = reactive({ framing: 'Medium', duration_ms: 5000, image_prompt: '', video_prompt: '', title_card_text: '' })
@@ -247,20 +279,57 @@ const skipDefaultImageReference = ref(false)
 watch(() => selectedShot.value?.id, () => {
   skipDefaultImageReference.value = false
 })
-function resolveActiveShotMedia(shot: Shot | null | undefined, mediaType: 'image' | 'clip', aspect: AspectRatio) {
+function resolveActiveShotMedia(
+  shot: Shot | null | undefined,
+  mediaType: 'image' | 'clip',
+  aspect: AspectRatio,
+  allowFallback = true,
+) {
   if (!shot) return null
   const variant = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === aspect)
   const legacy = store.currentProject?.aspect_ratio === aspect ? (mediaType === 'clip' ? shot.clip : shot.image) : null
   const hasSlot = Boolean(variant || legacy)
-  if (!hasSlot) return null
   const selectedId = mediaType === 'clip' ? shot.selected_clip_take_id : shot.selected_image_take_id
   const activeTake = shot.takes?.find(
     (t) =>
       t.media_type === mediaType &&
       t.aspect_ratio === aspect &&
-      (t.selected || (selectedId && t.id === selectedId))
+      (t.selected || (selectedId && t.id === selectedId)),
   )
-  return activeTake ?? variant ?? legacy
+  if (activeTake || hasSlot) {
+    const media = activeTake ?? variant ?? legacy
+    if (media) {
+      const isAdapted = variant?.source === 'adapted' || (media as any).source === 'adapted'
+      return {
+        ...media,
+        isAdapted,
+        adaptedFrom: isAdapted ? (aspect === '16:9' ? '9:16' : '16:9') : undefined,
+      }
+    }
+  }
+
+  if (!allowFallback) return null
+
+  // If no native slot/take exists for this aspect ratio, adapt from the other aspect ratio
+  const otherAspect: AspectRatio = aspect === '16:9' ? '9:16' : '16:9'
+  const fallbackVariant = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === otherAspect)
+  const fallbackLegacy = (mediaType === 'clip' ? shot.clip : shot.image)
+  const fallbackTake = shot.takes?.find(
+    (t) =>
+      t.media_type === mediaType &&
+      t.aspect_ratio === otherAspect &&
+      (t.selected || (selectedId && t.id === selectedId)),
+  ) ?? shot.takes?.filter((t) => t.media_type === mediaType && t.aspect_ratio === otherAspect).pop()
+
+  const fallback = fallbackTake ?? fallbackVariant ?? fallbackLegacy ?? null
+  if (fallback && (fallback as any).url) {
+    return {
+      ...fallback,
+      isAdapted: true,
+      adaptedFrom: otherAspect,
+    }
+  }
+  return null
 }
 const selectedAspectImage = computed(() => resolveActiveShotMedia(selectedShot.value, 'image', mediaAspect.value))
 const selectedAspectReference = computed(() => {
@@ -271,6 +340,82 @@ const selectedAspectReference = computed(() => {
     ?? null
 })
 const selectedAspectClip = computed(() => resolveActiveShotMedia(selectedShot.value, 'clip', mediaAspect.value))
+const hasNativeAspectClip = computed(() => {
+  const clip = resolveActiveShotMedia(selectedShot.value, 'clip', mediaAspect.value, false)
+  return Boolean(clip && !(clip as any).isAdapted)
+})
+const hasNativeAspectImage = computed(() => {
+  const img = resolveActiveShotMedia(selectedShot.value, 'image', mediaAspect.value, false)
+  return Boolean(img && !(img as any).isAdapted)
+})
+const showStillImageInstead = ref(false)
+watch(
+  [() => selectedShot.value?.id, () => mediaAspect.value],
+  () => {
+    showStillImageInstead.value =
+      !hasNativeAspectClip.value && (hasNativeAspectImage.value || Boolean(selectedAspectReference.value))
+  },
+  { immediate: true },
+)
+watch(
+  () => hasNativeAspectClip.value,
+  (hasClip) => {
+    if (hasClip) {
+      showStillImageInstead.value = false
+    }
+  },
+)
+const shouldDisplayClip = computed(() => {
+  if (!selectedAspectClip.value) return false
+  if (showStillImageInstead.value) return false
+  return true
+})
+const selectedAspectClipSlot = computed(() => {
+  const shot = selectedShot.value
+  if (!shot) return null
+  const variant = shot.media_variants.find((item) => item.media_type === 'clip' && item.aspect_ratio === mediaAspect.value)
+  const legacy = store.currentProject?.aspect_ratio === mediaAspect.value ? shot.clip : null
+  const otherAspect: AspectRatio = mediaAspect.value === '16:9' ? '9:16' : '16:9'
+  const fallbackVariant = shot.media_variants.find((item) => item.media_type === 'clip' && item.aspect_ratio === otherAspect)
+  return variant ?? legacy ?? shot.clip ?? fallbackVariant ?? null
+})
+const retouchingClipColor = ref(false)
+const currentClipBoostStrength = computed(() => Number(selectedAspectClipSlot.value?.color_boost_strength ?? 0))
+const currentClipBoostPercent = computed(() => Math.round(currentClipBoostStrength.value * 100))
+const canUndoClipColor = computed(() => Boolean(selectedAspectClipSlot.value?.can_undo_color))
+const canRedoClipColor = computed(() => Boolean(selectedAspectClipSlot.value?.can_redo_color))
+const clipBoostBadgeLabel = computed(() => {
+  const pct = currentClipBoostPercent.value
+  if (pct === 0) return ''
+  return pct > 0 ? `+${pct}%` : `${pct}%`
+})
+const clipBoostButtonTitle = computed(() => {
+  if (currentClipBoostPercent.value === 100) {
+    return 'Standard +100% video color boost is active — use - / + to step by 25%, or Reset to restore 0%'
+  }
+  if (currentClipBoostPercent.value === 0) {
+    return 'Apply standard +100% video color & contrast boost preset'
+  }
+  return `Return to standard +100% video color boost preset (currently ${clipBoostBadgeLabel.value})`
+})
+async function runClipColorAction(action?: ReferenceColorRetouchAction, strength?: number) {
+  if (!selectedShot.value || !selectedAspectClip.value || retouchingClipColor.value) return
+  retouchingClipColor.value = true
+  try {
+    await store.retouchShotClipColor(
+      selectedShot.value.id,
+      mediaAspect.value,
+      action ? { action, strength } : undefined,
+    )
+  } finally {
+    retouchingClipColor.value = false
+  }
+}
+const otherAspect = computed<AspectRatio>(() => mediaAspect.value === '9:16' ? '16:9' : '9:16')
+const otherAspectImage = computed(() => resolveActiveShotMedia(selectedShot.value, 'image', otherAspect.value))
+const otherAspectClip = computed(() => resolveActiveShotMedia(selectedShot.value, 'clip', otherAspect.value))
+const otherAspectMedia = computed(() => otherAspectImage.value || otherAspectClip.value)
+const canExpandFromOtherAspect = computed(() => !selectedAspectImage.value && !selectedAspectClip.value && !selectedAspectReference.value && Boolean(otherAspectMedia.value))
 const selectedShotScene = computed(() => scenes.value.find((scene) => scene.shots.some((shot) => shot.id === selectedShot.value?.id)))
 const selectedShotConversationUrl = computed(() => {
   const shot = selectedShot.value
@@ -318,16 +463,172 @@ const selectedShotLabel = computed(() => {
   if (!selectedShot.value || !selectedShotScene.value) return 'No shot selected'
   return `Scene ${String(selectedShotScene.value.order_index + 1).padStart(2, '0')} · Shot ${String(selectedShot.value.order_index + 1).padStart(2, '0')}`
 })
-const clipCount = computed(() => allShots.value.filter((shot) => shot.clip).length)
-const mediaReadyCount = computed(() => allShots.value.filter((shot) => shot.clip || shot.image).length)
+const clipCount = computed(() => allShots.value.filter((shot) => shotMedia(shot, 'clip')).length)
+const mediaReadyCount = computed(() => allShots.value.filter((shot) => shotMedia(shot, 'clip') || shotMedia(shot, 'image')).length)
 const finalCutReady = computed(() => allShots.value.length > 0 && mediaReadyCount.value === allShots.value.length)
 const imageGenerationAvailable = computed(() => store.imageProviders.some((provider) => provider.available))
 const imageProviderOrder = computed(() => store.imageProviders.map((provider) => provider.label).join(' → ') || 'No image provider configured')
 const selectedImageJob = computed(() => selectedShot.value ? store.imageJobs[selectedShot.value.id] ?? null : null)
+const isProcessingActiveClip = computed(() => {
+  if (!selectedShot.value) return false
+  return store.isProcessingClip(selectedShot.value.id, mediaAspect.value)
+})
+const isProcessingActiveImage = computed(() => {
+  if (!selectedShot.value) return false
+  return store.isProcessingShot(selectedShot.value.id, mediaAspect.value)
+})
+const isProcessingActiveStoryboard = computed(() => {
+  return isProcessingActiveClip.value || isProcessingActiveImage.value
+})
+const activeStoryboardProcessingMessage = computed(() => {
+  if (!selectedShot.value) return 'Processing…'
+  if (isProcessingActiveClip.value) {
+    return store.clipJobs[selectedShot.value.id]?.message || 'Generating video'
+  }
+  return selectedImageJob.value?.message || 'Rendering storyboard'
+})
+function isProcessingAspect(shotId: string, aspect: AspectRatio) {
+  return store.isProcessingShot(shotId, aspect) || store.isProcessingClip(shotId, aspect)
+}
 const castCharacters = computed(() => store.currentProject?.characters ?? [])
+const characterElements = computed(() =>
+  castCharacters.value.filter((item) => (item.kind || 'character') === 'character'),
+)
+const sceneElements = computed(() =>
+  castCharacters.value.filter((item) => item.kind === 'scene'),
+)
+const propElements = computed(() =>
+  castCharacters.value.filter((item) => item.kind === 'prop'),
+)
+const visibleLibraryElements = computed(() =>
+  castCharacters.value.filter((item) => (item.kind || 'character') === activeElementTab.value),
+)
+function elementTag(element: Character): string {
+  return (element.name || 'ELEMENT')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+}
+function elementHas3DView(element: Character): boolean {
+  return element.references.some((ref) => ref.view_type === '3d_view')
+}
+function elementPrimaryReference(element: Character) {
+  const threeD = element.references.filter((ref) => ref.view_type === '3d_view')
+  if (threeD.length) return threeD[threeD.length - 1]!
+  return element.references[element.references.length - 1] ?? null
+}
 const selectedCast = computed(() =>
   castCharacters.value.filter((character) => selectedCharacterIds.value.includes(character.id)),
 )
+const detectedPromptMentionElements = computed(() => {
+  const text = `${shotDraft.video_prompt || ''} ${shotDraft.image_prompt || ''}`.toUpperCase()
+  if (!text.includes('@')) return []
+  return castCharacters.value.filter((el) => {
+    const tag = elementTag(el)
+    const rawName = el.name.trim().toUpperCase()
+    return (tag && text.includes(`@${tag}`)) || (rawName && text.includes(`@${rawName}`))
+  })
+})
+const autoMatchedSceneElement = computed(() => {
+  if (!includeSceneRefInR2V.value || !selectedShotScene.value) return null
+  const loc = (selectedShotScene.value.location || selectedShotScene.value.title || '').trim().toLowerCase()
+  if (!loc) return null
+  return (
+    sceneElements.value.find((sc) => {
+      const name = sc.name.trim().toLowerCase()
+      return name && (name === loc || loc.includes(name) || name.includes(loc))
+    }) ?? null
+  )
+})
+const r2vAttachedElements = computed(() => {
+  const seen = new Set<string>()
+  const result: Character[] = []
+  const pushUnique = (el: Character | null | undefined) => {
+    if (!el || seen.has(el.id) || result.length >= 7) return
+    seen.add(el.id)
+    result.push(el)
+  }
+  for (const el of selectedCast.value) pushUnique(el)
+  for (const el of detectedPromptMentionElements.value) pushUnique(el)
+  if (autoMatchedSceneElement.value) pushUnique(autoMatchedSceneElement.value)
+  return result
+})
+const r2vReadyReferenceCount = computed(() => {
+  const elementRefs = r2vAttachedElements.value.filter((el) => el.references.length > 0).length
+  const contRef = selectedAspectReference.value ? 1 : 0
+  return Math.min(7, elementRefs + contRef)
+})
+const canGenerateClipNow = computed(() => {
+  if (videoGenerationMode.value === 'r2v') {
+    return r2vReadyReferenceCount.value > 0 || Boolean(selectedAspectImage.value)
+  }
+  return Boolean(selectedAspectImage.value || selectedAspectReference.value)
+})
+const mentionSuggestions = computed(() => {
+  if (!mentionField.value) return []
+  const q = mentionQuery.value.trim().toLowerCase()
+  return castCharacters.value.filter((el) => {
+    if (!q) return true
+    const tag = elementTag(el).toLowerCase()
+    const name = el.name.toLowerCase()
+    const kind = (el.kind || 'character').toLowerCase()
+    return tag.includes(q) || name.includes(q) || kind.includes(q)
+  }).slice(0, 8)
+})
+function handlePromptTextareaInput(field: 'video_prompt' | 'image_prompt', event: Event) {
+  const target = event.target as HTMLTextAreaElement
+  const cursor = target.selectionStart ?? target.value.length
+  const before = target.value.slice(0, cursor)
+  const match = before.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/)
+  if (match) {
+    mentionField.value = field
+    mentionQuery.value = match[1] ?? ''
+    mentionStartIndex.value = cursor - (match[1]?.length ?? 0) - 1
+    mentionActiveIdx.value = 0
+  } else if (mentionField.value === field) {
+    mentionField.value = null
+  }
+  for (const el of detectedPromptMentionElements.value) {
+    if (!selectedCharacterIds.value.includes(el.id)) {
+      selectedCharacterIds.value = [...selectedCharacterIds.value, el.id]
+    }
+  }
+}
+function handlePromptTextareaKeydown(field: 'video_prompt' | 'image_prompt', event: KeyboardEvent) {
+  if (mentionField.value !== field || !mentionSuggestions.value.length) return
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    mentionActiveIdx.value = (mentionActiveIdx.value + 1) % mentionSuggestions.value.length
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    mentionActiveIdx.value = (mentionActiveIdx.value - 1 + mentionSuggestions.value.length) % mentionSuggestions.value.length
+  } else if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault()
+    const picked = mentionSuggestions.value[mentionActiveIdx.value]
+    if (picked) insertElementMention(picked, field)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    mentionField.value = null
+  }
+}
+function insertElementMention(element: Character, field: 'video_prompt' | 'image_prompt' = mentionField.value || 'video_prompt') {
+  const tag = `@${elementTag(element)}`
+  const current = shotDraft[field] || ''
+  if (mentionField.value === field && mentionStartIndex.value >= 0) {
+    const afterStart = current.slice(mentionStartIndex.value)
+    const replacedAfter = afterStart.replace(/^@[A-Za-z0-9_-]*/, `${tag} `)
+    shotDraft[field] = current.slice(0, mentionStartIndex.value) + replacedAfter
+  } else if (!current.toUpperCase().includes(tag)) {
+    shotDraft[field] = current.trim() ? `${current.trim()} ${tag} ` : `${tag} `
+  }
+  if (!selectedCharacterIds.value.includes(element.id)) {
+    selectedCharacterIds.value = [...selectedCharacterIds.value, element.id]
+  }
+  mentionField.value = null
+  mentionQuery.value = ''
+  mentionStartIndex.value = -1
+}
 const managingCharacterId = ref<string | null>(null)
 const managingCharacter = computed(() =>
   castCharacters.value.find((character) => character.id === managingCharacterId.value) ?? null,
@@ -383,6 +684,19 @@ const selectedShotVideoPrompt = computed(() => {
 })
 const copiedShotPrompt = ref(false)
 const includeCastRefsInVideo = ref(false)
+const userModifiedCharacterIds = reactive<Record<string, string[]>>({})
+const userCastRefOverrides = reactive<Record<string, boolean>>({})
+
+function handleToggleCastRefs(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  includeCastRefsInVideo.value = checked
+  if (selectedShot.value) {
+    userCastRefOverrides[selectedShot.value.id] = checked
+    try {
+      localStorage.setItem(`cutline:cast_refs:${selectedShot.value.id}`, String(checked))
+    } catch {}
+  }
+}
 
 function imageJobForShot(shotId: string) {
   return store.imageJobs[shotId] ?? null
@@ -391,8 +705,12 @@ function imageJobForShot(shotId: string) {
 function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
   if (!shot) return []
   const valid = new Set(castCharacters.value.map((character) => character.id))
+  if (shot.id in userModifiedCharacterIds) {
+    return userModifiedCharacterIds[shot.id].filter((id) => valid.has(id))
+  }
   const persisted = (shot.character_ids || []).filter((id) => valid.has(id))
   if (persisted.length) return persisted
+  if (Array.isArray(shot.character_ids) && (shot as any)._charactersExplicitlyEmpty) return []
 
   const dialogueNames = new Set(
     shot.dialogue.map((line) => line.character.trim().toLowerCase()).filter(Boolean),
@@ -401,13 +719,19 @@ function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
   return castCharacters.value
     .filter((character) => {
       const name = character.name.trim().toLowerCase()
+      const tag = `@${elementTag(character).toLowerCase()}`
       if (!name) return false
-      return dialogueNames.has(name) || prompt.includes(name)
+      return dialogueNames.has(name) || prompt.includes(name) || prompt.includes(tag)
     })
     .map((character) => character.id)
 }
 
 function syncSelectedCharactersForShot(shot: Shot | null | undefined) {
+  if (!shot) return
+  if (shot.id in userModifiedCharacterIds) {
+    selectedCharacterIds.value = userModifiedCharacterIds[shot.id]
+    return
+  }
   const defaults = defaultCharacterIdsForShot(shot)
   const valid = new Set(castCharacters.value.map((character) => character.id))
   selectedCharacterIds.value = defaults.length
@@ -415,11 +739,27 @@ function syncSelectedCharactersForShot(shot: Shot | null | undefined) {
     : selectedCharacterIds.value.filter((id) => valid.has(id))
 }
 
-function toggleCharacterForGeneration(characterId: string) {
-  if (selectedCharacterIds.value.includes(characterId)) {
-    selectedCharacterIds.value = selectedCharacterIds.value.filter((id) => id !== characterId)
-  } else {
-    selectedCharacterIds.value = [...selectedCharacterIds.value, characterId]
+async function toggleCharacterForGeneration(characterId: string) {
+  if (!selectedShot.value) return
+  const shotId = selectedShot.value.id
+  const next = selectedCharacterIds.value.includes(characterId)
+    ? selectedCharacterIds.value.filter((id) => id !== characterId)
+    : [...selectedCharacterIds.value, characterId]
+  selectedCharacterIds.value = next
+  userModifiedCharacterIds[shotId] = next
+  if (selectedShot.value) {
+    selectedShot.value.character_ids = next
+    if (next.length === 0) {
+      (selectedShot.value as any)._charactersExplicitlyEmpty = true
+    }
+  }
+  try {
+    await store.updateShot(shotId, {
+      ...shotDraft,
+      character_ids: next,
+    })
+  } catch (err) {
+    console.error('Failed to persist shot characters:', err)
   }
 }
 
@@ -439,13 +779,37 @@ watch(() => route.params.projectId, async (projectId) => {
     await router.replace('/')
   }
 })
+function buildSyncedQuery(overrides: Record<string, string | undefined> = {}) {
+  const next: Record<string, string> = {}
+  for (const [key, val] of Object.entries(route.query)) {
+    if (typeof val === 'string') next[key] = val
+  }
+  if (next.scene && !scenes.value.some((scene) => scene.id === next.scene)) {
+    delete next.scene
+  }
+  if (store.currentEpisodeId) {
+    next.episode = store.currentEpisodeId
+  }
+  if (store.currentProject) {
+    next.aspect = mediaAspect.value
+    if (next.variant !== undefined || activeStage.value === 'final-cut') {
+      next.variant = mediaAspect.value === '9:16' ? 'shorts' : 'landscape'
+    }
+  }
+  for (const [key, val] of Object.entries(overrides)) {
+    if (val === undefined) {
+      delete next[key]
+    } else {
+      next[key] = val
+    }
+  }
+  return next
+}
+
 watch(() => store.currentEpisodeId, (newEpId) => {
   if (newEpId && route.query.episode !== newEpId && store.currentProject) {
     void router.replace({
-      query: {
-        ...route.query,
-        episode: newEpId,
-      },
+      query: buildSyncedQuery({ episode: newEpId }),
     })
   }
 })
@@ -461,13 +825,45 @@ watch(() => route.query.episode, async (newQueryEp) => {
     }
   }
 })
-watch(() => store.currentProject?.id, () => {
-  mediaAspect.value = (store.currentProject?.aspect_ratio as AspectRatio | undefined) ?? '16:9'
+watch(() => store.currentProject?.id, (newId, oldId) => {
+  if (!newId) return
+  const urlAspect = parseAspectParam(route.query.aspect ?? route.query.variant)
+  const projectDefault = (store.currentProject?.aspect_ratio as AspectRatio | undefined) ?? '16:9'
+  const switchedProject = Boolean(oldId && newId !== oldId)
+  mediaAspect.value = (!switchedProject && urlAspect) ? urlAspect : projectDefault
+  finalCutAspect.value = (!switchedProject && parseAspectParam(route.query.variant ?? route.query.aspect)) || mediaAspect.value
+  if (route.query.aspect !== mediaAspect.value) {
+    void router.replace({
+      query: buildSyncedQuery({ aspect: mediaAspect.value }),
+    })
+  }
   if (!route.params.shotId) {
     produceDetailOpen.value = false
     showPromptEditor.value = false
   }
 }, { immediate: true })
+watch(mediaAspect, (newAspect) => {
+  finalCutAspect.value = newAspect
+  const nextVariant: OutputVariant = newAspect === '9:16' ? 'shorts' : 'landscape'
+  const shouldSyncVariant = route.query.variant !== undefined || activeStage.value === 'final-cut'
+  if (
+    store.currentProject &&
+    (route.query.aspect !== newAspect || (shouldSyncVariant && route.query.variant !== nextVariant))
+  ) {
+    void router.replace({
+      query: buildSyncedQuery({
+        aspect: newAspect,
+        ...(shouldSyncVariant ? { variant: nextVariant } : {}),
+      }),
+    })
+  }
+})
+watch(() => route.query.aspect, (newQueryAspect) => {
+  const parsed = parseAspectParam(newQueryAspect)
+  if (parsed && parsed !== mediaAspect.value) {
+    mediaAspect.value = parsed
+  }
+})
 watch(
   () => scenes.value.map((scene) => `${scene.id}:${scene.shots[0]?.id || ''}:${scene.set_notes || ''}:${scene.lighting_notes || ''}:${scene.wardrobe_notes || ''}:${scene.props_notes || ''}`).join('|'),
   () => {
@@ -477,10 +873,30 @@ watch(
   { immediate: true },
 )
 watch(
-  () => selectedShot.value?.id,
-  () => {
-    includeCastRefsInVideo.value = false
+  () => [selectedShot.value?.id, selectedShot.value?.takes?.length] as const,
+  ([shotId]) => {
+    if (!shotId) return
+    if (shotId in userCastRefOverrides) {
+      includeCastRefsInVideo.value = userCastRefOverrides[shotId]
+      return
+    }
+    try {
+      const stored = localStorage.getItem(`cutline:cast_refs:${shotId}`)
+      if (stored !== null) {
+        const val = stored === 'true'
+        includeCastRefsInVideo.value = val
+        userCastRefOverrides[shotId] = val
+        return
+      }
+    } catch {}
+
+    const clipTakes = (selectedShot.value?.takes ?? []).filter((take) => take.media_type === 'clip')
+    const latest = clipTakes.find((take) => take.id === selectedShot.value?.selected_clip_take_id) ?? clipTakes[clipTakes.length - 1]
+    includeCastRefsInVideo.value = Boolean(
+      latest?.settings?.include_cast_references
+    )
   },
+  { immediate: true },
 )
 watch(
   () => [selectedShot.value?.id, castCharacters.value.map((character) => `${character.id}:${character.references.length}`).join('|')] as const,
@@ -569,8 +985,14 @@ function handleGlobalPointerDown(event: PointerEvent) {
 }
 
 function handleGlobalKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && projectMenuId.value) {
-    projectMenuId.value = null
+  if (event.key === 'Escape') {
+    if (showScriptGuide.value) {
+      showScriptGuide.value = false
+      return
+    }
+    if (projectMenuId.value) {
+      projectMenuId.value = null
+    }
   }
 }
 
@@ -589,10 +1011,7 @@ onMounted(async () => {
     await router.replace(projectRoute(store.projects[0].id, defaultStage(store.projects[0])))
   } else if (store.currentEpisodeId && route.query.episode !== store.currentEpisodeId) {
     void router.replace({
-      query: {
-        ...route.query,
-        episode: store.currentEpisodeId,
-      },
+      query: buildSyncedQuery({ episode: store.currentEpisodeId }),
     })
   }
 })
@@ -622,8 +1041,15 @@ function sceneDurationLabel(scene: Scene) {
 function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
   return resolveActiveShotMedia(shot, mediaType, mediaAspect.value)
     ?? (store.currentProject?.aspect_ratio === mediaAspect.value ? (mediaType === 'clip' ? shot.clip : shot.image) : null)
-    ?? shot.media_variants.find((item) => item.media_type === mediaType)
+    ?? shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === mediaAspect.value)
     ?? null
+}
+
+function triggerCreateDraft(retryFailedOnly = false) {
+  const variant: OutputVariant | 'both' = generateBothAspects.value
+    ? 'both'
+    : (mediaAspect.value === '9:16' ? 'shorts' : 'landscape')
+  void store.createDraft({ variant, retry_failed_only: retryFailedOnly })
 }
 
 async function handlePlaySelectedTake(take: ShotTake) {
@@ -797,15 +1223,50 @@ async function saveContinuity(scene: Scene) {
 
 function beginRegenerateImage() {
   showPromptEditor.value = true
-  void generateShotImage()
+  void generateShotImage(false, generateBothAspects.value, false)
 }
 
-function beginRegenerateClip() {
+function beginRegenerateBothImages() {
   showPromptEditor.value = true
-  void generateShotClip()
+  void generateShotImage(false, true, false)
+}
+
+function beginRegenerateImageAndClip() {
+  showPromptEditor.value = true
+  void generateShotImage(true, generateBothAspects.value, false)
+}
+
+function beginExpandFromOtherAspect() {
+  skipDefaultImageReference.value = false
+  showPromptEditor.value = true
+  void generateShotImage(false, false, false)
+}
+
+function beginGenerateFreshImage() {
+  skipDefaultImageReference.value = true
+  showPromptEditor.value = true
+  void generateShotImage(false, false, true)
+}
+
+function beginGenerateChatGPTDual() {
+  skipDefaultImageReference.value = true
+  showPromptEditor.value = true
+  void generateShotImage(false, false, true, true)
+}
+
+function beginExpandAndGenerateClip() {
+  skipDefaultImageReference.value = false
+  showPromptEditor.value = true
+  void generateShotImage(true, false, false)
+}
+
+function beginRegenerateClip(bothAspects = generateBothAspects.value) {
+  showPromptEditor.value = true
+  void generateShotClip(bothAspects)
 }
 
 const resettingFlow = ref(false)
+const switchingFlowModel = ref(false)
 const flowSyncNotice = ref('')
 
 async function syncFlowAccount() {
@@ -821,6 +1282,22 @@ async function syncFlowAccount() {
     resettingFlow.value = false
   }
 }
+
+async function changeFlowModelFromEditor(event: Event) {
+  const preset = (event.target as HTMLSelectElement).value
+  if (!preset || switchingFlowModel.value) return
+  switchingFlowModel.value = true
+  flowSyncNotice.value = ''
+  try {
+    store.videoProvider = await api.setFlowVideoModel(preset)
+    flowSyncNotice.value = `Video model set to ${store.videoProvider.model} (${store.videoProvider.detail})`
+  } catch (err: any) {
+    flowSyncNotice.value = err?.message || 'Failed to switch Flow video model'
+  } finally {
+    switchingFlowModel.value = false
+  }
+}
+
 
 function sceneTime(scene: Scene) {
   return `${formatTime(scene.start_ms)}-${formatTime(scene.end_ms)}`
@@ -841,9 +1318,18 @@ function defaultStage(project: ProjectSummary): ProductionStage {
 
 function projectRoute(projectId: string, stage: ProductionStage, shotId?: string | null) {
   const query: Record<string, string> = {}
-  if (route.query.scene) query.scene = String(route.query.scene)
-  if (store.currentEpisodeId) query.episode = store.currentEpisodeId
-  else if (route.query.episode) query.episode = String(route.query.episode)
+  const sameProject = store.currentProject?.id === projectId
+  if (sameProject) {
+    if (typeof route.query.scene === 'string' && scenes.value.some((scene) => scene.id === route.query.scene)) {
+      query.scene = route.query.scene
+    }
+    if (store.currentEpisodeId) query.episode = store.currentEpisodeId
+    else if (route.query.episode) query.episode = String(route.query.episode)
+    query.aspect = mediaAspect.value
+    if (stage === 'final-cut' && route.query.variant !== undefined) {
+      query.variant = mediaAspect.value === '9:16' ? 'shorts' : 'landscape'
+    }
+  }
 
   return {
     name: 'project-stage',
@@ -871,7 +1357,7 @@ function progressClass(step: number) {
 function selectScene(index: number) {
   activeScene.value = index
   const scene = scenes.value[index]
-  void router.replace({ query: scene ? { ...route.query, scene: scene.id } : route.query })
+  void router.replace({ query: scene ? buildSyncedQuery({ scene: scene.id }) : buildSyncedQuery() })
 }
 
 const deepReviewRefreshKey = computed(() => {
@@ -917,17 +1403,23 @@ function openTrimEditor() {
   if (!store.currentProject || !selectedShot.value) return
   void router.push({
     ...projectRoute(store.currentProject.id, 'final-cut'),
-    query: {
+    query: buildSyncedQuery({
       trimShot: selectedShot.value.id,
       variant: mediaAspect.value === '9:16' ? 'shorts' : 'landscape',
-    },
+      aspect: mediaAspect.value,
+    }),
   })
 }
 
 function setFinalCutVariant(variant: OutputVariant) {
-  finalCutAspect.value = variant === 'shorts' ? '9:16' : '16:9'
-  if (route.query.variant !== variant) {
-    void router.replace({ query: { ...route.query, variant } })
+  const aspect: AspectRatio = variant === 'shorts' ? '9:16' : '16:9'
+  finalCutAspect.value = aspect
+  if (mediaAspect.value !== aspect) {
+    mediaAspect.value = aspect
+    return
+  }
+  if (route.query.variant !== variant || route.query.aspect !== aspect) {
+    void router.replace({ query: buildSyncedQuery({ variant, aspect }) })
   }
 }
 
@@ -1051,6 +1543,11 @@ async function syncCastFromScript() {
   castingBusy.value = true
   try {
     await store.syncCast()
+    try {
+      await store.syncElements()
+    } catch {
+      // Optional scenes/props sync
+    }
     syncSelectedCharactersForShot(selectedShot.value)
   } catch {
     // Store error surface.
@@ -1059,16 +1556,25 @@ async function syncCastFromScript() {
   }
 }
 
-async function generateCastFace(character: Character) {
+async function generateCastFace(character: Character, look = '') {
   try {
-    await store.generateCharacterReference(character.id)
+    const defaultLook = look || (character.kind === 'scene' ? 'scene' : character.kind === 'prop' ? 'prop' : '')
+    await store.generateCharacterReference(character.id, defaultLook)
+  } catch {
+    // Store error surface.
+  }
+}
+
+async function generateElement3DView(character: Character) {
+  try {
+    await store.generateCharacterReference(character.id, '3d_view')
   } catch {
     // Store error surface.
   }
 }
 
 async function generateMissingCastFaces() {
-  const missing = castCharacters.value.filter((character) => !character.references.length)
+  const missing = visibleLibraryElements.value.filter((character) => !character.references.length)
   for (const character of missing) {
     if (store.isGeneratingCast(character.id)) continue
     await generateCastFace(character)
@@ -1079,17 +1585,29 @@ function castJobFor(characterId: string) {
   return store.castJobs[characterId] ?? null
 }
 
-async function generateShotImage() {
+async function generateShotImage(
+  andVideo = false,
+  bothAspects = generateBothAspects.value,
+  forceFresh = false,
+  chatgptDual = false,
+) {
   if (!selectedShot.value) return
   try {
     await saveShot()
+    const useDefault = (forceFresh || chatgptDual) ? false : !skipDefaultImageReference.value
     await store.generateShotImage(
       selectedShot.value.id,
       mediaAspect.value,
       selectedCharacterIds.value,
       false,
-      selectedAspectReference.value?.id,
-      !skipDefaultImageReference.value,
+      (forceFresh || chatgptDual) ? null : selectedAspectReference.value?.id,
+      useDefault,
+      {
+        bothAspects: chatgptDual ? false : bothAspects,
+        generateVideo: andVideo,
+        includeCastReferences: includeCastRefsInVideo.value,
+        chatgptDual,
+      },
     )
   } catch {
     // The store exposes the provider or validation error in the workspace.
@@ -1101,8 +1619,11 @@ async function addCastCharacter() {
   if (!name || castingBusy.value) return
   castingBusy.value = true
   try {
-    await store.createCharacter(name)
+    const created = await store.createCharacter(name, '', activeElementTab.value)
     newCharacterName.value = ''
+    if (created && !created.references?.length && imageGenerationAvailable.value) {
+      void generateCastFace(created)
+    }
   } catch {
     // Store error surface.
   } finally {
@@ -1271,6 +1792,40 @@ const episodeDropdownRef = ref<HTMLElement | null>(null)
 const showNewEpisodeModal = ref(false)
 const showProjectSettingsModal = ref(false)
 const showOriginalScriptModal = ref(false)
+const showScriptHistory = ref(false)
+const showCompilationModal = ref(false)
+const compilationShots = ref<Shot[]>([])
+
+watch(
+  () => store.activeCompilationId,
+  async (compilationId) => {
+    if (compilationId) {
+      try {
+        compilationShots.value = await api.compilationShots(compilationId)
+      } catch (err) {
+        console.error('Failed to load compilation shots', err)
+        compilationShots.value = []
+      }
+    } else {
+      compilationShots.value = []
+    }
+  },
+  { immediate: true },
+)
+
+const activeTimelineShots = computed(() => {
+  if (store.isCompilationMode) {
+    return compilationShots.value
+  }
+  return allShots.value
+})
+
+async function handleOpenCompilation(compilationId: string) {
+  store.selectCompilation(compilationId)
+  if (activeStage.value !== 'final-cut') {
+    await router.push(stageRoute('final-cut'))
+  }
+}
 const scriptCopied = ref(false)
 const originalScriptText = computed(() => {
   return store.currentProject?.current_version?.source_text || 'No script available.'
@@ -1577,17 +2132,25 @@ function chooseClipUpload() {
   clipUploadInput.value?.click()
 }
 
-async function generateShotClip() {
+async function generateShotClip(bothAspects = generateBothAspects.value) {
   if (!selectedShot.value || !store.currentProject) return
   const shotId = selectedShot.value.id
   const projectId = store.currentProject.id
   const episodeId = store.currentEpisodeId
   const aspectRatio = mediaAspect.value
-  const useCastRefs = includeCastRefsInVideo.value
+  const useCastRefs = videoGenerationMode.value === 'r2v' ? true : includeCastRefsInVideo.value
   const input = { ...shotDraft, character_ids: [...selectedCharacterIds.value] }
   try {
     await store.updateShot(shotId, input)
-    await store.generateShotClip(shotId, aspectRatio, projectId, episodeId, useCastRefs)
+    if (videoGenerationMode.value === 'r2v') {
+      await store.generateShotClip(shotId, aspectRatio, projectId, episodeId, useCastRefs, bothAspects, {
+        videoMode: 'r2v',
+        includeSceneReference: includeSceneRefInR2V.value,
+        elementIds: r2vAttachedElements.value.map((el) => el.id),
+      })
+    } else {
+      await store.generateShotClip(shotId, aspectRatio, projectId, episodeId, useCastRefs, bothAspects)
+    }
   } catch {
     // The store exposes the provider or workflow error in the workspace.
   }
@@ -1783,7 +2346,7 @@ function formatRenderedAt(value: string) {
           type="button"
           class="secondary-button"
           :disabled="store.creatingDraft"
-          @click="store.createDraft({ retry_failed_only: true })"
+          @click="triggerCreateDraft(true)"
         >
           Retry failed steps
         </button>
@@ -1806,7 +2369,20 @@ function formatRenderedAt(value: string) {
             <EpisodeSwitcher
               @open-settings="openProjectSettings"
               @open-new-episode="openNewEpisodeModal"
+              @open-compilation-modal="showCompilationModal = true"
+              @select-compilation="handleOpenCompilation"
             />
+            <button
+              type="button"
+              class="compilations-header-pill"
+              :class="{ 'is-active': store.isCompilationMode }"
+              title="Manage Multi-Episode Compilations"
+              @click="showCompilationModal = true"
+            >
+              <Boxes :size="13" />
+              <span>Compilations</span>
+              <span v-if="store.compilations.length" class="compilations-count-pill">{{ store.compilations.length }}</span>
+            </button>
           </div>
           <h1 class="project-stage-heading">{{ stageTitle }}</h1>
         </div>
@@ -1816,6 +2392,17 @@ function formatRenderedAt(value: string) {
             {{ store.backgroundActiveJobsCount }} background {{ store.backgroundActiveJobsCount === 1 ? 'job' : 'jobs' }}
           </span>
           <span v-if="store.currentProject" class="save-state"><Check :size="14" /> Saved</span>
+          <button
+            v-if="store.currentProject?.current_version"
+            type="button"
+            class="secondary-button version-history-trigger"
+            title="Browse and restore saved script versions"
+            @click="showScriptHistory = true"
+          >
+            <History :size="15" />
+            <span>Version history</span>
+            <span class="version-pill-mini">v{{ store.currentProject.current_version.version_number }}</span>
+          </button>
           <button class="secondary-button format-guide-trigger" title="Script format guide" @click="showScriptGuide = true"><BookOpen :size="15" /><span>Script format</span></button>
           <button class="secondary-button preview-trigger" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
           <button
@@ -1823,7 +2410,7 @@ function formatRenderedAt(value: string) {
             class="primary-button"
             :disabled="store.creatingDraft"
             :title="store.draftJob?.message || 'Generate missing images, clips, dialogue, and a preview'"
-            @click="store.createDraft()"
+            @click="triggerCreateDraft()"
           >
             <Sparkles :size="15" />
             {{ store.creatingDraft ? (store.draftJob?.message || 'Creating draft…') : 'Create draft video' }}
@@ -1872,6 +2459,18 @@ function formatRenderedAt(value: string) {
               <h2>{{ selectedScene.title }}</h2>
             </div>
             <div class="script-toolbar-right">
+              <button
+                type="button"
+                class="view-original-script-btn"
+                title="Browse and restore saved script versions"
+                @click="showScriptHistory = true"
+              >
+                <History :size="14" />
+                <span>Version history</span>
+                <span v-if="store.currentProject?.current_version?.version_number" class="version-pill-mini">
+                  v{{ store.currentProject.current_version.version_number }}
+                </span>
+              </button>
               <button
                 type="button"
                 class="view-original-script-btn"
@@ -1964,19 +2563,35 @@ function formatRenderedAt(value: string) {
             </div>
             <div class="produce-hero-actions">
               <div class="media-variant-switch" role="group" aria-label="Output aspect ratio">
-                <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
-                <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16</button>
+                <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'; generateBothAspects = false">16:9</button>
+                <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'; generateBothAspects = false">9:16</button>
+                <button
+                  type="button"
+                  :class="{ active: generateBothAspects }"
+                  title="When enabled, generation creates both 16:9 and 9:16 aspect ratios"
+                  @click="generateBothAspects = !generateBothAspects"
+                >Both (16:9 + 9:16)</button>
               </div>
+              <button
+                v-if="store.currentProject?.current_version"
+                class="secondary-button"
+                type="button"
+                title="Browse and restore saved script versions"
+                @click="showScriptHistory = true"
+              >
+                <History :size="15" />
+                <span>Version history</span>
+              </button>
               <button class="secondary-button" type="button" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
               <button
                 class="primary-button"
                 type="button"
                 :disabled="!isScriptApproved || store.creatingDraft"
                 :title="store.draftJob?.message || 'Generate missing images, clips, dialogue, and a preview'"
-                @click="store.createDraft()"
+                @click="triggerCreateDraft()"
               >
                 <Sparkles :size="15" />
-                {{ store.creatingDraft ? (store.draftJob?.message || 'Creating draft…') : 'Create draft video' }}
+                {{ store.creatingDraft ? (store.draftJob?.message || 'Creating draft…') : (generateBothAspects ? 'Create draft (16:9 + 9:16)' : 'Create draft video') }}
               </button>
             </div>
           </header>
@@ -2000,64 +2615,171 @@ function formatRenderedAt(value: string) {
                 >{{ sceneIndex + 1 }}</button>
               </div>
             </div>
-            <button
-              v-if="store.draftAttention.length"
-              type="button"
-              class="secondary-button"
-              :disabled="store.creatingDraft"
-              @click="store.createDraft({ retry_failed_only: true })"
-            >Retry failed</button>
+            <div class="produce-draft-banner-actions">
+              <button
+                v-if="store.draftJob && (store.creatingDraft || store.draftJob.status === 'running' || store.draftJob.status === 'queued')"
+                type="button"
+                class="secondary-button"
+                :disabled="store.isCancellingJob(store.draftJob.id)"
+                @click="store.cancelJob(store.draftJob.id)"
+              >
+                {{ store.isCancellingJob(store.draftJob.id) ? 'Cancelling…' : 'Cancel draft' }}
+              </button>
+              <button
+                v-if="store.draftAttention.length"
+                type="button"
+                class="secondary-button"
+                :disabled="store.creatingDraft"
+                @click="triggerCreateDraft(true)"
+              >Retry failed</button>
+            </div>
           </div>
 
           <section class="produce-cast-strip">
             <header>
-              <div>
-                <span class="section-label">Cast</span>
-                <strong>One face library for the whole film</strong>
+              <div class="elements-library-header">
+                <div>
+                  <span class="section-label">Elements Library · @References</span>
+                  <strong>Characters (Main + 3D View), Scenes &amp; Props</strong>
+                </div>
+                <div class="elements-tab-bar" role="tablist" aria-label="Reference element categories">
+                  <button
+                    type="button"
+                    role="tab"
+                    class="element-tab-btn kind-character"
+                    :class="{ active: activeElementTab === 'character' }"
+                    :aria-selected="activeElementTab === 'character'"
+                    @click="activeElementTab = 'character'"
+                  >
+                    <span class="element-dot kind-character"></span>
+                    <span>Characters</span>
+                    <small>{{ characterElements.length }}</small>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="element-tab-btn kind-scene"
+                    :class="{ active: activeElementTab === 'scene' }"
+                    :aria-selected="activeElementTab === 'scene'"
+                    @click="activeElementTab = 'scene'"
+                  >
+                    <span class="element-dot kind-scene"></span>
+                    <span>Scenes</span>
+                    <small>{{ sceneElements.length }}</small>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="element-tab-btn kind-prop"
+                    :class="{ active: activeElementTab === 'prop' }"
+                    :aria-selected="activeElementTab === 'prop'"
+                    @click="activeElementTab = 'prop'"
+                  >
+                    <span class="element-dot kind-prop"></span>
+                    <span>Props</span>
+                    <small>{{ propElements.length }}</small>
+                  </button>
+                </div>
               </div>
               <div class="cast-header-actions">
                 <button
                   class="secondary-button"
                   type="button"
-                  :disabled="castingBusy || !castCharacters.some((character) => !character.references.length) || !imageGenerationAvailable"
-                  :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : 'Generate reference portraits for characters missing a face'"
+                  :disabled="castingBusy || !visibleLibraryElements.some((character) => !character.references.length) || !imageGenerationAvailable"
+                  :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : `Generate missing ${activeElementTab} references`"
                   @click="generateMissingCastFaces"
                 >
-                  <Sparkles :size="15" />Generate missing faces
+                  <Sparkles :size="15" />
+                  {{ activeElementTab === 'character' ? 'Generate missing faces' : activeElementTab === 'scene' ? 'Generate missing scenes' : 'Generate missing props' }}
                 </button>
-                <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">Sync from script</button>
+                <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">
+                  Sync from script
+                </button>
                 <form class="cast-add" @submit.prevent="addCastCharacter">
-                  <input v-model="newCharacterName" type="text" maxlength="120" placeholder="Add character" :disabled="castingBusy" />
+                  <input
+                    v-model="newCharacterName"
+                    type="text"
+                    maxlength="120"
+                    :placeholder="activeElementTab === 'character' ? 'Add character' : activeElementTab === 'scene' ? 'Add scene / location' : 'Add prop'"
+                    :disabled="castingBusy"
+                  />
                   <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
                 </form>
               </div>
             </header>
-            <div v-if="!castCharacters.length" class="cast-empty">Sync cast from the script, then generate faces once. Shots inherit tags automatically.</div>
+            <div v-if="!visibleLibraryElements.length" class="cast-empty">
+              <template v-if="activeElementTab === 'character'">
+                Sync cast from the script, then generate Main View + 3D View turnaround sheets. Type <code>@CHARACTER</code> in any shot prompt to lock identity.
+              </template>
+              <template v-else-if="activeElementTab === 'scene'">
+                Click <strong>Sync from script</strong> to extract scene locations, or add a Scene reference to lock architectural environments across shots with <code>@SCENE</code>.
+              </template>
+              <template v-else>
+                Click <strong>Sync from script</strong> to extract recurring props from continuity notes, or add a Prop reference on a white studio background with <code>@PROP</code>.
+              </template>
+            </div>
             <div v-else class="produce-cast-row">
               <article
-                v-for="character in castCharacters"
+                v-for="character in visibleLibraryElements"
                 :key="character.id"
                 class="produce-cast-card"
+                :class="`kind-${character.kind || 'character'}`"
                 @click="openCastManager(character.id)"
               >
                 <div class="produce-cast-face">
-                  <img v-if="character.references[0]" :src="character.references[0].url" :alt="character.name" />
+                  <img
+                    v-if="elementPrimaryReference(character)"
+                    :src="elementPrimaryReference(character)!.url"
+                    :alt="character.name"
+                  />
+                  <RefreshCw v-else-if="store.isGeneratingCast(character.id)" :size="16" class="spinning" />
                   <span v-else>{{ character.name.slice(0, 1) }}</span>
+                  <span
+                    v-if="elementHas3DView(character)"
+                    class="element-3d-corner-badge"
+                    title="16:9 Character 3D Turnaround Sheet ready"
+                  >3D</span>
                 </div>
-                <strong>{{ character.name }}</strong>
-                <small>{{ character.references.length ? `${character.references.length} ref${character.references.length === 1 ? '' : 's'}` : 'needs face' }}</small>
+                <div class="produce-cast-meta">
+                  <strong>{{ character.name }}</strong>
+                  <span class="element-tag-pill" :class="`kind-${character.kind || 'character'}`">@{{ elementTag(character) }}</span>
+                </div>
+                <small>
+                  {{
+                    store.isGeneratingCast(character.id)
+                      ? 'Generating ref…'
+                      : elementHas3DView(character)
+                        ? `${character.references.length} refs · 3D ready`
+                        : character.references.length
+                          ? `${character.references.length} ref${character.references.length === 1 ? '' : 's'}`
+                          : activeElementTab === 'character'
+                            ? 'needs face'
+                            : 'needs ref'
+                  }}
+                </small>
                 <div class="produce-cast-card-actions" @click.stop>
                   <button type="button" class="ghost-link" @click="openCastManager(character.id)">
                     Manage
                   </button>
                   <button
+                    v-if="(character.kind || 'character') === 'character' && character.references.length && !elementHas3DView(character)"
+                    type="button"
+                    class="ghost-link accent-3d-link"
+                    :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable"
+                    title="Generate Step 2: 16:9 Character 3D Turnaround Sheet (front, side, back + close-up)"
+                    @click="generateElement3DView(character)"
+                  >
+                    + 3D View
+                  </button>
+                  <button
+                    v-else
                     type="button"
                     class="ghost-link"
                     :disabled="castingBusy || store.isGeneratingCast(character.id) || !imageGenerationAvailable"
-                    :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : `Generate face reference for ${character.name}`"
+                    :title="!imageGenerationAvailable ? 'Image provider offline — start with ./scripts/dev --bridges' : `Generate reference for ${character.name}`"
                     @click="generateCastFace(character)"
                   >
-                    {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add face' : 'Generate' }}
+                    {{ store.isGeneratingCast(character.id) ? 'Generating…' : character.references.length ? 'Add ref' : 'Generate' }}
                   </button>
                 </div>
               </article>
@@ -2205,7 +2927,7 @@ function formatRenderedAt(value: string) {
               type="button"
               class="primary-button"
               :disabled="!isScriptApproved || store.creatingDraft"
-              @click="store.createDraft()"
+              @click="triggerCreateDraft()"
             >
               <Sparkles :size="15" />
               {{ store.creatingDraft ? 'Creating draft…' : 'Create draft video' }}
@@ -2250,7 +2972,10 @@ function formatRenderedAt(value: string) {
                   </span>
                   <span>
                     <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
-                    <small>{{ shot.framing }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</small>
+                    <small class="shot-list-meta" :title="`${shot.framing || 'Medium'} · ${(shot.duration_ms / 1000).toFixed(1)}s`">
+                      <span class="shot-list-framing">{{ shot.framing || 'Medium' }}</span>
+                      <span class="shot-list-duration">· {{ (shot.duration_ms / 1000).toFixed(1) }}s</span>
+                    </small>
                     <small v-if="store.isProcessingShot(shot.id)" class="shot-job-copy">{{ imageJobForShot(shot.id)?.message || 'Starting image generation' }}</small>
                     <small v-else-if="store.isProcessingClip(shot.id)" class="shot-job-copy">{{ store.clipJobs[shot.id]?.message || 'Generating video' }}</small>
                   </span>
@@ -2276,10 +3001,35 @@ function formatRenderedAt(value: string) {
               <div><span class="eyebrow">{{ selectedShotLabel }}</span><h2>{{ selectedShotScene?.title }}</h2></div>
               <div class="shot-header-right-group">
                 <div class="media-variant-switch" role="group" aria-label="Storyboard image aspect ratio">
-                  <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'">16:9</button>
-                  <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'">9:16 Shorts</button>
+                  <button type="button" :class="{ active: mediaAspect === '16:9' }" @click="mediaAspect = '16:9'; generateBothAspects = false">
+                    <span>16:9</span>
+                    <RefreshCw v-if="selectedShot && isProcessingAspect(selectedShot.id, '16:9')" class="spinning aspect-spin" :size="11" />
+                  </button>
+                  <button type="button" :class="{ active: mediaAspect === '9:16' }" @click="mediaAspect = '9:16'; generateBothAspects = false">
+                    <span>9:16 Shorts</span>
+                    <RefreshCw v-if="selectedShot && isProcessingAspect(selectedShot.id, '9:16')" class="spinning aspect-spin" :size="11" />
+                  </button>
+                  <button
+                    type="button"
+                    :class="{ active: generateBothAspects }"
+                    title="When enabled, generating image or video creates both 16:9 and 9:16 aspect ratios"
+                    @click="generateBothAspects = !generateBothAspects"
+                  ><span>Both (16:9 + 9:16)</span></button>
                 </div>
                 <span class="image-source" :class="{ ready: selectedAspectImage || selectedAspectReference }">{{ selectedAspectImage ? selectedAspectImage.source.replace('_', ' ') : selectedAspectReference ? 'continuity frame' : `No ${mediaAspect} image` }}</span>
+                <span v-if="(selectedAspectClip as any)?.isAdapted && shouldDisplayClip" class="adapted-clip-badge" :title="`Using video adapted from ${(selectedAspectClip as any)?.adaptedFrom}. You can generate native ${mediaAspect} video anytime.`">
+                  Video adapted from {{ (selectedAspectClip as any)?.adaptedFrom }}
+                </span>
+                <button
+                  v-if="(selectedAspectClip as any)?.isAdapted && (selectedAspectImage || selectedAspectReference)"
+                  type="button"
+                  class="adapted-preview-pill"
+                  :title="showStillImageInstead ? `Play video adapted from ${(selectedAspectClip as any)?.adaptedFrom}` : 'View the still storyboard frame for this shot'"
+                  @click="showStillImageInstead = !showStillImageInstead"
+                >
+                  <component :is="showStillImageInstead ? Play : Image" :size="10" />
+                  <span>{{ showStillImageInstead ? `Play ${(selectedAspectClip as any)?.adaptedFrom} Video` : 'Show Still Frame' }}</span>
+                </button>
                 <a
                   v-if="selectedShotConversationUrl"
                   :href="selectedShotConversationUrl"
@@ -2317,60 +3067,271 @@ function formatRenderedAt(value: string) {
 
             <div class="storyboard-area">
               <div class="storyboard-frame" :class="{ portrait: mediaAspect === '9:16' }">
-                <video v-if="selectedAspectClip" ref="storyboardVideo" :key="selectedAspectClip.url" :src="selectedAspectClip.url" controls playsinline preload="metadata"></video>
-                <img v-else-if="selectedAspectImage" :src="selectedAspectImage.url" :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`" />
-                <img v-else-if="selectedAspectReference" :src="selectedAspectReference.url" :alt="`${mediaAspect} reference frame for ${selectedShotLabel}`" />
+                <video
+                  v-if="shouldDisplayClip && selectedAspectClip"
+                  ref="storyboardVideo"
+                  :key="selectedAspectClip.url"
+                  :src="selectedAspectClip.url"
+                  :style="currentClipBoostStrength ? { filter: videoColorBoostFilter(currentClipBoostStrength) } : undefined"
+                  controls
+                  playsinline
+                  preload="metadata"
+                ></video>
+                <img
+                  v-else-if="selectedAspectImage"
+                  :src="selectedAspectImage.url"
+                  :alt="`${mediaAspect} storyboard for ${selectedShotLabel}`"
+                />
+                <img
+                  v-else-if="selectedAspectReference"
+                  :src="selectedAspectReference.url"
+                  :alt="`${mediaAspect} reference frame for ${selectedShotLabel}`"
+                />
+                <div v-else-if="canExpandFromOtherAspect && otherAspectMedia" class="cross-aspect-placeholder">
+                  <img :src="otherAspectMedia.url" class="cross-aspect-ghost" :alt="`${otherAspect} reference available`" />
+                  <div class="cross-aspect-badge-overlay">
+                    <span class="cross-aspect-tag">{{ otherAspect }} reference ready</span>
+                    <strong>Keep this scene consistent</strong>
+                    <p>Expand from this approved {{ otherAspect }} frame into {{ mediaAspect }} using your prompt, or generate a fresh image.</p>
+                  </div>
+                </div>
                 <div v-else class="empty-storyboard"><Image :size="30" /><strong>No {{ mediaAspect }} media yet</strong><span>Generate a frame, then a clip — or run Create draft from the story view.</span></div>
-                <div v-if="store.isProcessingShot(selectedShot.id) || store.isProcessingClip(selectedShot.id)" class="render-overlay">
+                <div
+                  v-if="shouldDisplayClip && (selectedAspectClip as any)?.isAdapted"
+                  class="adapted-overlay-badge"
+                  :title="`Using video adapted from ${(selectedAspectClip as any)?.adaptedFrom}`"
+                >
+                  Video adapted from {{ (selectedAspectClip as any)?.adaptedFrom }}
+                </div>
+                <div v-if="isProcessingActiveStoryboard" class="render-overlay">
                   <RefreshCw class="spinning" :size="24" />
-                  <strong>{{ store.isProcessingClip(selectedShot.id) ? (store.clipJobs[selectedShot.id]?.message || 'Generating video') : (selectedImageJob?.message || 'Rendering storyboard') }}</strong>
+                  <strong>{{ activeStoryboardProcessingMessage }}</strong>
                 </div>
               </div>
 
-              <div v-if="castCharacters.length" class="cast-generate-chips">
-                <span class="section-label">Use face refs</span>
-                <div class="cast-chip-row">
+              <div class="cast-generate-chips">
+                <div class="video-mode-header-row">
+                  <div>
+                    <span class="section-label">Elements &amp; Video Mode</span>
+                    <small class="video-mode-sub">
+                      {{
+                        videoGenerationMode === 'r2v'
+                          ? 'Direct Reference-to-Video (Omni Flash · up to 7 Character 3D/Main, Scene & Prop refs — no still frame required)'
+                          : 'Frame-to-Video (animates the rendered storyboard frame)'
+                      }}
+                    </small>
+                  </div>
+                  <div class="media-variant-switch video-mode-switch" role="group" aria-label="Video generation mode">
+                    <button
+                      type="button"
+                      :class="{ active: videoGenerationMode === 'i2v' }"
+                      title="Animate from a rendered storyboard frame (Image-to-Video)"
+                      @click="videoGenerationMode = 'i2v'"
+                    >
+                      Frame-to-Video (I2V)
+                    </button>
+                    <button
+                      type="button"
+                      :class="{ active: videoGenerationMode === 'r2v' }"
+                      title="Generate video directly from up to 7 @Character 3D/Main, @Scene, and @Prop reference images"
+                      @click="videoGenerationMode = 'r2v'; showPromptEditor = true"
+                    >
+                      Reference-to-Video (R2V)
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="castCharacters.length" class="cast-chip-row">
                   <button
                     v-for="character in castCharacters"
                     :key="character.id"
                     type="button"
                     class="cast-chip"
-                    :class="{ active: selectedCharacterIds.includes(character.id), warn: !character.references.length }"
+                    :class="[
+                      `kind-${character.kind || 'character'}`,
+                      { active: selectedCharacterIds.includes(character.id), warn: !character.references.length },
+                    ]"
                     :disabled="store.isProcessingShot(selectedShot.id)"
                     @click="toggleCharacterForGeneration(character.id)"
                   >
-                    {{ character.name }}
+                    <span class="element-dot" :class="`kind-${character.kind || 'character'}`"></span>
+                    <span>@{{ elementTag(character) }}</span>
+                    <span v-if="elementHas3DView(character)" class="chip-3d-tag">3D</span>
                     <small v-if="!character.references.length">no ref</small>
                   </button>
                 </div>
+
+                <div v-if="videoGenerationMode === 'r2v'" class="r2v-elements-tray">
+                  <div class="r2v-tray-head">
+                    <strong>Attached R2V References ({{ r2vReadyReferenceCount }}/7 ready)</strong>
+                    <label class="r2v-scene-check">
+                      <input v-model="includeSceneRefInR2V" type="checkbox" />
+                      <span>Auto-attach scene location ref</span>
+                    </label>
+                  </div>
+                  <div v-if="r2vAttachedElements.length" class="r2v-tray-grid">
+                    <div
+                      v-for="(el, idx) in r2vAttachedElements"
+                      :key="el.id"
+                      class="r2v-tray-card"
+                      :class="`kind-${el.kind || 'character'}`"
+                      @click="openCastManager(el.id)"
+                    >
+                      <div class="r2v-tray-thumb">
+                        <img v-if="elementPrimaryReference(el)" :src="elementPrimaryReference(el)!.url" :alt="el.name" />
+                        <span v-else class="r2v-missing-thumb">No ref</span>
+                        <span class="r2v-ref-index">Ref {{ idx + 1 }}</span>
+                        <span v-if="elementHas3DView(el)" class="r2v-3d-pill">3D Sheet</span>
+                      </div>
+                      <div class="r2v-tray-meta">
+                        <span class="element-tag-pill" :class="`kind-${el.kind || 'character'}`">@{{ elementTag(el) }}</span>
+                        <small>{{ el.name }}</small>
+                      </div>
+                    </div>
+                  </div>
+                  <p v-else class="r2v-tray-empty">
+                    Select elements above or type <code>@CHARACTER</code>, <code>@SCENE</code>, or <code>@PROP</code> in the prompt below to attach up to 7 references.
+                  </p>
+                </div>
+
                 <label
-                  v-if="selectedCharacterIds.length"
+                  v-else-if="selectedCharacterIds.length"
                   class="video-cast-ref-toggle"
                   title="Default (unchecked) locks Frame 1 strictly. Check this when a tagged character enters mid-shot and is not visible in the opening frame so Cutline also sends their Cast portrait image to Google Flow."
                 >
                   <input
-                    v-model="includeCastRefsInVideo"
+                    :checked="includeCastRefsInVideo"
                     type="checkbox"
                     :disabled="store.isProcessingClip(selectedShot.id)"
+                    @change="handleToggleCastRefs"
                   />
                   <span>Also send cast portrait(s) when generating video (for off-screen entrances)</span>
                 </label>
               </div>
 
               <div class="storyboard-actions">
-                <button class="primary-button" :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable" @click="beginRegenerateImage">
-                  <RefreshCw v-if="selectedAspectImage" :size="15" /><Sparkles v-else :size="15" />
-                  {{ selectedAspectImage ? `Regenerate ${mediaAspect} image` : `Generate ${mediaAspect} image` }}
+                <template v-if="canExpandFromOtherAspect">
+                  <button
+                    class="primary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    :title="`Expand the approved ${otherAspect} frame into ${mediaAspect} using this shot's prompt and scene continuity`"
+                    @click="beginExpandFromOtherAspect"
+                  >
+                    <Maximize2 :size="15" />
+                    Expand from {{ otherAspect }}
+                  </button>
+                  <button
+                    class="secondary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    :title="`Generate a completely new ${mediaAspect} image from prompt from scratch without using the ${otherAspect} frame`"
+                    @click="beginGenerateFreshImage"
+                  >
+                    <Sparkles :size="15" />
+                    Generate fresh (from prompt)
+                  </button>
+                  <button
+                    class="secondary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    title="Generate both 16:9 and 9:16 images in a single ChatGPT Web prompt and save both takes"
+                    @click="beginGenerateChatGPTDual"
+                  >
+                    <Sparkles :size="15" />
+                    ChatGPT Dual (16:9 + 9:16)
+                  </button>
+                  <button
+                    class="primary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || store.isProcessingClip(selectedShot.id) || !imageGenerationAvailable || !store.videoProvider?.configured || !store.videoProvider?.available"
+                    :title="`Expand from ${otherAspect} and automatically animate video clip on Google Flow`"
+                    @click="beginExpandAndGenerateClip"
+                  >
+                    <Clapperboard :size="15" />
+                    Expand from {{ otherAspect }} + video
+                  </button>
+                </template>
+                <template v-else>
+                  <button class="primary-button" :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable" @click="beginRegenerateImage">
+                    <RefreshCw v-if="selectedAspectImage" :size="15" /><Sparkles v-else :size="15" />
+                    {{ generateBothAspects ? (selectedAspectImage ? 'Regenerate 16:9 + 9:16 images' : 'Generate 16:9 + 9:16 images') : (selectedAspectImage ? `Regenerate ${mediaAspect} image` : `Generate ${mediaAspect} image`) }}
+                  </button>
+                  <button
+                    v-if="!generateBothAspects"
+                    class="secondary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    title="Generate both 16:9 and 9:16 storyboard images in one pass (generates the active dimension first, then converts the other)"
+                    @click="beginRegenerateBothImages"
+                  >
+                    <Sparkles :size="15" />
+                    Generate 16:9 + 9:16 images
+                  </button>
+                  <button
+                    class="secondary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    title="Generate both 16:9 and 9:16 images in a single ChatGPT Web prompt and save both takes"
+                    @click="beginGenerateChatGPTDual"
+                  >
+                    <Sparkles :size="15" />
+                    ChatGPT Dual (16:9 + 9:16)
+                  </button>
+                  <button
+                    class="primary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || store.isProcessingClip(selectedShot.id) || !imageGenerationAvailable || !store.videoProvider?.configured || !store.videoProvider?.available"
+                    :title="!imageGenerationAvailable ? 'Image provider is offline' : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : 'Generate storyboard image(s) and automatically animate video clip(s) on Google Flow'"
+                    @click="beginRegenerateImageAndClip"
+                  >
+                    <Clapperboard :size="15" />
+                    {{ generateBothAspects ? 'Generate 16:9 + 9:16 image + video' : `Generate ${mediaAspect} image + video` }}
+                  </button>
+                  <button
+                    v-if="!selectedAspectImage && otherAspectMedia"
+                    class="secondary-button"
+                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
+                    :title="`Expand from the approved ${otherAspect} frame instead of using this ${mediaAspect} reference`"
+                    @click="beginExpandFromOtherAspect"
+                  >
+                    <Maximize2 :size="15" />
+                    Expand from {{ otherAspect }} instead
+                  </button>
+                </template>
+                <button
+                  v-if="generateBothAspects"
+                  class="primary-button"
+                  :disabled="store.isProcessingClip(selectedShot.id) || !canGenerateClipNow || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  :title="!canGenerateClipNow ? (videoGenerationMode === 'r2v' ? 'Attach at least 1 element with a reference image first' : `Generate or upload a ${mediaAspect} image or reference frame first`) : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : `Generate ${mediaAspect} video only`"
+                  @click="beginRegenerateClip(false)"
+                >
+                  <Video :size="15" />
+                  {{ hasNativeAspectClip ? `Regenerate ${mediaAspect} video` : `Generate ${mediaAspect} video` }}
                 </button>
                 <button
                   class="primary-button"
-                  :disabled="store.isProcessingClip(selectedShot.id) || (!selectedAspectImage && !selectedAspectReference) || !store.videoProvider?.configured || !store.videoProvider?.available"
-                  :title="(!selectedAspectImage && !selectedAspectReference) ? `Generate or upload a ${mediaAspect} image or reference frame first` : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : undefined"
-                  @click="beginRegenerateClip"
+                  :class="{ 'r2v-generate-btn': videoGenerationMode === 'r2v' }"
+                  :disabled="store.isProcessingClip(selectedShot.id) || !canGenerateClipNow || !store.videoProvider?.configured || !store.videoProvider?.available"
+                  :title="!canGenerateClipNow ? (videoGenerationMode === 'r2v' ? 'Attach at least 1 element with a reference image first' : `Generate or upload a ${mediaAspect} image or reference frame first`) : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : undefined"
+                  @click="beginRegenerateClip(generateBothAspects)"
                 >
                   <Video :size="15" />
-                  {{ selectedAspectClip ? 'Regenerate video' : 'Generate video' }}
+                  {{
+                    videoGenerationMode === 'r2v'
+                      ? (hasNativeAspectClip ? `Regenerate R2V video (${r2vReadyReferenceCount} refs)` : `Generate R2V video (${r2vReadyReferenceCount} refs)`)
+                      : (generateBothAspects ? (hasNativeAspectClip ? 'Regenerate 16:9 + 9:16 videos' : 'Generate 16:9 + 9:16 videos') : (hasNativeAspectClip ? 'Regenerate video' : `Generate ${mediaAspect} video`))
+                  }}
                 </button>
+                <select
+                  class="flow-model-inline-select"
+                  :value="store.videoProvider?.active_preset || 'veo_lite'"
+                  :disabled="switchingFlowModel || store.isProcessingClip(selectedShot.id)"
+                  :title="store.videoProvider?.detail || 'Select Google Flow video model'"
+                  aria-label="Google Flow video model"
+                  @change="changeFlowModelFromEditor"
+                >
+                  <option
+                    v-for="preset in (store.videoProvider?.presets?.length ? store.videoProvider.presets : DEFAULT_FLOW_PRESETS)"
+                    :key="preset.id"
+                    :value="preset.id"
+                  >
+                    {{ preset.short_label }}
+                  </option>
+                </select>
                 <button
                   v-if="store.videoProvider?.configured"
                   type="button"
@@ -2410,6 +3371,76 @@ function formatRenderedAt(value: string) {
                 </button>
                 <button class="secondary-button" :disabled="store.isProcessingShot(selectedShot.id)" @click="chooseUpload"><Upload :size="15" />Upload image</button>
                 <button class="secondary-button" :disabled="store.isProcessingClip(selectedShot.id)" @click="chooseClipUpload"><Upload :size="15" />Upload video</button>
+                <div
+                  v-if="selectedAspectClip && (hasNativeAspectClip || shouldDisplayClip)"
+                  class="clip-color-controls"
+                  role="group"
+                  aria-label="Video color boost controls"
+                >
+                  <button
+                    type="button"
+                    class="secondary-button clip-retouch-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id) || currentClipBoostPercent === 100"
+                    :title="clipBoostButtonTitle"
+                    @click="runClipColorAction()"
+                  >
+                    <RefreshCw v-if="retouchingClipColor" :size="14" class="spinning" />
+                    <Palette v-else :size="14" />
+                    <span>{{ retouchingClipColor ? 'Adjusting…' : 'Boost Video Color' }}</span>
+                    <span v-if="clipBoostBadgeLabel" class="clip-boost-pill">{{ clipBoostBadgeLabel }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary-button clip-color-step-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id) || currentClipBoostStrength <= -1"
+                    aria-label="Reduce video color boost"
+                    title="Reduce video color boost (-25%)"
+                    @click="runClipColorAction('decrease')"
+                  >
+                    <Minus :size="13" />
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary-button clip-color-step-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id) || currentClipBoostStrength >= 3"
+                    aria-label="Increase video color boost"
+                    title="Increase video color boost (+25%)"
+                    @click="runClipColorAction('increase')"
+                  >
+                    <Plus :size="13" />
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary-button clip-color-step-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id) || !canUndoClipColor"
+                    aria-label="Undo video color change"
+                    title="Undo video color change"
+                    @click="runClipColorAction('undo')"
+                  >
+                    <Undo2 :size="13" />
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary-button clip-color-step-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id) || !canRedoClipColor"
+                    aria-label="Redo video color change"
+                    title="Redo video color change"
+                    @click="runClipColorAction('redo')"
+                  >
+                    <Redo2 :size="13" />
+                  </button>
+                  <button
+                    v-if="currentClipBoostPercent !== 0"
+                    type="button"
+                    class="secondary-button clip-color-step-btn"
+                    :disabled="retouchingClipColor || store.isProcessingClip(selectedShot.id)"
+                    aria-label="Reset video color boost"
+                    title="Reset video color boost to original (0%)"
+                    @click="runClipColorAction('reset')"
+                  >
+                    <RotateCcw :size="13" />
+                  </button>
+                </div>
                 <button
                   v-if="selectedAspectImage"
                   class="secondary-button destructive-action-button"
@@ -2421,7 +3452,7 @@ function formatRenderedAt(value: string) {
                   Delete {{ mediaAspect }} image
                 </button>
                 <button
-                  v-if="selectedAspectClip"
+                  v-if="hasNativeAspectClip"
                   class="secondary-button destructive-action-button"
                   title="Delete video"
                   aria-label="Delete shot video"
@@ -2485,7 +3516,7 @@ function formatRenderedAt(value: string) {
               <div v-if="!showPromptEditor" class="prompt-collapsed">
                 <div>
                   <strong>Prompts stay out of the way</strong>
-                  <span>Cutline uses the saved image/video prompts plus scene continuity. Open them only when you need a regenerate tweak.</span>
+                  <span>Cutline uses the saved image/video prompts plus scene continuity. Open them only when you need a regenerate tweak or <code>@ELEMENT</code> mention.</span>
                 </div>
                 <button type="button" class="secondary-button" @click="showPromptEditor = true">Adjust prompts</button>
               </div>
@@ -2506,12 +3537,94 @@ function formatRenderedAt(value: string) {
                   <button class="secondary-button" type="button" @click="copyShotVideoPrompt"><Check v-if="copiedShotPrompt" :size="14" /><Copy v-else :size="14" />{{ copiedShotPrompt ? 'Copied' : 'Copy prompt' }}</button>
                 </div>
                 <textarea class="combined-prompt" :value="selectedShotVideoPrompt" rows="13" readonly aria-label="Copy-ready Google Flow video prompt"></textarea>
-                <label>Image prompt<textarea v-model="shotDraft.image_prompt" rows="5" required></textarea></label>
-                <label>Video prompt<textarea v-model="shotDraft.video_prompt" rows="3"></textarea></label>
+
+                <div v-if="castCharacters.length" class="mention-quick-bar">
+                  <span class="mention-quick-label">Insert <code>@</code> reference in prompt:</span>
+                  <div class="mention-quick-pills">
+                    <button
+                      v-for="el in castCharacters"
+                      :key="el.id"
+                      type="button"
+                      class="element-tag-pill clickable"
+                      :class="`kind-${el.kind || 'character'}`"
+                      :title="`Insert @${elementTag(el)} into video prompt and attach reference`"
+                      @click="insertElementMention(el, 'video_prompt')"
+                    >
+                      <span>@{{ elementTag(el) }}</span>
+                      <small v-if="elementHas3DView(el)">3D</small>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="prompt-field-with-mentions">
+                  <label>
+                    <span>Image prompt <small class="mention-hint">(type <code>@</code> to reference Characters, Scenes, or Props)</small></span>
+                    <textarea
+                      v-model="shotDraft.image_prompt"
+                      rows="5"
+                      required
+                      @input="handlePromptTextareaInput('image_prompt', $event)"
+                      @keydown="handlePromptTextareaKeydown('image_prompt', $event)"
+                    ></textarea>
+                  </label>
+                  <div v-if="mentionField === 'image_prompt' && mentionSuggestions.length" class="mention-autocomplete-popover" role="listbox">
+                    <button
+                      v-for="(item, idx) in mentionSuggestions"
+                      :key="item.id"
+                      type="button"
+                      class="mention-option"
+                      :class="{ active: idx === mentionActiveIdx }"
+                      @mousedown.prevent="insertElementMention(item, 'image_prompt')"
+                    >
+                      <span class="element-tag-pill" :class="`kind-${item.kind || 'character'}`">@{{ elementTag(item) }}</span>
+                      <strong>{{ item.name }}</strong>
+                      <small>{{ item.kind || 'character' }}{{ elementHas3DView(item) ? ' · 3D ready' : '' }}</small>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="prompt-field-with-mentions">
+                  <label>
+                    <span>Video prompt <small class="mention-hint">(type <code>@</code> to bind Character 3D/Main, Scene, or Prop refs)</small></span>
+                    <textarea
+                      v-model="shotDraft.video_prompt"
+                      rows="3"
+                      @input="handlePromptTextareaInput('video_prompt', $event)"
+                      @keydown="handlePromptTextareaKeydown('video_prompt', $event)"
+                    ></textarea>
+                  </label>
+                  <div v-if="mentionField === 'video_prompt' && mentionSuggestions.length" class="mention-autocomplete-popover" role="listbox">
+                    <button
+                      v-for="(item, idx) in mentionSuggestions"
+                      :key="item.id"
+                      type="button"
+                      class="mention-option"
+                      :class="{ active: idx === mentionActiveIdx }"
+                      @mousedown.prevent="insertElementMention(item, 'video_prompt')"
+                    >
+                      <span class="element-tag-pill" :class="`kind-${item.kind || 'character'}`">@{{ elementTag(item) }}</span>
+                      <strong>{{ item.name }}</strong>
+                      <small>{{ item.kind || 'character' }}{{ elementHas3DView(item) ? ' · 3D ready' : '' }}</small>
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="detectedPromptMentionElements.length" class="detected-mentions-bar">
+                  <span>Active <code>@</code> prompt bindings:</span>
+                  <span
+                    v-for="el in detectedPromptMentionElements"
+                    :key="el.id"
+                    class="element-tag-pill"
+                    :class="`kind-${el.kind || 'character'}`"
+                  >
+                    @{{ elementTag(el) }} ({{ el.name }})
+                  </span>
+                </div>
+
                 <label>Title-card text (optional)<textarea v-model="shotDraft.title_card_text" rows="2" placeholder="Rendered over black during the final two seconds."></textarea></label>
               </template>
               <footer>
-                <span>{{ selectedAspectClip ? 'Clip ready' : selectedAspectImage ? `${selectedAspectImage.provider || 'image'} · ${mediaAspect}` : imageGenerationAvailable ? `${imageProviderOrder} · ${mediaAspect}` : 'Upload available' }}</span>
+                <span>{{ selectedAspectClip ? ((selectedAspectClip as any)?.isAdapted ? `Clip adapted (${(selectedAspectClip as any)?.adaptedFrom})` : 'Clip ready') : selectedAspectImage ? `${selectedAspectImage.provider || 'image'} · ${mediaAspect}` : imageGenerationAvailable ? `${imageProviderOrder} · ${mediaAspect}` : 'Upload available' }}</span>
                 <button class="secondary-button"><Save :size="15" />Save shot</button>
               </footer>
             </form>
@@ -2521,7 +3634,13 @@ function formatRenderedAt(value: string) {
         </div>
       </div>
 
-      <TimelineEditor v-else-if="activeStage === 'final-cut' && store.currentProject" :project="store.currentProject" :shots="allShots" @variant-change="setFinalCutVariant" />
+      <TimelineEditor
+        v-else-if="activeStage === 'final-cut' && store.currentProject"
+        :project="store.currentProject"
+        :shots="activeTimelineShots"
+        :compilation-id="store.activeCompilationId || undefined"
+        @variant-change="setFinalCutVariant"
+      />
 
       <section v-else class="stage-placeholder">
         <Film :size="30" />
@@ -2616,13 +3735,20 @@ function formatRenderedAt(value: string) {
     <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="script-guide-title">
       <header>
         <div><span class="section-label">Reference</span><h2 id="script-guide-title">Structured script format</h2></div>
-        <button class="mini-icon" aria-label="Close script format guide" @click="showScriptGuide = false"><X :size="17" /></button>
+        <button type="button" class="mini-icon guide-close-btn" aria-label="Close script format guide" title="Close" @click="showScriptGuide = false"><X :size="18" /></button>
       </header>
       <div class="guide-summary">
         <p>Traditional screenplays are supported, but this format preserves every supplied shot and timecode before AI review.</p>
-        <div><strong>Recognized fields</strong><code>SHOT N - TITLE</code><code>Scene:</code><code>Location:</code><code>Time:</code><code>Framing:</code><code>Action:</code><code>Dialogue:</code><code>Sound:</code><code>Image prompt:</code><code>Video prompt:</code></div>
+        <div><strong>Recognized fields</strong><code>SHOT N - TITLE</code><code>Scene:</code><code>Location:</code><code>Set:</code><code>Props:</code><code>Time:</code><code>Framing:</code><code>Cast:</code><code>Action:</code><code>Dialogue:</code><code>Sound:</code><code>Image prompt:</code><code>Video prompt:</code></div>
       </div>
-      <div class="guide-prompt-heading"><div><span class="section-label">Reusable prompt</span><strong>Give this to your script generator</strong></div><button class="secondary-button guide-copy-button" :class="{ copied: scriptGuideCopied }" type="button" @click="copyScriptGuide"><Check v-if="scriptGuideCopied" :size="14" /><Copy v-else :size="14" /><span>{{ scriptGuideCopied ? 'Copied' : 'Copy prompt' }}</span></button></div>
+      <div class="guide-prompt-heading">
+        <div><span class="section-label">Reusable prompt</span><strong>Give this to your script generator</strong></div>
+        <button class="secondary-button guide-copy-button" :class="{ copied: scriptGuideCopied }" type="button" @click="copyScriptGuide">
+          <Check v-if="scriptGuideCopied" :size="14" />
+          <Copy v-else :size="14" />
+          <span>{{ scriptGuideCopied ? 'Copied' : 'Copy prompt' }}</span>
+        </button>
+      </div>
       <pre>{{ SCRIPT_GENERATION_PROMPT }}</pre>
     </section>
   </div>
@@ -2718,6 +3844,15 @@ function formatRenderedAt(value: string) {
     :source-text="originalScriptText"
     :episode-title="currentEpisodeDisplay"
     @close="showOriginalScriptModal = false"
+  />
+  <ScriptHistoryModal v-if="store.currentProject?.current_version"
+    :show="showScriptHistory" :version-id="store.currentProject.current_version.id"
+    :episode-title="currentEpisodeDisplay" @close="showScriptHistory = false"
+    @restored="store.loadProject(store.currentProject.id, { resumeJobs: false })" />
+  <CompilationManagerModal
+    :show="showCompilationModal"
+    @close="showCompilationModal = false"
+    @open-compilation="handleOpenCompilation"
   />
 
   <div v-if="showProjectSettingsModal" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => !store.updatingProject && (showProjectSettingsModal = false))">
@@ -3049,6 +4184,8 @@ function formatRenderedAt(value: string) {
 .preview-stage video { border-radius: 12px; }
 .media-variant-switch,
 .variant-toggle {
+  display: inline-flex;
+  align-items: center;
   padding: 3px;
   gap: 2px;
   border: 1px solid var(--line);
@@ -3057,12 +4194,24 @@ function formatRenderedAt(value: string) {
 }
 .media-variant-switch button,
 .variant-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
   min-height: 29px;
+  height: 29px;
+  padding: 0 10px;
   border: 0 !important;
   border-radius: 7px !important;
   background: transparent !important;
   color: var(--muted) !important;
   box-shadow: none !important;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 .media-variant-switch button:hover,
 .variant-toggle button:hover { color: #fff !important; background: rgba(255,255,255,.045) !important; }
@@ -3071,6 +4220,10 @@ function formatRenderedAt(value: string) {
   color: #fff !important;
   background: #2a302d !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 1px 2px rgba(0,0,0,.25) !important;
+}
+.aspect-spin {
+  flex-shrink: 0;
+  margin: 0;
 }
 .review-badge {
   padding: 5px 9px;
@@ -3793,6 +4946,45 @@ input::placeholder { color: #68716c; }
   white-space: nowrap;
 }
 
+.compilations-header-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #c0c7d4;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.compilations-header-pill:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.compilations-header-pill.is-active {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
+}
+
+.compilations-count-pill {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
 .project-stage-heading {
   margin: 0;
   font-size: 20px;
@@ -4007,6 +5199,21 @@ input::placeholder { color: #68716c; }
   border-color: var(--line-default);
 }
 
+.version-pill-mini {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.view-original-script-btn:hover .version-pill-mini {
+  background: rgba(235, 101, 84, 0.16);
+  color: #ffb4a8;
+}
+
 
 .episode-settings-list {
   display: flex;
@@ -4068,6 +5275,29 @@ input::placeholder { color: #68716c; }
   cursor: pointer;
 }
 
+.flow-model-inline-select {
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line-default, rgba(255, 255, 255, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary, #f3f5f4);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.flow-model-inline-select:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.flow-model-inline-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 @media (max-width: 640px) {
   .studio-layout.assembling { display:flex; flex-direction:column; height:auto; min-height:calc(100dvh - 60px); }
   .assembling .project-rail { width:100%; min-height:0; padding:8px 12px; }
@@ -4077,4 +5307,408 @@ input::placeholder { color: #68716c; }
   .assembling .stage { flex:1; justify-content:center; }
   .assembling .workspace { min-width:0; overflow:visible; }
 }
+
+/* Elements Library, 3D Turnaround Badges, R2V Tray & @Mention Autocomplete */
+.elements-library-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.elements-tab-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.element-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary, #a7b0ac);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.element-tab-btn small {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.element-tab-btn.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.element-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.element-dot.kind-character { background: #b68cff; box-shadow: 0 0 6px rgba(182, 140, 255, 0.5); }
+.element-dot.kind-scene { background: #52d193; box-shadow: 0 0 6px rgba(82, 209, 147, 0.5); }
+.element-dot.kind-prop { background: #5eb5ff; box-shadow: 0 0 6px rgba(94, 181, 255, 0.5); }
+
+.produce-cast-face {
+  position: relative;
+}
+
+.element-3d-corner-badge {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(164, 112, 255, 0.92);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.produce-cast-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.element-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.element-tag-pill.kind-character {
+  background: rgba(164, 112, 255, 0.16);
+  border-color: rgba(164, 112, 255, 0.36);
+  color: #d7bdff;
+}
+
+.element-tag-pill.kind-scene {
+  background: rgba(73, 186, 129, 0.16);
+  border-color: rgba(73, 186, 129, 0.36);
+  color: #93ecc0;
+}
+
+.element-tag-pill.kind-prop {
+  background: rgba(74, 158, 255, 0.16);
+  border-color: rgba(74, 158, 255, 0.36);
+  color: #a5d0ff;
+}
+
+.element-tag-pill.clickable {
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+
+.element-tag-pill.clickable:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.15);
+}
+
+.element-tag-pill small {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 9px;
+}
+
+.accent-3d-link {
+  color: #cdb0ff !important;
+  font-weight: 700;
+}
+
+.video-mode-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.video-mode-sub {
+  display: block;
+  color: var(--text-secondary, #98a29d);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.chip-3d-tag {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(164, 112, 255, 0.28);
+  color: #e4d4ff;
+  font-size: 9.5px;
+  font-weight: 800;
+}
+
+.r2v-elements-tray {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(164, 112, 255, 0.05);
+  border: 1px solid rgba(164, 112, 255, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.r2v-tray-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.r2v-scene-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.r2v-tray-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  gap: 8px;
+}
+
+.r2v-tray-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.r2v-tray-card:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.r2v-tray-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b0e0c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.r2v-tray-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.r2v-missing-thumb {
+  font-size: 10.5px;
+  color: #ff9c90;
+}
+
+.r2v-ref-index {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+.r2v-3d-pill {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(164, 112, 255, 0.88);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+}
+
+.r2v-tray-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.r2v-tray-meta small {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.r2v-tray-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mention-quick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.mention-quick-label {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.mention-quick-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.prompt-field-with-mentions {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.mention-hint {
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+.mention-autocomplete-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  z-index: 40;
+  padding: 6px;
+  border-radius: 10px;
+  background: #141816;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: #f2f5f3;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention-option:hover,
+.mention-option.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mention-option small {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.detected-mentions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.clip-color-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.clip-retouch-btn {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  color: #fcd34d;
+  gap: 6px;
+}
+
+.clip-retouch-btn:hover:not(:disabled) {
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.clip-boost-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.24);
+  color: #fde68a;
+  letter-spacing: 0.02em;
+}
+
+.clip-color-step-btn {
+  padding-inline: 8px;
+  min-width: 30px;
+  justify-content: center;
+}
 </style>
+

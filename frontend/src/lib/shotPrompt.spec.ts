@@ -122,4 +122,37 @@ describe('buildShotVideoPrompt', () => {
     expect(prompt).toContain('Lip-sync lock: MATEO is an unseen off-screen telephone caller heard ONLY as filtered, band-limited earpiece voice-over')
     expect(prompt).toContain('("No. My father can wait.")')
   })
+
+  it('does not treat characters addressed in spoken dialogue as off-screen callers and locks silent on-camera characters', () => {
+    const gabe = {
+      id: 'gabe',
+      name: 'GABE',
+      notes: '29 years old. Filipino man.',
+      voice_description: 'Steady, resonant 29-year-old Filipino baritone',
+    } as Character
+    const rosa = {
+      id: 'rosa',
+      name: 'ROSA',
+      notes: '52 years old. Filipina woman.',
+      voice_description: 'Gentle, weathered Filipina woman',
+    } as Character
+    const isabel = {
+      id: 'isabel',
+      name: 'ISABEL',
+      notes: '30-year-old assistant.',
+      voice_description: 'Clear, grounded 30-year-old speaking voice',
+    } as Character
+    const phoneCallShot = {
+      ...shot,
+      action: 'Gabe holds phone to ear. Rosa watches silently.',
+      video_prompt: 'Gabe says, "Isabel, send a car to San Aurelio. I\'m coming to see my father." Rosa watches silently.',
+      sound: 'Gabe dialogue, ocean waves.',
+      dialogue: [{ character: 'GABE', text: "Isabel, send a car to San Aurelio. I'm coming to see my father." }],
+      character_ids: ['gabe', 'rosa'],
+    } as Shot
+    const prompt = buildShotVideoPrompt(phoneCallShot, scene, [gabe, rosa, isabel], '16:9')
+    expect(prompt).not.toContain('ISABEL (off-screen phone caller')
+    expect(prompt).not.toContain('Lip-sync lock: ISABEL')
+    expect(prompt).toContain("Silent character lock: ROSA's lips and jaw MUST remain completely closed and motionless at all times — do NOT lip-sync ROSA to any speech or audio.")
+  })
 })

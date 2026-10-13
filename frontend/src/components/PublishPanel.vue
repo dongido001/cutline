@@ -30,6 +30,7 @@ import {
 const props = defineProps<{
   project: ProjectDetail
   variant: OutputVariant
+  episodeId?: string
   asModal?: boolean
 }>()
 
@@ -163,7 +164,7 @@ async function loadPlan() {
   loading.value = true
   error.value = ''
   try {
-    plan.value = await api.publishPlan(props.project.id, props.variant)
+    plan.value = await api.publishPlan(props.project.id, props.variant, props.episodeId)
     selected.value = readyAssets.value.map((item) => item.id)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not load publish plan'
@@ -203,7 +204,7 @@ async function publish() {
       schedule_interval_hours: scheduledAt.value && selectedAssets.value.length > 1 ? Number(scheduleInterval.value) : 0,
       made_for_kids: madeForKids.value,
       platform_options: {},
-    })
+    }, props.episodeId)
     await watchPublish(job.value.id)
     emit('published')
   } catch (cause) {
@@ -217,7 +218,7 @@ function resultLinks(record: PublishRecord) {
   return (record.results || []).filter((item) => item.external_url).slice(0, 4)
 }
 
-watch(() => props.variant, loadPlan)
+watch([() => props.variant, () => props.episodeId], loadPlan)
 watch(scope, () => {
   selected.value = []
 })

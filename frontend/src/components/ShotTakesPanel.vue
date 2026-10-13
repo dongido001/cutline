@@ -4,13 +4,17 @@ import type { AspectRatio, Shot, ShotTake } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
 import {
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clapperboard,
   Clock,
   ExternalLink,
   Film,
   Image as ImageIcon,
   ImagePlus,
+  Maximize2,
   MessageSquare,
+  Palette,
   Pencil,
   RefreshCw,
   Sparkles,
@@ -37,8 +41,14 @@ interface PendingAttachment {
 const store = useStudioStore()
 const activeTab = ref<'clip' | 'image'>('clip')
 const selectingTakeId = ref<string | null>(null)
+const boostingColorTakeId = ref<string | null>(null)
+const repaintingColorTakeId = ref<string | null>(null)
 const previewHoverTakeId = ref<string | null>(null)
 const brokenTakeIds = ref<Set<string>>(new Set())
+
+// Lightbox state for viewing large image takes
+const lightboxTakeId = ref<string | null>(null)
+const lightboxDialogRef = ref<HTMLDialogElement | null>(null)
 
 // Follow-up edit state
 const targetEditTakeId = ref<string | null>(null)
@@ -50,6 +60,7 @@ const uploadingTake = ref(false)
 const editTextareaRef = ref<HTMLTextAreaElement | null>(null)
 const uploadTakeInputRef = ref<HTMLInputElement | null>(null)
 const attachInputRef = ref<HTMLInputElement | null>(null)
+const isDraggingOverComposer = ref(false)
 
 function clearAttachments() {
   for (const item of editAttachments.value) {
@@ -60,6 +71,7 @@ function clearAttachments() {
 
 onBeforeUnmount(() => {
   clearAttachments()
+  window.removeEventListener('keydown', handleLightboxKeydown)
 })
 
 function markBrokenTake(takeId: string) {
@@ -100,6 +112,20 @@ const targetEditTake = computed<ShotTake | null>(() => {
 const isProcessingImage = computed(() => store.isProcessingShot(props.shot.id))
 const activeImageJob = computed(() => store.imageJobs[props.shot.id] || null)
 
+const otherAspect = computed<AspectRatio>(() => (props.aspect === '16:9' ? '9:16' : '16:9'))
+
+const hasAdaptedClip = computed(() => {
+  if (videoTakes.value.length > 0) return false
+  const directAdapted = props.shot.media_variants?.some(
+    (m) => m.media_type === 'clip' && m.aspect_ratio === props.aspect && m.source === 'adapted',
+  )
+  if (directAdapted) return true
+  const otherHasTake = props.shot.takes?.some((t) => t.media_type === 'clip' && t.aspect_ratio === otherAspect.value)
+  const otherHasVariant = props.shot.media_variants?.some((m) => m.media_type === 'clip' && m.aspect_ratio === otherAspect.value)
+  const otherHasLegacy = Boolean(props.shot.clip)
+  return Boolean(otherHasTake || otherHasVariant || otherHasLegacy)
+})
+
 // Auto-select tab based on available takes
 watch(
   () => [props.shot.id, props.aspect],
@@ -113,6 +139,8 @@ watch(
       activeTab.value = 'clip'
     } else if (imageTakes.value.length > 0) {
       activeTab.value = 'image'
+    } else if (hasAdaptedClip.value) {
+      activeTab.value = 'clip'
     } else {
       activeTab.value = 'image'
     }
@@ -193,6 +221,7 @@ function providerLabel(provider: string): string {
     comfyui: 'ComfyUI',
     uploaded: 'Uploaded',
     'manual-upload': 'Uploaded',
+    'color-boost': 'Color Boost',
   }
   return map[provider] || provider || 'AI Generated'
 }
@@ -334,6 +363,44 @@ function handleStartEditTake(take: ShotTake) {
   })
 }
 
+async function handleInstantColorBoost(take: ShotTake) {
+  if (take.media_type !== 'image' || boostingColorTakeId.value || isProcessingImage.value) return
+  boostingColorTakeId.value = take.id
+  editError.value = ''
+  try {
+    activeTab.value = 'image'
+    const updated = await store.retouchShotTakeColor(props.shot.id, take.id)
+    const newestSelected = updated?.takes?.find(
+      (t) => t.media_type === 'image' && t.aspect_ratio === props.aspect && t.selected
+    )
+    if (newestSelected) {
+      targetEditTakeId.value = newestSelected.id
+      if (lightboxTakeId.value === take.id) {
+        lightboxTakeId.value = newestSelected.id
+      }
+    }
+  } catch (err) {
+    editError.value = err instanceof Error ? err.message : 'Could not boost image color'
+  } finally {
+    boostingColorTakeId.value = null
+  }
+}
+
+async function handleAiRepaintColor(take: ShotTake) {
+  if (take.media_type !== 'image' || repaintingColorTakeId.value || submittingEdit.value || isProcessingImage.value) return
+  repaintingColorTakeId.value = take.id
+  editError.value = ''
+  try {
+    activeTab.value = 'image'
+    targetEditTakeId.value = take.id
+    await store.editShotImageTake(props.shot.id, take.id, 'Retouch this image', [])
+  } catch (err) {
+    editError.value = err instanceof Error ? err.message : 'AI color repaint failed'
+  } finally {
+    repaintingColorTakeId.value = null
+  }
+}
+
 function triggerUploadTakePicker() {
   uploadTakeInputRef.value?.click()
 }
@@ -360,9 +427,10 @@ function triggerAttachPicker() {
 }
 
 function addFilesToAttachments(files: FileList | File[]) {
-  const allowed = new Set(['image/jpeg', 'image/png', 'image/webp'])
+  const allowed = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp'])
   for (const file of Array.from(files)) {
-    if (!allowed.has(file.type)) {
+    const isAllowedExt = /\.(jpe?g|png|webp)$/i.test(file.name)
+    if (!allowed.has(file.type) && !isAllowedExt) {
       editError.value = 'Only JPG, PNG, or WebP images can be attached'
       continue
     }
@@ -403,6 +471,69 @@ function handleComposerPaste(event: ClipboardEvent) {
   }
 }
 
+function hasDraggedFiles(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types
+  if (!types) return false
+  return Array.from(types).includes('Files')
+}
+
+function handleComposerDragEnter(event: DragEvent) {
+  if (submittingEdit.value || isProcessingImage.value) return
+  if (!hasDraggedFiles(event)) return
+  event.preventDefault()
+  isDraggingOverComposer.value = true
+}
+
+function handleComposerDragOver(event: DragEvent) {
+  if (submittingEdit.value || isProcessingImage.value) return
+  if (!hasDraggedFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  isDraggingOverComposer.value = true
+}
+
+function handleComposerDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement | null
+  const relatedTarget = event.relatedTarget as Node | null
+  if (currentTarget && relatedTarget && currentTarget.contains(relatedTarget)) {
+    return
+  }
+  isDraggingOverComposer.value = false
+}
+
+function handleComposerDrop(event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  isDraggingOverComposer.value = false
+  if (submittingEdit.value || isProcessingImage.value) return
+
+  // Preserve any typed prompt text so browser native drop cannot overwrite or clear it
+  const preservedText = editPrompt.value || (editTextareaRef.value?.value ?? '')
+
+  const files = event.dataTransfer?.files
+  if (files && files.length > 0) {
+    editError.value = ''
+    addFilesToAttachments(files)
+  }
+
+  // Restore preserved prompt text if browser drop event cleared or replaced it
+  if (preservedText) {
+    editPrompt.value = preservedText
+  }
+
+  nextTick(() => {
+    if (preservedText) {
+      editPrompt.value = preservedText
+      if (editTextareaRef.value && editTextareaRef.value.value !== preservedText) {
+        editTextareaRef.value.value = preservedText
+      }
+    }
+    editTextareaRef.value?.focus()
+  })
+}
+
 function removeAttachment(id: string) {
   const idx = editAttachments.value.findIndex((item) => item.id === id)
   if (idx !== -1) {
@@ -437,6 +568,92 @@ function handleComposerKeydown(event: KeyboardEvent) {
     event.preventDefault()
     void handleSubmitFollowupEdit()
   }
+}
+
+const customLightboxPreview = ref<{ url: string; title: string; subtitle?: string } | null>(null)
+
+const lightboxTake = computed<ShotTake | null>(() => {
+  if (!lightboxTakeId.value) return null
+  return imageTakes.value.find((t) => t.id === lightboxTakeId.value) || null
+})
+
+const lightboxTakeIndex = computed(() => {
+  if (!lightboxTake.value) return -1
+  return imageTakes.value.findIndex((t) => t.id === lightboxTake.value?.id)
+})
+
+function openImageLightbox(take: ShotTake) {
+  if (take.media_type !== 'image') return
+  customLightboxPreview.value = null
+  lightboxTakeId.value = take.id
+  window.addEventListener('keydown', handleLightboxKeydown)
+  void nextTick(() => {
+    const dlg = lightboxDialogRef.value
+    if (dlg && !dlg.open) {
+      dlg.showModal()
+    }
+  })
+}
+
+function openCustomLightbox(url: string, title: string, subtitle?: string) {
+  lightboxTakeId.value = null
+  customLightboxPreview.value = { url, title, subtitle }
+  void nextTick(() => {
+    const dlg = lightboxDialogRef.value
+    if (dlg && !dlg.open) {
+      dlg.showModal()
+    }
+  })
+}
+
+function closeImageLightbox() {
+  const dlg = lightboxDialogRef.value
+  if (dlg && dlg.open) {
+    dlg.close()
+  }
+  lightboxTakeId.value = null
+  customLightboxPreview.value = null
+  window.removeEventListener('keydown', handleLightboxKeydown)
+}
+
+function stepLightboxTake(delta: number) {
+  const list = imageTakes.value
+  if (list.length <= 1 || lightboxTakeIndex.value === -1) return
+  const nextIdx = (lightboxTakeIndex.value + delta + list.length) % list.length
+  const nextTake = list[nextIdx]
+  if (nextTake) {
+    lightboxTakeId.value = nextTake.id
+  }
+}
+
+function handleLightboxKeydown(event: KeyboardEvent) {
+  if (!lightboxTakeId.value) return
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    stepLightboxTake(-1)
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    stepLightboxTake(1)
+  }
+}
+
+function handleDialogBackdropClick(event: MouseEvent) {
+  const dlg = lightboxDialogRef.value
+  if (!dlg || event.target !== dlg) return
+  const rect = dlg.getBoundingClientRect()
+  const inside =
+    rect.top <= event.clientY &&
+    event.clientY <= rect.top + rect.height &&
+    rect.left <= event.clientX &&
+    event.clientX <= rect.left + rect.width
+  if (!inside) {
+    closeImageLightbox()
+  }
+}
+
+function handleEditFromLightbox(take: ShotTake) {
+  closeImageLightbox()
+  handleStartEditTake(take)
 }
 </script>
 
@@ -518,7 +735,12 @@ function handleComposerKeydown(event: KeyboardEvent) {
         }"
         @click="handleSelectTake(take)"
       >
-        <div class="take-thumb-wrapper">
+        <div
+          class="take-thumb-wrapper"
+          :class="{ 'zoomable-thumb': take.media_type === 'image' }"
+          :title="take.media_type === 'image' ? `Click to view Take ${getTakeNumber(take)} full size` : undefined"
+          @click.stop="take.media_type === 'image' ? openImageLightbox(take) : handleSelectTake(take)"
+        >
           <video
             v-if="take.media_type === 'clip'"
             :src="take.url"
@@ -545,6 +767,17 @@ function handleComposerKeydown(event: KeyboardEvent) {
           <span v-else class="take-num-badge">
             Take {{ getTakeNumber(take) }}
           </span>
+
+          <button
+            v-if="take.media_type === 'image'"
+            type="button"
+            class="take-zoom-btn"
+            :title="`View Take ${getTakeNumber(take)} full size`"
+            :aria-label="`View Take ${getTakeNumber(take)} full size`"
+            @click.stop="openImageLightbox(take)"
+          >
+            <Maximize2 :size="12" />
+          </button>
 
           <span
             v-if="take.media_type === 'image' && getTakeParentNumber(take)"
@@ -615,33 +848,83 @@ function handleComposerKeydown(event: KeyboardEvent) {
               <span>Edit</span>
             </button>
           </div>
+
+          <div v-if="take.media_type === 'image'" class="take-retouch-actions">
+            <button
+              type="button"
+              class="take-retouch-btn boost"
+              :disabled="boostingColorTakeId === take.id || isProcessingImage"
+              title="Instant pixel-exact color & contrast revival (0% face/pose modification)"
+              @click.stop="handleInstantColorBoost(take)"
+            >
+              <RefreshCw v-if="boostingColorTakeId === take.id" :size="11" class="spinning" />
+              <Palette v-else :size="11" />
+              <span>{{ boostingColorTakeId === take.id ? 'Boosting…' : 'Boost Color' }}</span>
+            </button>
+
+            <button
+              type="button"
+              class="take-retouch-btn repaint"
+              :disabled="repaintingColorTakeId === take.id || submittingEdit || isProcessingImage"
+              title="AI color revival via ChatGPT/Gemini without changing characters, faces, or composition"
+              @click.stop="handleAiRepaintColor(take)"
+            >
+              <RefreshCw v-if="repaintingColorTakeId === take.id" :size="11" class="spinning" />
+              <Sparkles v-else :size="11" />
+              <span>{{ repaintingColorTakeId === take.id ? 'Repainting…' : 'AI Repaint' }}</span>
+            </button>
+          </div>
         </div>
       </article>
     </div>
 
-    <div v-else class="empty-takes-state">
-      <Film :size="22" />
-      <span>No {{ activeTab === 'clip' ? 'video' : 'image' }} takes yet for {{ aspect }}.</span>
-      <button
-        v-if="activeTab === 'image'"
-        type="button"
-        class="upload-take-btn"
-        :disabled="uploadingTake || isProcessingImage"
-        @click="triggerUploadTakePicker"
-      >
-        <Upload :size="13" />
-        <span>Upload image take</span>
-      </button>
+    <div v-else class="empty-takes-state" :class="{ 'has-adapted': activeTab === 'clip' && hasAdaptedClip }">
+      <template v-if="activeTab === 'clip' && hasAdaptedClip">
+        <Film :size="22" />
+        <div class="adapted-take-info">
+          <strong>Adapted from {{ otherAspect }}</strong>
+          <span>Currently playing video adapted from {{ otherAspect }}. Generating video for {{ aspect }} will create a native take.</span>
+        </div>
+      </template>
+      <template v-else>
+        <Film :size="22" />
+        <span>No {{ activeTab === 'clip' ? 'video' : 'image' }} takes yet for {{ aspect }}.</span>
+        <button
+          v-if="activeTab === 'image'"
+          type="button"
+          class="upload-take-btn"
+          :disabled="uploadingTake || isProcessingImage"
+          @click="triggerUploadTakePicker"
+        >
+          <Upload :size="13" />
+          <span>Upload image take</span>
+        </button>
+      </template>
     </div>
 
     <!-- Follow-up Edit / Chat Reply Composer for Image Takes -->
-    <div v-if="activeTab === 'image' && targetEditTake" class="take-followup-composer">
+    <div
+      v-if="activeTab === 'image' && targetEditTake"
+      class="take-followup-composer"
+      :class="{ 'drag-over': isDraggingOverComposer }"
+      @dragenter.prevent="handleComposerDragEnter"
+      @dragover.prevent="handleComposerDragOver"
+      @dragleave="handleComposerDragLeave"
+      @drop.prevent.stop="handleComposerDrop"
+    >
+      <div v-if="isDraggingOverComposer" class="composer-drop-overlay" aria-hidden="true">
+        <ImagePlus :size="18" />
+        <span>Drop reference image(s) to attach (JPG, PNG, WebP)</span>
+      </div>
+
       <div class="composer-header">
         <div class="composer-target-info">
           <img
             :src="targetEditTake.url"
             alt="Target take"
-            class="composer-target-thumb"
+            class="composer-target-thumb zoomable-thumb"
+            :title="`Click to view Take ${getTakeNumber(targetEditTake)} full size`"
+            @click="openImageLightbox(targetEditTake)"
           />
           <div class="composer-target-text">
             <div class="composer-target-title">
@@ -664,21 +947,47 @@ function handleComposerKeydown(event: KeyboardEvent) {
               </span>
             </div>
             <span class="composer-subtitle">
-              Describe what to change, fix, or add. You can also attach or paste reference images.
+              Describe what to change, fix, or add (or type "retouch this image" / "repaint" to revive washed-out colors).
             </span>
           </div>
         </div>
 
-        <button
-          type="button"
-          class="attach-ref-btn"
-          :disabled="submittingEdit || isProcessingImage || editAttachments.length >= 4"
-          title="Attach reference image(s) to include with your edit reply"
-          @click="triggerAttachPicker"
-        >
-          <ImagePlus :size="14" />
-          <span>Attach image</span>
-        </button>
+        <div class="composer-header-actions">
+          <button
+            type="button"
+            class="composer-retouch-btn boost"
+            :disabled="boostingColorTakeId === targetEditTake.id || isProcessingImage"
+            title="Instant pixel-exact color & contrast revival (0% face/pose modification)"
+            @click="handleInstantColorBoost(targetEditTake)"
+          >
+            <RefreshCw v-if="boostingColorTakeId === targetEditTake.id" :size="13" class="spinning" />
+            <Palette v-else :size="13" />
+            <span>{{ boostingColorTakeId === targetEditTake.id ? 'Boosting…' : 'Boost Color (Instant)' }}</span>
+          </button>
+
+          <button
+            type="button"
+            class="composer-retouch-btn repaint"
+            :disabled="repaintingColorTakeId === targetEditTake.id || submittingEdit || isProcessingImage"
+            title="AI color revival via ChatGPT/Gemini without changing characters, faces, or composition"
+            @click="handleAiRepaintColor(targetEditTake)"
+          >
+            <RefreshCw v-if="repaintingColorTakeId === targetEditTake.id" :size="13" class="spinning" />
+            <Sparkles v-else :size="13" />
+            <span>{{ repaintingColorTakeId === targetEditTake.id ? 'Repainting…' : 'AI Repaint Color' }}</span>
+          </button>
+
+          <button
+            type="button"
+            class="attach-ref-btn"
+            :disabled="submittingEdit || isProcessingImage || editAttachments.length >= 4"
+            title="Click or drag & drop reference image(s) to include with your edit reply"
+            @click="triggerAttachPicker"
+          >
+            <ImagePlus :size="14" />
+            <span>Attach image</span>
+          </button>
+        </div>
       </div>
 
       <textarea
@@ -687,9 +996,12 @@ function handleComposerKeydown(event: KeyboardEvent) {
         rows="2"
         class="composer-textarea"
         :disabled="submittingEdit || isProcessingImage"
-        :placeholder="`Reply with changes for Take ${getTakeNumber(targetEditTake)} (e.g. 'change her dress to emerald green', 'remove the extra cup on the table')…`"
+        :placeholder="`Reply with changes for Take ${getTakeNumber(targetEditTake)} (e.g. 'retouch this image', 'repaint', 'change her dress to emerald green')…`"
         @keydown="handleComposerKeydown"
         @paste="handleComposerPaste"
+        @dragenter.prevent="handleComposerDragEnter"
+        @dragover.prevent="handleComposerDragOver"
+        @drop.prevent.stop="handleComposerDrop"
       ></textarea>
 
       <div v-if="editAttachments.length" class="composer-attachments">
@@ -698,8 +1010,18 @@ function handleComposerKeydown(event: KeyboardEvent) {
           :key="item.id"
           class="attachment-chip"
         >
-          <img :src="item.previewUrl" :alt="item.file.name" class="attachment-thumb" />
-          <span class="attachment-name">{{ item.file.name }}</span>
+          <img
+            :src="item.previewUrl"
+            :alt="item.file.name"
+            class="attachment-thumb zoomable-thumb"
+            title="Click to view full size"
+            @click="openCustomLightbox(item.previewUrl, item.file.name, 'Attached reference image')"
+          />
+          <span
+            class="attachment-name zoomable-thumb"
+            title="Click to view full size"
+            @click="openCustomLightbox(item.previewUrl, item.file.name, 'Attached reference image')"
+          >{{ item.file.name }}</span>
           <button
             type="button"
             class="attachment-remove"
@@ -734,6 +1056,152 @@ function handleComposerKeydown(event: KeyboardEvent) {
         </button>
       </div>
     </div>
+
+    <!-- Full-size Image Take Lightbox Dialog -->
+    <dialog
+      ref="lightboxDialogRef"
+      class="take-lightbox-dialog"
+      closedby="any"
+      :aria-label="lightboxTake ? `Take ${getTakeNumber(lightboxTake)} full-size preview` : (customLightboxPreview?.title || 'Image preview')"
+      @close="closeImageLightbox"
+      @click="handleDialogBackdropClick"
+    >
+      <div v-if="lightboxTake" class="lightbox-shell" @click.stop>
+        <header class="lightbox-header">
+          <div class="lightbox-title-group">
+            <strong>Take {{ getTakeNumber(lightboxTake) }}</strong>
+            <span v-if="lightboxTake.selected" class="lightbox-active-pill">
+              <Check :size="11" /> Active
+            </span>
+            <span class="lightbox-meta-pill">{{ lightboxTake.aspect_ratio }}</span>
+            <span class="lightbox-meta-pill">{{ providerLabel(lightboxTake.provider) }}</span>
+            <span class="lightbox-time">
+              <Clock :size="11" /> {{ formatTakeTime(lightboxTake.created_at) }}
+            </span>
+            <span v-if="getTakeParentNumber(lightboxTake)" class="lightbox-lineage-pill">
+              Edited from Take {{ getTakeParentNumber(lightboxTake) }}
+            </span>
+          </div>
+
+          <div class="lightbox-header-actions">
+            <a
+              v-if="getTakeChatUrl(lightboxTake)"
+              :href="getTakeChatUrl(lightboxTake)!"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="lightbox-action-btn"
+              title="Open AI chat session for this take"
+            >
+              <MessageSquare :size="13" />
+              <span>Chat session</span>
+              <ExternalLink :size="11" />
+            </a>
+            <button
+              type="button"
+              class="lightbox-action-btn"
+              :disabled="boostingColorTakeId === lightboxTake.id || isProcessingImage"
+              title="Instant pixel-exact color & contrast revival (0% face/pose modification)"
+              @click="handleInstantColorBoost(lightboxTake)"
+            >
+              <RefreshCw v-if="boostingColorTakeId === lightboxTake.id" :size="13" class="spinning" />
+              <Palette v-else :size="13" />
+              <span>{{ boostingColorTakeId === lightboxTake.id ? 'Boosting…' : 'Boost Color' }}</span>
+            </button>
+            <button
+              type="button"
+              class="lightbox-action-btn"
+              :class="{ active: lightboxTake.selected }"
+              :disabled="lightboxTake.selected || selectingTakeId === lightboxTake.id"
+              @click="handleSelectTake(lightboxTake)"
+            >
+              <Check v-if="lightboxTake.selected" :size="13" />
+              <span>{{ lightboxTake.selected ? 'Current take' : 'Select take' }}</span>
+            </button>
+            <button
+              type="button"
+              class="lightbox-action-btn"
+              @click="handleEditFromLightbox(lightboxTake)"
+            >
+              <Pencil :size="13" />
+              <span>Edit take</span>
+            </button>
+            <button
+              type="button"
+              class="lightbox-close-btn"
+              aria-label="Close full-size image"
+              title="Close (Esc)"
+              @click="closeImageLightbox"
+            >
+              <X :size="16" />
+            </button>
+          </div>
+        </header>
+
+        <div class="lightbox-stage">
+          <button
+            v-if="imageTakes.length > 1"
+            type="button"
+            class="lightbox-nav-btn prev"
+            aria-label="Previous image take"
+            title="Previous take (←)"
+            @click="stepLightboxTake(-1)"
+          >
+            <ChevronLeft :size="20" />
+          </button>
+
+          <img
+            :src="lightboxTake.url"
+            :alt="`Take ${getTakeNumber(lightboxTake)} full size`"
+            class="lightbox-image"
+          />
+
+          <button
+            v-if="imageTakes.length > 1"
+            type="button"
+            class="lightbox-nav-btn next"
+            aria-label="Next image take"
+            title="Next take (→)"
+            @click="stepLightboxTake(1)"
+          >
+            <ChevronRight :size="20" />
+          </button>
+        </div>
+
+        <footer v-if="getTakeEditPrompt(lightboxTake)" class="lightbox-footer">
+          <span class="lightbox-edit-label">Edit instruction:</span>
+          <span class="lightbox-edit-text">“{{ getTakeEditPrompt(lightboxTake) }}”</span>
+        </footer>
+      </div>
+
+      <div v-else-if="customLightboxPreview" class="lightbox-shell" @click.stop>
+        <header class="lightbox-header">
+          <div class="lightbox-title-group">
+            <strong>{{ customLightboxPreview.title }}</strong>
+            <span v-if="customLightboxPreview.subtitle" class="lightbox-meta-pill">
+              {{ customLightboxPreview.subtitle }}
+            </span>
+          </div>
+          <div class="lightbox-header-actions">
+            <button
+              type="button"
+              class="lightbox-close-btn"
+              aria-label="Close full-size image"
+              title="Close (Esc)"
+              @click="closeImageLightbox"
+            >
+              <X :size="16" />
+            </button>
+          </div>
+        </header>
+        <div class="lightbox-stage">
+          <img
+            :src="customLightboxPreview.url"
+            :alt="customLightboxPreview.title"
+            class="lightbox-image"
+          />
+        </div>
+      </div>
+    </dialog>
   </section>
 </template>
 
@@ -1109,6 +1577,45 @@ function handleComposerKeydown(event: KeyboardEvent) {
   color: #38bdf8;
 }
 
+.take-retouch-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.take-retouch-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line-default, #2a2e2b);
+  background: var(--surface-1, #131514);
+  color: var(--text-secondary, #94a3b8);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.take-retouch-btn.boost:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+}
+
+.take-retouch-btn.repaint:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(168, 85, 247, 0.45);
+  color: #c084fc;
+}
+
+.take-retouch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .empty-takes-state {
   display: flex;
   align-items: center;
@@ -1119,8 +1626,38 @@ function handleComposerKeydown(event: KeyboardEvent) {
   font-size: 12px;
 }
 
+.empty-takes-state.has-adapted {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px dashed rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  padding: 16px 20px;
+  color: #38bdf8;
+}
+
+.adapted-take-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
+.adapted-take-info strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: #7dd3fc;
+}
+
+.adapted-take-info span {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
 /* Follow-up Edit Composer */
 .take-followup-composer {
+  position: relative;
   margin-top: 2px;
   padding: 12px;
   border-radius: 10px;
@@ -1129,6 +1666,31 @@ function handleComposerKeydown(event: KeyboardEvent) {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.take-followup-composer.drag-over {
+  border: 1px dashed #38bdf8;
+  background: rgba(14, 165, 233, 0.12);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.composer-drop-overlay {
+  position: absolute;
+  inset: 4px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px dashed rgba(56, 189, 248, 0.75);
+  color: #7dd3fc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  z-index: 5;
+  pointer-events: none;
+  backdrop-filter: blur(3px);
 }
 
 .composer-header {
@@ -1137,6 +1699,54 @@ function handleComposerKeydown(event: KeyboardEvent) {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.composer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.composer-retouch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.composer-retouch-btn.boost {
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+}
+
+.composer-retouch-btn.boost:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.65);
+  color: #fef3c7;
+}
+
+.composer-retouch-btn.repaint {
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.1);
+  color: #c084fc;
+}
+
+.composer-retouch-btn.repaint:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.2);
+  border-color: rgba(168, 85, 247, 0.65);
+  color: #f3e8ff;
+}
+
+.composer-retouch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .composer-target-info {
@@ -1152,6 +1762,12 @@ function handleComposerKeydown(event: KeyboardEvent) {
   border-radius: 5px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: #0f1115;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.composer-target-thumb:hover {
+  border-color: #38bdf8;
+  transform: scale(1.04);
 }
 
 .composer-target-text {
@@ -1355,5 +1971,255 @@ function handleComposerKeydown(event: KeyboardEvent) {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+.zoomable-thumb {
+  cursor: zoom-in;
+}
+
+.take-zoom-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(15, 17, 21, 0.78);
+  color: #e2e8f0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-in;
+  opacity: 0;
+  transform: scale(0.95);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+  backdrop-filter: blur(4px);
+}
+
+.take-card:hover .take-zoom-btn,
+.take-zoom-btn:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.take-zoom-btn:hover {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.6);
+  color: #38bdf8;
+}
+
+.take-lightbox-dialog {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: #0f1114;
+  color: #e2e8f0;
+  padding: 0;
+  max-width: min(94vw, 1360px);
+  max-height: 92vh;
+  width: fit-content;
+  margin: auto;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75);
+  overflow: hidden;
+}
+
+.take-lightbox-dialog::backdrop {
+  background: rgba(5, 7, 10, 0.84);
+  backdrop-filter: blur(6px);
+}
+
+.lightbox-shell {
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+  min-width: min(82vw, 720px);
+}
+
+.lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: #14171a;
+}
+
+.lightbox-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.lightbox-active-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  color: #34d399;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.lightbox-meta-pill {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lightbox-lineage-pill {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #7dd3fc;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lightbox-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.lightbox-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lightbox-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1b1f24;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lightbox-action-btn:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+}
+
+.lightbox-action-btn.active {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  cursor: default;
+}
+
+.lightbox-close-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1b1f24;
+  color: #cbd5e1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lightbox-close-btn:hover {
+  background: rgba(248, 113, 113, 0.16);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #f87171;
+}
+
+.lightbox-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #08090b;
+  padding: 16px 56px;
+  min-height: 360px;
+}
+
+.lightbox-image {
+  display: block;
+  max-width: min(86vw, 1220px);
+  max-height: 76vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.lightbox-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 23, 28, 0.85);
+  color: #f1f5f9;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  backdrop-filter: blur(4px);
+}
+
+.lightbox-nav-btn.prev {
+  left: 12px;
+}
+
+.lightbox-nav-btn.next {
+  right: 12px;
+}
+
+.lightbox-nav-btn:hover {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.6);
+  color: #38bdf8;
+}
+
+.lightbox-footer {
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: #14171a;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lightbox-edit-label {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.lightbox-edit-text {
+  color: #7dd3fc;
 }
 </style>

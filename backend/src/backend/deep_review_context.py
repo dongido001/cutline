@@ -111,6 +111,33 @@ def _text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+PREVIOUS_SCENE_FIELDS = (
+    "title", "location", "time_of_day", "action", "dialogue",
+    "set_notes", "lighting_notes", "wardrobe_notes", "props_notes",
+)
+PREVIOUS_SHOT_FIELDS = (
+    "framing", "action", "dialogue", "sound",
+    "image_prompt", "video_prompt", "title_card_text",
+)
+
+
+def _value_in_source(value: Any, source: str) -> bool:
+    if isinstance(value, str):
+        norm = _normalized(value)
+        if not norm or norm in source:
+            return True
+        lines = [_normalized(line) for line in value.splitlines() if line.strip()]
+        return bool(lines) and all(line in source for line in lines)
+    if isinstance(value, list):
+        if not value:
+            return True
+        if all(isinstance(item, dict) for item in value):
+            texts = [_normalized(str(item.get("text") or "")) for item in value]
+            texts = [t for t in texts if t]
+            return bool(texts) and all(t in source for t in texts)
+    return False
+
+
 def context_for_prompt(context: dict[str, Any]) -> dict[str, Any]:
     """Prior source appears once; retain source indexes and every unmatched saved value.
 
@@ -119,28 +146,60 @@ def context_for_prompt(context: dict[str, Any]) -> dict[str, Any]:
     """
     previous = []
     for episode in context.get("previous", []):
-        source = _normalized(episode["source_text"])
+        source = _normalized(episode.get("source_text", ""))
         compact = {key: value for key, value in episode.items() if key != "scenes"}
         compact["scenes"] = []
-        for scene in episode["scenes"]:
+        for scene in episode.get("scenes", []):
             entry = {"id": scene["id"], "order_index": scene["order_index"], "shots": []}
-            for field in SCENE_FIELDS:
+            for field in PREVIOUS_SCENE_FIELDS:
                 value = scene.get(field)
-                if value not in (None, "", []) and (
-                    not isinstance(value, str) or _normalized(value) not in source
-                ):
+                if value not in (None, "", []) and not _value_in_source(value, source):
                     entry[field] = value
-            for shot in scene["shots"]:
+            for shot in scene.get("shots", []):
                 item = {key: shot[key] for key in ("id", "order_index", "shot_number", "title")}
-                for field in SHOT_FIELDS:
+                for field in PREVIOUS_SHOT_FIELDS:
                     value = shot.get(field)
-                    if value not in (None, "", []) and (
-                        not isinstance(value, str) or _normalized(value) not in source
-                    ):
+                    if value not in (None, "", []) and not _value_in_source(value, source):
                         item[field] = value
                 entry["shots"].append(item)
             compact["scenes"].append(entry)
         previous.append(compact)
+
+    current = context.get("current")
+    if isinstance(current, dict) and "scenes" in current:
+        current_source = _normalized(current.get("source_text", ""))
+        compact_current = {key: value for key, value in current.items() if key != "scenes"}
+        compact_current["scenes"] = []
+        last_location = None
+        for scene in current.get("scenes", []):
+            entry = {"id": scene["id"], "order_index": scene["order_index"], "shots": []}
+            for field in SCENE_FIELDS:
+                value = scene.get(field)
+                if value in (None, "", []):
+                    continue
+                if field in {"action", "dialogue"} and scene.get("shots") and _value_in_source(value, current_source):
+                    continue
+                if field == "location" and isinstance(value, str) and len(value) > 120 and (
+                    _normalized(value) in current_source or value == last_location
+                ):
+                    last_location = value
+                    continue
+                if field == "location":
+                    last_location = value
+                entry[field] = value
+            for shot in scene.get("shots", []):
+                item = {"id": shot["id"], "order_index": shot["order_index"], "shot_number": shot["shot_number"]}
+                for field in SHOT_FIELDS:
+                    if field == "character_ids":
+                        continue
+                    value = shot.get(field)
+                    if field == "title_card_text" and not value:
+                        continue
+                    item[field] = value
+                entry["shots"].append(item)
+            compact_current["scenes"].append(entry)
+        return {**context, "current": compact_current, "previous": previous}
+
     return {**context, "previous": previous}
 
 
@@ -165,6 +224,18 @@ def _validate_evidence(raw: Any, context: dict[str, Any]) -> dict[str, Any] | No
     quote = raw["quote"].strip()
     if not quote:
         return None
+    if raw.get("character_id"):
+        character = next((item for item in context.get("cast", [])
+                          if item["id"] == raw["character_id"]), None)
+        field = raw.get("field")
+        if (not character or raw.get("shot_id")
+                or field not in {"name", "notes", "voice_description"}
+                or _normalized(quote) not in _normalized(character.get(field, ""))):
+            return None
+        return {"version_id": context["current"]["version_id"],
+                "episode_id": context["current"].get("episode_id"), "shot_id": None,
+                "character_id": character["id"], "field": field, "quote": quote,
+                "label": f"Cast · {character['name']} · {field.replace('_', ' ')}"}
     episodes = [context["current"], *context.get("previous", [])]
     episode = next((item for item in episodes if item["version_id"] == raw.get("version_id")), None)
     if not episode:
@@ -279,6 +350,7 @@ def preflight(context: dict[str, Any]) -> list[dict[str, Any]]:
     episode = context["current"]
     cast = {canonical_character_name(item["name"]) for item in context.get("cast", [])}
     findings = []
+    flagged_cues: set[tuple[str, ...]] = set()
 
     def add(shot, category, title, reason, recommendation, field, quote, *, kind="possible_gap", extra=None):
         evidence = [{"version_id": episode["version_id"], "shot_id": shot["id"],
@@ -327,10 +399,12 @@ def preflight(context: dict[str, Any]) -> list[dict[str, Any]]:
             if names:
                 for name in names:
                     speakers.add(name)
-                if any(
-                    len([item for item in cast if item == name or (" " not in name and item.split()[0] == name)]) != 1
+                cue_key = tuple(names)
+                if cue_key not in flagged_cues and any(
+                    name not in cast and len([item for item in cast if " " not in name and item.split()[0] == name]) != 1
                     for name in names
                 ):
+                    flagged_cues.add(cue_key)
                     add(shot, "cast", f"Check dialogue speaker {cue}",
                         "The cue has no unique canonical cast match; first-name aliases are allowed when unambiguous.",
                         "Confirm the intended speaker and update the cast or cue.", "dialogue", cue)

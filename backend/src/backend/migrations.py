@@ -30,6 +30,7 @@ SCENE_COLUMNS = {
 TIMELINE_COLUMNS = {
     "shorts_document": "JSON",
     "episode_id": "VARCHAR",
+    "compilation_id": "VARCHAR",
 }
 LEGACY_SHOT_COLUMNS = {
     "title",
@@ -45,12 +46,17 @@ JOB_COLUMNS = {
     "conversation_url": "TEXT",
     "attempts": "JSON NOT NULL DEFAULT '[]'",
     "episode_id": "VARCHAR",
+    "compilation_id": "VARCHAR",
 }
 CHARACTER_COLUMNS = {
+    "kind": "VARCHAR(24) NOT NULL DEFAULT 'character'",
     "voice_description": "TEXT NOT NULL DEFAULT ''",
     "voice_provider": "VARCHAR(40) NOT NULL DEFAULT 'vibevoice'",
     "voice_id": "VARCHAR(120)",
     "voice_settings": "JSON NOT NULL DEFAULT '{}'",
+}
+CHARACTER_REFERENCE_COLUMNS = {
+    "view_type": "VARCHAR(24) NOT NULL DEFAULT 'main'",
 }
 PROJECT_COLUMNS = {
     "image_conversation_url": "TEXT",
@@ -62,9 +68,11 @@ SCRIPT_VERSION_COLUMNS = {
 }
 FINAL_CUT_COLUMNS = {
     "episode_id": "VARCHAR",
+    "compilation_id": "VARCHAR",
 }
 VARIANT_EXPORT_COLUMNS = {
     "episode_id": "VARCHAR",
+    "compilation_id": "VARCHAR",
 }
 
 
@@ -224,14 +232,17 @@ def migrate_schema(engine: Engine) -> None:
                         text(f"ALTER TABLE characters ADD COLUMN {name} {definition}")
                     )
 
+    _ensure_columns(engine, "character_references", CHARACTER_REFERENCE_COLUMNS)
     _ensure_publish_records(engine)
     _ensure_oauth_states(engine)
     _group_legacy_structured_shots(engine)
     _ensure_episodes_table(engine)
+    _ensure_compilations_table(engine)
     _ensure_columns(engine, "script_versions", SCRIPT_VERSION_COLUMNS)
     _ensure_columns(engine, "project_final_cuts", FINAL_CUT_COLUMNS)
     _ensure_columns(engine, "project_variant_exports", VARIANT_EXPORT_COLUMNS)
     _relax_single_timeline_constraints(engine)
+    _fix_variant_export_unique_constraint(engine)
     _backfill_episodes(engine)
     _ensure_deep_review_runs(engine)
 
@@ -431,6 +442,34 @@ def _ensure_episodes_table(engine: Engine) -> None:
         )
 
 
+def _ensure_compilations_table(engine: Engine) -> None:
+    if "projects" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS compilations (
+                    id VARCHAR NOT NULL PRIMARY KEY,
+                    project_id VARCHAR NOT NULL,
+                    title VARCHAR(200) NOT NULL,
+                    description TEXT,
+                    episode_ids JSON NOT NULL DEFAULT '[]',
+                    settings JSON NOT NULL DEFAULT '{}',
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_compilations_project_id ON compilations (project_id)"
+            )
+        )
+
+
 def _relax_single_timeline_constraints(engine: Engine) -> None:
     tables = inspect(engine).get_table_names()
     with engine.begin() as connection:
@@ -438,6 +477,7 @@ def _relax_single_timeline_constraints(engine: Engine) -> None:
             try:
                 connection.execute(text("DROP INDEX IF EXISTS ix_project_timelines_project_id"))
                 connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_timelines_project_id ON project_timelines (project_id)"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_timelines_compilation_id ON project_timelines (compilation_id)"))
             except Exception:
                 pass
         if "project_final_cuts" in tables:
@@ -485,9 +525,97 @@ def _relax_single_timeline_constraints(engine: Engine) -> None:
                     connection.execute(text("ALTER TABLE project_variant_exports_new RENAME TO project_variant_exports"))
                     connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_project_id ON project_variant_exports (project_id)"))
                     connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_episode_id ON project_variant_exports (episode_id)"))
+                    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_compilation_id ON project_variant_exports (compilation_id)"))
                     connection.execute(text("PRAGMA foreign_keys=ON"))
             except Exception:
                 pass
+        if "project_variant_exports" in tables:
+            try:
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_project_variant_exports_compilation_id ON project_variant_exports (compilation_id)"))
+            except Exception:
+                pass
+
+
+def _fix_variant_export_unique_constraint(engine: Engine) -> None:
+    """Widen unique key to include compilation_id for multi-box exports."""
+    tables = inspect(engine).get_table_names()
+    if "project_variant_exports" not in tables:
+        return
+    with engine.begin() as connection:
+        try:
+            res = connection.execute(
+                text("SELECT sql FROM sqlite_master WHERE type='table' AND name='project_variant_exports'")
+            ).fetchone()
+            sql = (res[0] if res else "") or ""
+            if "UNIQUE (project_id, episode_id, compilation_id, variant)" in sql:
+                return
+            if "UNIQUE (project_id, episode_id, variant)" not in sql and "UNIQUE(project_id, episode_id, variant)" not in sql:
+                return
+            connection.execute(text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE project_variant_exports_comp_uniq (
+                        id VARCHAR NOT NULL PRIMARY KEY,
+                        project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        episode_id VARCHAR REFERENCES episodes(id) ON DELETE CASCADE,
+                        compilation_id VARCHAR REFERENCES compilations(id) ON DELETE CASCADE,
+                        variant VARCHAR(16) NOT NULL,
+                        filename VARCHAR(240) NOT NULL,
+                        mime_type VARCHAR(80) NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL,
+                        clip_count INTEGER NOT NULL,
+                        fallback_count INTEGER NOT NULL,
+                        timeline_revision INTEGER NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE (project_id, episode_id, compilation_id, variant)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO project_variant_exports_comp_uniq (
+                        id, project_id, episode_id, compilation_id, variant, filename, mime_type,
+                        duration_ms, width, height, clip_count, fallback_count,
+                        timeline_revision, created_at
+                    )
+                    SELECT
+                        id, project_id, episode_id, compilation_id, variant, filename, mime_type,
+                        duration_ms, width, height, clip_count, fallback_count,
+                        timeline_revision, created_at
+                    FROM project_variant_exports
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE project_variant_exports"))
+            connection.execute(
+                text("ALTER TABLE project_variant_exports_comp_uniq RENAME TO project_variant_exports")
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_project_variant_exports_project_id "
+                    "ON project_variant_exports (project_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_project_variant_exports_episode_id "
+                    "ON project_variant_exports (episode_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_project_variant_exports_compilation_id "
+                    "ON project_variant_exports (compilation_id)"
+                )
+            )
+            connection.execute(text("PRAGMA foreign_keys=ON"))
+        except Exception:
+            pass
 
 
 def _backfill_episodes(engine: Engine) -> None:

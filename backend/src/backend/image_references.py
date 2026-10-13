@@ -53,7 +53,17 @@ def previous_shot(shot) -> Shot | None:
     return earlier[-1] if earlier else None
 
 
-def _still_snapshot(source_shot, item, kind: str, aspect: str, time_ms: int | None = None) -> dict | None:
+def _still_snapshot(
+    source_shot,
+    item,
+    kind: str,
+    aspect: str,
+    time_ms: int | None = None,
+    *,
+    source_aspect_ratio: str | None = None,
+    mode: str = "visual_continuity",
+    snapshot_id: str | None = None,
+) -> dict | None:
     if not item or not getattr(item, "filename", None):
         return None
     mime_type = getattr(item, "mime_type", None) or "image/png"
@@ -67,7 +77,7 @@ def _still_snapshot(source_shot, item, kind: str, aspect: str, time_ms: int | No
     else:
         created_at = str(created)
     return {
-        "id": f"auto-{source_shot.id}-{aspect}",
+        "id": snapshot_id or f"auto-{source_shot.id}-{aspect}",
         "aspect_ratio": aspect,
         "filename": item.filename,
         "url": f"/media/{item.filename}",
@@ -77,15 +87,119 @@ def _still_snapshot(source_shot, item, kind: str, aspect: str, time_ms: int | No
         "source_media_id": item.id,
         "source_media_kind": kind,
         "source_media_type": "image",
-        "source_aspect_ratio": aspect,
+        "source_aspect_ratio": source_aspect_ratio or aspect,
         "source_time_ms": time_ms,
-        "mode": "visual_continuity",
+        "mode": mode,
         "created_at": created_at,
     }
 
 
+def _extract_clip_first_frame(clip) -> object | None:
+    if not clip or not getattr(clip, "filename", None):
+        return None
+    clip_path = settings.media_dir / clip.filename
+    if not clip_path.is_file():
+        return None
+    frame_filename = f"clip-frame-{Path(clip.filename).stem}.png"
+    frame_path = settings.media_dir / frame_filename
+    if not frame_path.is_file():
+        import subprocess
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-ss", "0", "-i", str(clip_path),
+                "-vframes", "1", "-q:v", "2", str(frame_path)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception:
+            return None
+    if frame_path.is_file():
+        class _ClipFrameWrapper:
+            def __init__(self, filename, orig_id):
+                self.filename = filename
+                self.mime_type = "image/png"
+                self.id = orig_id
+        return _ClipFrameWrapper(frame_filename, getattr(clip, "id", "clip-frame"))
+    return None
+
+
+def _shot_still_for_aspect(shot, aspect: str) -> tuple[object | None, str]:
+    variant = next(
+        (
+            item
+            for item in (shot.media_variants or [])
+            if item.media_type == "image" and item.aspect_ratio == aspect
+        ),
+        None,
+    )
+    if variant and (settings.media_dir / variant.filename).is_file():
+        return variant, "variant"
+    project = shot.scene.script_version.project if getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None) else None
+    if project and shot.image and aspect == project.aspect_ratio and (settings.media_dir / shot.image.filename).is_file():
+        return shot.image, "image"
+    matching_takes = [
+        take
+        for take in (getattr(shot, "takes", None) or [])
+        if take.media_type == "image"
+        and take.aspect_ratio == aspect
+        and getattr(take, "filename", None)
+        and (settings.media_dir / take.filename).is_file()
+    ]
+    if matching_takes:
+        selected = next((take for take in matching_takes if getattr(take, "selected", False)), None)
+        return selected or matching_takes[-1], "take"
+
+    # Fallback to video clip opening frame if no image take exists
+    clip_variant = next(
+        (
+            item
+            for item in (shot.media_variants or [])
+            if item.media_type == "clip" and item.aspect_ratio == aspect
+        ),
+        None,
+    )
+    if clip_variant and (settings.media_dir / clip_variant.filename).is_file():
+        wrapped = _extract_clip_first_frame(clip_variant)
+        if wrapped:
+            return wrapped, "clip_variant"
+    if project and shot.clip and aspect == project.aspect_ratio and (settings.media_dir / shot.clip.filename).is_file():
+        wrapped = _extract_clip_first_frame(shot.clip)
+        if wrapped:
+            return wrapped, "clip"
+    matching_clip_takes = [
+        take
+        for take in (getattr(shot, "takes", None) or [])
+        if take.media_type == "clip"
+        and take.aspect_ratio == aspect
+        and getattr(take, "filename", None)
+        and (settings.media_dir / take.filename).is_file()
+    ]
+    if matching_clip_takes:
+        selected_clip = next((take for take in matching_clip_takes if getattr(take, "selected", False)), None) or matching_clip_takes[-1]
+        wrapped = _extract_clip_first_frame(selected_clip)
+        if wrapped:
+            return wrapped, "clip_take"
+
+    return None, ""
+
+
 def default_visual_reference(shot, aspect: str) -> dict | None:
-    """Previous-shot still or a continuity frame already saved on this shot."""
+    """Resolve the best visual reference for generating `aspect` on `shot`.
+
+    Priority:
+    1. Same-shot continuity frame matching `aspect`.
+    2. Same-shot approved image in the other aspect ratio (`mode='aspect_conversion'`).
+    3. Same-shot grabbed image reference or continuity frame from the other aspect ratio.
+    4. Previous-shot still in `aspect`, or fallback to previous-shot still in the other aspect ratio.
+    """
+    other_aspect = "9:16" if aspect == "16:9" else "16:9"
+
+    ref = next(
+        (ref for ref in (getattr(shot, "image_references", None) or []) if ref.aspect_ratio == aspect),
+        None,
+    )
+    if ref and (settings.media_dir / ref.filename).is_file():
+        return ShotImageReferenceRead.model_validate(ref).model_dump(mode="json")
+
     frame = next(
         (item for item in (shot.continuity_frames or []) if item.aspect_ratio == aspect),
         None,
@@ -99,22 +213,72 @@ def default_visual_reference(shot, aspect: str) -> dict | None:
                 snapshot["source_shot_title"] = frame.source_shot_title
             return snapshot
 
+    current_still, _ = _shot_still_for_aspect(shot, aspect)
+    project = (
+        shot.scene.script_version.project
+        if getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None)
+        else None
+    )
+    is_secondary_aspect = bool(project and aspect != project.aspect_ratio)
+    if current_still is None or is_secondary_aspect:
+        other_still, other_kind = _shot_still_for_aspect(shot, other_aspect)
+        if other_still is not None:
+            snapshot = _still_snapshot(
+                shot,
+                other_still,
+                other_kind,
+                aspect,
+                source_aspect_ratio=other_aspect,
+                mode="aspect_conversion",
+                snapshot_id=f"convert-{shot.id}-{other_aspect}-to-{aspect}",
+            )
+            if snapshot:
+                return snapshot
+
+    other_ref = next(
+        (ref for ref in (getattr(shot, "image_references", None) or []) if ref.aspect_ratio == other_aspect),
+        None,
+    )
+    if other_ref and (settings.media_dir / other_ref.filename).is_file():
+        dumped = ShotImageReferenceRead.model_validate(other_ref).model_dump(mode="json")
+        dumped["aspect_ratio"] = aspect
+        return dumped
+
+    other_frame = next(
+        (item for item in (shot.continuity_frames or []) if item.aspect_ratio == other_aspect),
+        None,
+    )
+    if other_frame:
+        snapshot = _still_snapshot(
+            shot,
+            other_frame,
+            "continuity_frame",
+            aspect,
+            getattr(other_frame, "source_time_ms", None),
+            source_aspect_ratio=other_aspect,
+        )
+        if snapshot:
+            if getattr(other_frame, "source_shot_id", None):
+                snapshot["source_shot_id"] = other_frame.source_shot_id
+            if getattr(other_frame, "source_shot_title", None):
+                snapshot["source_shot_title"] = other_frame.source_shot_title
+            return snapshot
+
     source = previous_shot(shot)
     if not source:
         return None
-    variant = next(
-        (
-            item
-            for item in (source.media_variants or [])
-            if item.media_type == "image" and item.aspect_ratio == aspect
-        ),
-        None,
-    )
-    if variant:
-        return _still_snapshot(source, variant, "variant", aspect)
-    project = source.scene.script_version.project
-    if source.image and aspect == project.aspect_ratio:
-        return _still_snapshot(source, source.image, "image", aspect)
+    source_still, source_kind = _shot_still_for_aspect(source, aspect)
+    if source_still is not None:
+        return _still_snapshot(source, source_still, source_kind, aspect)
+    source_other_still, source_other_kind = _shot_still_for_aspect(source, other_aspect)
+    if source_other_still is not None:
+        return _still_snapshot(
+            source,
+            source_other_still,
+            source_other_kind,
+            aspect,
+            source_aspect_ratio=other_aspect,
+        )
     return None
 
 
@@ -149,7 +313,41 @@ def reference_snapshot(shot, aspect, reference_id=None):
         ),
         None,
     )
-    return ShotImageReferenceRead.model_validate(ref).model_dump(mode='json') if ref else None
+    if ref:
+        return ShotImageReferenceRead.model_validate(ref).model_dump(mode='json')
+    if reference_id is not None:
+        cross_ref = next(
+            (ref for ref in shot.image_references if ref.id == reference_id),
+            None,
+        )
+        if cross_ref:
+            dumped = ShotImageReferenceRead.model_validate(cross_ref).model_dump(mode='json')
+            dumped['aspect_ratio'] = aspect
+            return dumped
+        frame = next(
+            (item for item in (shot.continuity_frames or []) if item.id == reference_id),
+            None,
+        )
+        if frame:
+            snapshot = _still_snapshot(
+                shot,
+                frame,
+                "continuity_frame",
+                aspect,
+                getattr(frame, "source_time_ms", None),
+                source_aspect_ratio=getattr(frame, "aspect_ratio", aspect),
+                snapshot_id=frame.id,
+            )
+            if snapshot:
+                if getattr(frame, "source_shot_id", None):
+                    snapshot["source_shot_id"] = frame.source_shot_id
+                if getattr(frame, "source_shot_title", None):
+                    snapshot["source_shot_title"] = frame.source_shot_title
+                return snapshot
+        default_ref = default_visual_reference(shot, aspect)
+        if default_ref and default_ref.get("id") == reference_id:
+            return default_ref
+    return None
 
 
 def queued_reference(job, shot):
@@ -219,6 +417,15 @@ def load_visual_reference(snapshot):
         raise RuntimeError('Saved image reference is missing; choose another reference')
     content = path.read_bytes()
     validate_reference_bytes(content, snapshot['mime_type'])
+    if snapshot.get("mode") == "aspect_conversion":
+        src_aspect = snapshot.get("source_aspect_ratio") or "9:16"
+        dst_aspect = snapshot.get("aspect_ratio") or "16:9"
+        return VisualReferenceImage(
+            data=content,
+            mime_type=snapshot["mime_type"],
+            character_name=f"Approved {src_aspect} shot frame to reframe/expand into {dst_aspect}",
+            reference_type="edit_target",
+        )
     return VisualReferenceImage(data=content, mime_type=snapshot['mime_type'])
 
 

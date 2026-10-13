@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { Check, ChevronDown, Clapperboard, Copy, Pencil, Plus, Settings, X } from '@lucide/vue'
+import { Boxes, Check, ChevronDown, Clapperboard, Copy, Pencil, Plus, Settings, Trash2, X } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
 
 const emit = defineEmits<{
   (e: 'open-settings'): void
   (e: 'open-new-episode'): void
+  (e: 'open-compilation-modal'): void
+  (e: 'select-compilation', id: string): void
 }>()
 
 const store = useStudioStore()
@@ -15,6 +17,9 @@ const dropdownRef = ref<HTMLElement | null>(null)
 const editingEpisodeId = ref<string | null>(null)
 const editingTitle = ref('')
 const savingId = ref<string | null>(null)
+const confirmingDeleteId = ref<string | null>(null)
+const deletingId = ref<string | null>(null)
+const deleteError = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 const copiedEpisodeId = ref<string | null>(null)
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
@@ -23,6 +28,9 @@ const episodeLabel = computed(() => store.episodeLabel || 'Episode')
 
 const currentEpisodeDisplay = computed(() => {
   if (!store.currentProject) return 'No project'
+  if (store.isCompilationMode && store.activeCompilation) {
+    return `Box: ${store.activeCompilation.title}`
+  }
   const ep = store.currentEpisode
   if (!ep) return `${episodeLabel.value} 1`
   return `${episodeLabel.value} ${ep.episode_number}${ep.title && ep.title !== `Episode ${ep.episode_number}` ? ` · ${ep.title}` : ''}`
@@ -32,18 +40,34 @@ function toggleDropdown() {
   isOpen.value = !isOpen.value
   if (!isOpen.value) {
     cancelEditing()
+    confirmingDeleteId.value = null
+    deleteError.value = ''
   }
 }
 
 function closeDropdown() {
   isOpen.value = false
   cancelEditing()
+  confirmingDeleteId.value = null
+  deleteError.value = ''
 }
 
 async function handleSelectEpisode(episodeId: string) {
   closeDropdown()
+  store.selectCompilation(null)
   if (episodeId === store.currentEpisodeId) return
   await store.selectEpisode(episodeId)
+}
+
+function handleSelectCompilation(compilationId: string) {
+  closeDropdown()
+  store.selectCompilation(compilationId)
+  emit('select-compilation', compilationId)
+}
+
+function handleOpenCompilationModal() {
+  closeDropdown()
+  emit('open-compilation-modal')
 }
 
 function handleOpenSettings() {
@@ -70,6 +94,8 @@ async function copyEpisodeTitle(ep: { id: string; title: string | null; episode_
 }
 
 function startEditing(ep: { id: string; title: string | null; episode_number: number }) {
+  confirmingDeleteId.value = null
+  deleteError.value = ''
   editingEpisodeId.value = ep.id
   editingTitle.value = ep.title || `${episodeLabel.value} ${ep.episode_number}`
   nextTick(() => {
@@ -81,6 +107,37 @@ function startEditing(ep: { id: string; title: string | null; episode_number: nu
 function cancelEditing() {
   editingEpisodeId.value = null
   editingTitle.value = ''
+}
+
+function promptDeleteEpisode(episodeId: string) {
+  cancelEditing()
+  deleteError.value = ''
+  confirmingDeleteId.value = episodeId
+}
+
+function openAndPromptDeleteCurrentEpisode() {
+  if (!store.currentEpisode) return
+  isOpen.value = true
+  promptDeleteEpisode(store.currentEpisode.id)
+}
+
+function cancelDeleteEpisode() {
+  confirmingDeleteId.value = null
+  deleteError.value = ''
+}
+
+async function confirmDeleteEpisode(ep: { id: string; episode_number: number }) {
+  if (deletingId.value) return
+  deletingId.value = ep.id
+  deleteError.value = ''
+  try {
+    await store.deleteEpisode(ep.id)
+    confirmingDeleteId.value = null
+  } catch (err) {
+    deleteError.value = err instanceof Error ? err.message : 'Failed to delete episode'
+  } finally {
+    deletingId.value = null
+  }
 }
 
 async function saveEditing(ep: { id: string; episode_number: number }) {
@@ -118,17 +175,31 @@ onUnmounted(() => {
 
 <template>
   <div ref="dropdownRef" class="episode-switcher" :class="{ 'is-open': isOpen }">
-    <button
-      type="button"
-      class="episode-switcher-trigger"
-      :class="{ 'is-open': isOpen }"
-      :title="'Switch ' + episodeLabel"
-      @click="toggleDropdown"
-    >
-      <Clapperboard :size="13" class="episode-trigger-icon" />
-      <span class="episode-switcher-label">{{ currentEpisodeDisplay }}</span>
-      <ChevronDown :size="13" class="switcher-arrow" />
-    </button>
+    <div class="episode-switcher-bar">
+      <button
+        type="button"
+        class="episode-switcher-trigger"
+        :class="{ 'is-open': isOpen }"
+        :title="'Switch ' + episodeLabel"
+        @click="toggleDropdown"
+      >
+        <Boxes v-if="store.isCompilationMode" :size="13" class="episode-trigger-icon compilation-trigger-icon" />
+        <Clapperboard v-else :size="13" class="episode-trigger-icon" />
+        <span class="episode-switcher-label" :class="{ 'compilation-label': store.isCompilationMode }">{{ currentEpisodeDisplay }}</span>
+        <ChevronDown :size="13" class="switcher-arrow" />
+      </button>
+
+      <button
+        v-if="!store.isCompilationMode && store.currentEpisode && store.episodes.length > 1"
+        type="button"
+        class="episode-bar-delete-btn"
+        :title="`Delete ${episodeLabel} ${store.currentEpisode.episode_number}`"
+        :aria-label="`Delete ${episodeLabel} ${store.currentEpisode.episode_number}`"
+        @click.stop="openAndPromptDeleteCurrentEpisode"
+      >
+        <Trash2 :size="13" />
+      </button>
+    </div>
 
     <div v-if="isOpen" class="episode-dropdown-menu">
       <div class="episode-menu-header">
@@ -143,16 +214,46 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <p v-if="deleteError" class="episode-delete-error">{{ deleteError }}</p>
+
       <div class="episode-menu-list">
         <div
           v-for="ep in store.episodes"
           :key="ep.id"
           class="episode-menu-item"
-          :class="{ 'is-active': ep.id === store.currentEpisodeId, 'is-editing': editingEpisodeId === ep.id }"
-          @click="editingEpisodeId !== ep.id && handleSelectEpisode(ep.id)"
+          :class="{
+            'is-active': ep.id === store.currentEpisodeId,
+            'is-editing': editingEpisodeId === ep.id || confirmingDeleteId === ep.id,
+          }"
+          @click="editingEpisodeId !== ep.id && confirmingDeleteId !== ep.id && handleSelectEpisode(ep.id)"
         >
+          <!-- Delete Confirmation Mode -->
+          <div v-if="confirmingDeleteId === ep.id" class="episode-delete-confirm-row" @click.stop>
+            <span class="episode-delete-prompt">
+              Delete <strong>{{ episodeLabel }} {{ ep.episode_number }}</strong>?
+            </span>
+            <div class="episode-delete-confirm-actions">
+              <button
+                type="button"
+                class="episode-confirm-delete-btn"
+                :disabled="deletingId === ep.id"
+                @click.stop="confirmDeleteEpisode(ep)"
+              >
+                {{ deletingId === ep.id ? 'Deleting…' : 'Delete' }}
+              </button>
+              <button
+                type="button"
+                class="episode-cancel-delete-btn"
+                :disabled="deletingId === ep.id"
+                @click.stop="cancelDeleteEpisode"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+
           <!-- Editing Mode -->
-          <div v-if="editingEpisodeId === ep.id" class="episode-rename-row" @click.stop>
+          <div v-else-if="editingEpisodeId === ep.id" class="episode-rename-row" @click.stop>
             <span class="episode-badge">{{ episodeLabel }} {{ ep.episode_number }}</span>
             <input
               ref="renameInputRef"
@@ -218,6 +319,16 @@ onUnmounted(() => {
               >
                 <Pencil :size="12" />
               </button>
+              <button
+                v-if="store.episodes.length > 1"
+                type="button"
+                class="episode-edit-icon-btn danger"
+                :title="`Delete ${episodeLabel} ${ep.episode_number}`"
+                :aria-label="`Delete ${ep.title || `${episodeLabel} ${ep.episode_number}`}`"
+                @click.stop="promptDeleteEpisode(ep.id)"
+              >
+                <Trash2 :size="12" />
+              </button>
               <Check v-if="ep.id === store.currentEpisodeId" :size="15" class="episode-check-icon" />
             </div>
           </template>
@@ -229,6 +340,40 @@ onUnmounted(() => {
           <Plus :size="14" />
           <span>New {{ episodeLabel }}</span>
         </button>
+      </div>
+
+      <!-- COMPILATIONS SECTION -->
+      <div class="compilations-menu-section">
+        <div class="episode-menu-header">
+          <span>Compilation Boxes ({{ store.compilations.length }})</span>
+          <button
+            type="button"
+            class="episode-settings-icon-btn"
+            title="Create or manage compilation boxes"
+            @click="handleOpenCompilationModal"
+          >
+            <Plus :size="13" />
+          </button>
+        </div>
+        <div v-if="store.compilations.length" class="episode-menu-list">
+          <div
+            v-for="comp in store.compilations"
+            :key="comp.id"
+            class="episode-menu-item compilation-menu-item"
+            :class="{ 'is-active': comp.id === store.activeCompilationId }"
+            @click="handleSelectCompilation(comp.id)"
+          >
+            <div class="episode-item-info">
+              <span class="compilation-pill-icon"><Boxes :size="13" /></span>
+              <span class="episode-item-title">{{ comp.title }}</span>
+              <span class="compilation-shots-badge">{{ comp.clip_count ?? 0 }} shots</span>
+            </div>
+            <Check v-if="comp.id === store.activeCompilationId" :size="15" class="episode-check-icon" />
+          </div>
+        </div>
+        <div v-else class="no-compilations-hint" @click="handleOpenCompilationModal">
+          <span>+ Create a Compilation Box</span>
+        </div>
       </div>
     </div>
   </div>
@@ -245,6 +390,42 @@ onUnmounted(() => {
 
 .episode-switcher.is-open {
   z-index: 1000;
+}
+
+.episode-switcher-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.episode-bar-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #9ba39e;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.episode-bar-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+
+.episode-delete-error {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.12);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.25);
 }
 
 .episode-switcher-trigger {
@@ -464,11 +645,68 @@ onUnmounted(() => {
   color: #fff;
 }
 
+.episode-edit-icon-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #f87171;
+}
+
 .episode-edit-icon-btn.is-copied {
   opacity: 1;
   color: #7fd1a5;
   background: rgba(73, 169, 120, 0.15);
   border-color: rgba(73, 169, 120, 0.35);
+}
+
+.episode-delete-confirm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.episode-delete-prompt {
+  font-size: 12px;
+  color: #fca5a5;
+}
+
+.episode-delete-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.episode-confirm-delete-btn {
+  padding: 3px 9px;
+  border-radius: 5px;
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.22);
+  color: #fecaca;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.episode-confirm-delete-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.4);
+  color: #fff;
+}
+
+.episode-cancel-delete-btn {
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.episode-cancel-delete-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
 }
 
 .episode-check-icon {
@@ -558,5 +796,45 @@ onUnmounted(() => {
 .add-episode-btn:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
+}
+
+.compilation-trigger-icon {
+  color: #c084fc;
+}
+
+.compilation-label {
+  color: #e9d5ff;
+  font-weight: 600;
+}
+
+.compilations-menu-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(147, 51, 234, 0.03);
+}
+
+.compilation-pill-icon {
+  color: #c084fc;
+  display: flex;
+  align-items: center;
+}
+
+.compilation-shots-badge {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: auto;
+  padding-right: 4px;
+}
+
+.no-compilations-hint {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #a855f7;
+  cursor: pointer;
+  text-align: center;
+}
+
+.no-compilations-hint:hover {
+  color: #c084fc;
+  text-decoration: underline;
 }
 </style>

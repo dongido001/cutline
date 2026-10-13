@@ -7,7 +7,7 @@ from .settings import settings
 
 def run_api() -> None:
     subprocess.run(
-        [sys.executable, "-m", "uvicorn", "backend.api:app", "--host", "127.0.0.1", "--port", "8000"],
+        [sys.executable, "-m", "uvicorn", "backend.api:app", "--host", "127.0.0.1", "--port", "8000", "--reload"],
         check=True,
     )
 

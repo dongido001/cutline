@@ -20,7 +20,10 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     proxy: {
-      '/api': 'http://127.0.0.1:8000',
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        ws: true,
+      },
       '/media': 'http://127.0.0.1:8000',
       '/auth': 'http://127.0.0.1:8000',
     },

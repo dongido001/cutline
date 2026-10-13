@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from backend import api
 from backend.database import Base, get_db
 from backend.media import _assert_safe_image_url, delete_media_file
-from backend.models import Episode, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot
+from backend.models import Compilation, Episode, Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot
 from backend.queue_admin import job_matches_queue
 from backend.settings import settings
 from backend.system_guard import require_local_system
@@ -151,6 +151,48 @@ def test_delete_final_cut_is_episode_scoped(tmp_path, monkeypatch):
         assert response.status_code == 204
         remaining = session.scalars(select(ProjectVariantExport)).all()
         assert [item.filename for item in remaining] == ["keep.mp4"]
+    finally:
+        api.app.dependency_overrides.clear()
+        session.close()
+        engine.dispose()
+
+
+def test_delete_final_cut_skips_compilation_exports(tmp_path, monkeypatch):
+    engine, session, client = _session(tmp_path, monkeypatch)
+    try:
+        project = Project(title="Cuts")
+        session.add(project)
+        session.flush()
+        keep = ProjectVariantExport(
+            project_id=project.id,
+            variant="landscape",
+            filename="episode.mp4",
+            duration_ms=1000,
+            width=1920,
+            height=1080,
+            clip_count=1,
+            fallback_count=0,
+        )
+        comp = Compilation(project_id=project.id, title="Reel", episode_ids=[])
+        session.add(comp)
+        session.flush()
+        drop_risk = ProjectVariantExport(
+            project_id=project.id,
+            compilation_id=comp.id,
+            variant="landscape",
+            filename="compilation.mp4",
+            duration_ms=2000,
+            width=1920,
+            height=1080,
+            clip_count=1,
+            fallback_count=0,
+        )
+        session.add_all([keep, drop_risk])
+        session.commit()
+        response = client.delete(f"/api/projects/{project.id}/final-cut?variant=landscape")
+        assert response.status_code == 204
+        remaining = session.scalars(select(ProjectVariantExport)).all()
+        assert {item.filename for item in remaining} == {"compilation.mp4"}
     finally:
         api.app.dependency_overrides.clear()
         session.close()

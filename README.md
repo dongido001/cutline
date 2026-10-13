@@ -7,11 +7,29 @@
 ## Stack
 
 - Vue 3, TypeScript, Vite, Pinia
-- FastAPI, SQLAlchemy, SQLite
-- Huey with a persistent SQLite queue
+- FastAPI, SQLAlchemy, SQLite by default (optional Postgres via `MOVIE_DATABASE_DSN`)
+- Huey with a persistent SQLite queue by default (optional Redis via `MOVIE_QUEUE_BACKEND=redis`)
 - Pluggable text providers: built-in prototype parser, Ollama, or an OpenAI-compatible local bridge
 
-Docker is intentionally not required for the prototype. The app database and task queue live in `backend/data/`.
+Docker is intentionally not required for the prototype. The app database and task queue live in `backend/data/` unless you opt into the compose services below.
+
+### Optional Postgres + Redis
+
+For local experiments with a real database and Redis-backed Huey lanes:
+
+```sh
+docker compose up -d
+```
+
+Then set in `backend/.env` (see `backend/.env.example`):
+
+```sh
+MOVIE_DATABASE_DSN=postgresql+psycopg://cutline:cutline@127.0.0.1:5432/cutline
+MOVIE_QUEUE_BACKEND=redis
+MOVIE_REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+Restart the API and workers after changing these. Tables are created on API startup. Per-project generation caps (`MOVIE_MAX_ACTIVE_*_JOBS_PER_PROJECT`) return HTTP 429 when a project floods a lane.
 
 ## Run locally
 

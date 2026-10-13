@@ -9,6 +9,7 @@ import backend.deep_review as deep_review_module
 import backend.tasks as tasks_module
 from backend.api import app, get_db
 from backend.deep_review_context import (
+    _validate_evidence,
     build_context,
     context_for_prompt,
     fingerprint,
@@ -16,6 +17,20 @@ from backend.deep_review_context import (
     validate_patches,
     validate_report,
 )
+
+
+def test_cast_evidence_validates_exact_field_and_character():
+    context = {"current": {"version_id": "v1", "episode_id": "e1"}, "cast": [
+        {"id": "box", "name": "Counting Box", "voice_description": "Clear speaking voice"}
+    ]}
+    evidence = {"character_id": "box", "field": "voice_description", "quote": "Clear speaking voice"}
+    result = _validate_evidence(evidence, context)
+    assert result["character_id"] == "box"
+    assert result["label"] == "Cast · Counting Box · voice description"
+    assert _validate_evidence({**evidence, "quote": "Silent"}, context) is None
+    assert _validate_evidence({**evidence, "character_id": "invented"}, context) is None
+    assert _validate_evidence({**evidence, "field": "source_text"}, context) is None
+    assert _validate_evidence({**evidence, "shot_id": "invented"}, context) is None
 from backend.deep_review_provider import editorial_response
 from backend.migrations import migrate_schema
 from backend.models import (
@@ -514,6 +529,86 @@ def test_provider_contract_and_limits(monkeypatch):
     with pytest.raises(ValueError, match="No material was truncated"):
         editorial_response(OllamaScriptProvider(), {"current": {"text": "x" * 200}})
 
+    # Multi-episode series with heavy production prompts compacts below 130k chars while preserving story and current shot prompts
+    from backend.deep_review_provider import _build_editorial_prompt
+
+    long_img = "Vertical 9:16 cinematic starting frame. " * 15
+    long_vid = "Smooth camera push in preserving exact identity. " * 15
+    previous = []
+    for ep_num in range(1, 5):
+        shots_src = []
+        shots_data = []
+        for s_num in range(1, 21):
+            action = f"Episode {ep_num} Shot {s_num} narrative action happens here."
+            dialogue_line = f"Line spoken in episode {ep_num} shot {s_num}."
+            shots_src.append(
+                f"SHOT {s_num} - BEAT {s_num}\n"
+                f"Action:\n{action}\n"
+                f'MAYA:\n"{dialogue_line}"\n'
+                f"Sound: Rain and piano.\n"
+                f"Image prompt:\n{long_img}\n"
+                f"Video prompt:\n{long_vid}\n"
+            )
+            shots_data.append(
+                {
+                    "id": f"ep{ep_num}-s{s_num}",
+                    "order_index": s_num - 1,
+                    "shot_number": s_num,
+                    "title": f"BEAT {s_num}",
+                    "start_ms": (s_num - 1) * 5000,
+                    "end_ms": s_num * 5000,
+                    "duration_ms": 5000,
+                    "framing": "Medium",
+                    "action": action,
+                    "dialogue": [{"character": "MAYA", "text": dialogue_line}],
+                    "sound": "Rain and piano.",
+                    "image_prompt": long_img,
+                    "video_prompt": long_vid,
+                    "title_card_text": "",
+                    "character_ids": ["char-1"],
+                }
+            )
+        previous.append(
+            {
+                "version_id": f"ver-{ep_num}",
+                "episode_id": f"ep-{ep_num}",
+                "episode_number": ep_num,
+                "title": f"Episode {ep_num}",
+                "source_text": "\n\n".join(shots_src),
+                "draft": False,
+                "scenes": [
+                    {
+                        "id": f"sc-{ep_num}",
+                        "order_index": 0,
+                        "title": "Main Scene",
+                        "location": "Detailed coastal cafe location description " * 10,
+                        "time_of_day": "Night",
+                        "start_ms": 0,
+                        "end_ms": 100000,
+                        "action": "\n\n".join(s["action"] for s in shots_data),
+                        "dialogue": [d for s in shots_data for d in s["dialogue"]],
+                        "shots": shots_data,
+                    }
+                ],
+            }
+        )
+    raw_multi_ctx = {
+        "project": {"id": "proj-1", "title": "Tide"},
+        "current": {**previous[-1], "version_id": "ver-5", "episode_number": 5},
+        "previous": previous,
+        "cast": [{"id": "char-1", "name": "Maya"}],
+    }
+    prompt_ctx = context_for_prompt(raw_multi_ctx)
+    full_prompt = _build_editorial_prompt(prompt_ctx, None, 2_000_000)
+    assert len(full_prompt) < 2_000_000
+
+    compacted_prompt = _build_editorial_prompt(prompt_ctx, None, 100_000)
+    assert len(compacted_prompt) <= 100_000
+    assert "Episode 1 Shot 1 narrative action happens here." in compacted_prompt
+    assert "Line spoken in episode 4 shot 20." in compacted_prompt
+    assert long_img.strip() in compacted_prompt
+
+
 
 def test_deep_review_api_lifecycle_apply_and_undo(isolated_db, monkeypatch):
     ids = _seed_synthetic_series(isolated_db)
@@ -891,3 +986,64 @@ Image prompt: Gabe stays seated with the coffee.
         changed = db.get(ScriptVersion, result.json()['version_id'])
         assert changed.source_text == original_source.replace('Gabe stays seated with the coffee.', 'Gabe remains standing with the coffee.', 1)
         assert changed.scenes[0].shots[1].action == after
+
+
+def test_script_history_preview_restore_and_timeline_recovery(isolated_db):
+    ids = _seed_synthetic_series(isolated_db)
+    with isolated_db() as db:
+        original = deep_review_module._load_version(db, ids['ep3_v1_id'])
+        newer, _, _ = deep_review_module._clone_version_with_patches(db, original, [])
+        newer.source_text += '\nNewer revision.'
+        newer_id = newer.id
+        db.commit()
+    client = TestClient(app)
+    history = client.get(f'/api/script-versions/{newer_id}/history').json()
+    assert [item['id'] for item in history['versions']] == [newer_id, ids['ep3_v1_id']]
+    preview = client.get(f"/api/script-versions/{ids['ep3_v1_id']}").json()
+    assert 'Newer revision.' not in preview['source_text']
+    payload = {'expected_version_id': history['current_version_id'], 'expected_fingerprint': history['current_fingerprint']}
+    response = client.post(f"/api/script-versions/{ids['ep3_v1_id']}/restore", json=payload)
+    assert response.status_code == 200, response.text
+    restored = response.json()
+    assert restored['id'] not in {newer_id, ids['ep3_v1_id']}
+    assert restored['status'] == 'review'
+    assert restored['source_text'] == preview['source_text']
+    assert restored['scenes'][0]['shots'][0]['image']['url'] == preview['scenes'][0]['shots'][0]['image']['url']
+    assert client.post(f"/api/script-versions/{ids['ep3_v1_id']}/restore", json=payload).status_code == 409
+    with isolated_db() as db:
+        timeline = db.scalar(select(ProjectTimeline).where(ProjectTimeline.episode_id == ids['ep3_id']))
+        assert timeline.document['primary'] == []
+    latest = client.get(f"/api/script-versions/{restored['id']}/history").json()
+    payload = {'expected_version_id': latest['current_version_id'], 'expected_fingerprint': latest['current_fingerprint']}
+    recovered = client.post(f'/api/script-versions/{newer_id}/restore', json=payload)
+    assert recovered.status_code == 200, recovered.text
+    with isolated_db() as db:
+        timeline = db.scalar(select(ProjectTimeline).where(ProjectTimeline.episode_id == ids['ep3_id']))
+        assert timeline.document['primary'][0]['source']['ref_id'] == recovered.json()['scenes'][0]['shots'][0]['id']
+    assert client.get(f"/api/script-versions/{ids['ep3_v1_id']}").json()['source_text'] == preview['source_text']
+
+
+def test_history_restore_rejects_in_place_edits_and_other_episodes(isolated_db):
+    ids = _seed_synthetic_series(isolated_db)
+    client = TestClient(app)
+    history = client.get(f"/api/script-versions/{ids['ep1_v1_id']}/history").json()
+    payload = {'expected_version_id': history['current_version_id'], 'expected_fingerprint': history['current_fingerprint']}
+    assert client.post(f"/api/script-versions/{ids['ep2_v1_id']}/restore", json=payload).status_code == 409
+    with isolated_db() as db:
+        version = db.get(ScriptVersion, history['current_version_id'])
+        version.source_text += '\nEdited after preview.'
+        db.commit()
+    assert client.post(f"/api/script-versions/{ids['ep1_v1_id']}/restore", json=payload).status_code == 409
+    assert client.get('/api/script-versions/missing/history').status_code == 404
+
+
+def test_preflight_exact_cast_names_win_and_unresolved_cues_are_grouped():
+    context = {'current': {'version_id': 'v1', 'scenes': [{'shots': [
+        {'id': 's1', 'dialogue': [{'character': name, 'text': 'Hello.'} for name in ('MAYA', 'ROSA', 'UNKNOWN')]},
+        {'id': 's2', 'dialogue': [{'character': name, 'text': 'Again.'} for name in ('MAYA', 'ROSA', 'UNKNOWN')]},
+    ]}]}, 'cast': [{'name': name} for name in ('MAYA', 'MAYA SANTOS', 'ROSA', 'ROSA SANTOS')]}
+    warnings = [finding for finding in preflight(context) if finding['category'] == 'cast']
+    assert [finding['title'] for finding in warnings] == ['Check dialogue speaker UNKNOWN']
+    context['cast'] = [{'name': name} for name in ('MAYA SANTOS', 'MAYA REYES', 'ROSA SANTOS')]
+    warnings = [finding for finding in preflight(context) if finding['category'] == 'cast']
+    assert [finding['title'] for finding in warnings] == ['Check dialogue speaker MAYA', 'Check dialogue speaker UNKNOWN']

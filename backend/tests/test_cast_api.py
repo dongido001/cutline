@@ -142,3 +142,87 @@ def test_generate_requires_reference_images_for_selected_cast(tmp_path, monkeypa
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_elements_sync_3d_view_mentions_and_r2v_clip_queue(tmp_path, monkeypatch) -> None:
+    client, session, project, shot = _client(tmp_path, monkeypatch)
+    try:
+        scene = shot.scene
+        scene.location = "INT. NEON DINER"
+        scene.set_notes = "Rainy neon diner booth with chrome table"
+        scene.props_notes = "Vintage Revolver, Brass Compass"
+        shot.video_prompt = "@MARA_ELIAS picks up @VINTAGE_REVOLVER inside @INT_NEON_DINER"
+        session.commit()
+
+        synced = client.post(f"/api/projects/{project.id}/elements/sync")
+        assert synced.status_code == 200
+        elements = synced.json()
+        kinds = {(item["name"], item["kind"]) for item in elements}
+        assert ("NEON DINER", "scene") in kinds
+        assert ("VINTAGE REVOLVER", "prop") in kinds
+        assert ("BRASS COMPASS", "prop") in kinds
+
+        created_char = client.post(
+            f"/api/projects/{project.id}/characters",
+            json={"name": "MARA ELIAS", "notes": "detective", "kind": "character"},
+        )
+        assert created_char.status_code == 201
+        char_data = created_char.json()
+        assert char_data["kind"] == "character"
+
+        # Upload Step 1 main view and Step 2 3D turnaround sheet
+        up_main = client.post(
+            f"/api/characters/{char_data['id']}/references?view_type=main",
+            files={"file": ("main.png", PNG_BYTES, "image/png")},
+        )
+        assert up_main.status_code == 200
+        assert up_main.json()["references"][0]["view_type"] == "main"
+
+        up_3d = client.post(
+            f"/api/characters/{char_data['id']}/references?view_type=3d_view",
+            files={"file": ("3d.png", PNG_BYTES, "image/png")},
+        )
+        assert up_3d.status_code == 200
+        view_types = [r["view_type"] for r in up_3d.json()["references"]]
+        assert view_types == ["main", "3d_view"]
+
+        # Queue R2V clip WITHOUT a pre-rendered shot image
+        monkeypatch.setattr("backend.api.video_provider_status", lambda: ("flowkit", "Google Flow", True, True, "veo_3_1_r2v_fast_ultra", "ready"))
+        enqueued_calls = {}
+
+        def fake_enqueue_clip(shot_id, job_id, aspect_ratio=None, include_cast_references=False):
+            enqueued_calls["shot_id"] = shot_id
+            enqueued_calls["include_cast_references"] = include_cast_references
+            class DummyTask:
+                id = "r2v-task-1"
+            return DummyTask()
+
+        monkeypatch.setattr("backend.api.enqueue_shot_clip", fake_enqueue_clip)
+
+        # In I2V mode, missing storyboard image returns 409
+        i2v_resp = client.post(
+            f"/api/shots/{shot.id}/clip/generate?aspect_ratio=16%3A9",
+            json={"video_mode": "i2v"},
+        )
+        assert i2v_resp.status_code == 409
+
+        # In R2V mode, it succeeds with 202 using attached/mentioned @Elements!
+        r2v_resp = client.post(
+            f"/api/shots/{shot.id}/clip/generate?aspect_ratio=16%3A9",
+            json={
+                "video_mode": "r2v",
+                "include_cast_references": True,
+                "include_scene_reference": True,
+                "element_ids": [char_data["id"]],
+            },
+        )
+        assert r2v_resp.status_code == 202
+        r2v_job = r2v_resp.json()
+        assert enqueued_calls["shot_id"] == shot.id
+        assert enqueued_calls["include_cast_references"] is True
+        assert r2v_job["attempts"][0]["video_mode"] == "r2v"
+        assert r2v_job["attempts"][0]["element_ids"] == [char_data["id"]]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+

@@ -1,0 +1,46 @@
+# Optional infra for Cutline scale experiments.
+# Defaults in the app stay local SQLite + SqliteHuey; point .env at these when ready:
+#
+#   MOVIE_DATABASE_DSN=postgresql+psycopg://cutline:cutline@127.0.0.1:5432/cutline
+#   MOVIE_QUEUE_BACKEND=redis
+#   MOVIE_REDIS_URL=redis://127.0.0.1:6379/0
+#
+#   docker compose up -d
+#   # then migrate/create tables by starting the API once (create_all + migrate_schema)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cutline-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cutline
+      POSTGRES_PASSWORD: cutline
+      POSTGRES_DB: cutline
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - cutline_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cutline -d cutline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cutline-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - cutline_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  cutline_pg:
+  cutline_redis:

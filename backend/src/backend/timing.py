@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Spoken English ≈ 2.5 words/sec; CJK ≈ 2.8 chars/sec (Wonderclip-like).
+# Spoken English ≈ 2.5 words/sec; CJK ≈ 2.8 chars/sec.
 _WORDS_PER_SEC = 2.5
 _CJK_CHARS_PER_SEC = 2.8
 _PADDING_MS = 400

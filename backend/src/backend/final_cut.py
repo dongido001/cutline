@@ -112,6 +112,30 @@ def _run(command: list[str]) -> None:
         raise RuntimeError(f"FFmpeg failed: {detail}")
 
 
+def export_encode_args(*, include_audio_rate: bool = True) -> list[str]:
+    """Shared H.264/AAC args for timeline + final-cut exports."""
+    preset = (settings.export_video_preset or "slow").strip() or "slow"
+    crf = max(0, min(51, int(settings.export_video_crf)))
+    audio_k = max(64, min(512, int(settings.export_audio_bitrate_k)))
+    args = [
+        "-c:v", "libx264",
+        "-preset", preset,
+        "-crf", str(crf),
+        "-pix_fmt", "yuv420p",
+        # Force SDR tags so HDR source metadata (BT.2020/PQ) is not copied onto 8-bit exports.
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
+        "-color_range", "tv",
+        "-c:a", "aac",
+        "-b:a", f"{audio_k}k",
+    ]
+    if include_audio_rate:
+        args.extend(["-ar", "48000"])
+    args.extend(["-movflags", "+faststart"])
+    return args
+
+
 def _has_audio(path: Path) -> bool:
     result = subprocess.run(
         [
@@ -200,22 +224,7 @@ def _normalize_source(
             *audio_map,
             "-t",
             str(duration),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "48000",
-            "-movflags",
-            "+faststart",
+            *export_encode_args(),
             str(destination),
         ]
     )

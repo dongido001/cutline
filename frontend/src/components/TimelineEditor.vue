@@ -2,22 +2,23 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PublishPanel from '@/components/PublishPanel.vue'
-import { api, type AspectRatio, type OutputVariant, type ProjectDetail, type ProjectTimeline, type Shot, type TimelineAudioOverlay, type TimelineGeometry, type TimelinePrimaryItem, type TimelineSource } from '@/lib/api'
+import { api, DEFAULT_LUT_PRESETS, lutCssFilter, videoColorBoostFilter, type AspectRatio, type LUTPreset, type OutputVariant, type ProjectDetail, type ProjectTimeline, type ProjectVariantExport, type Shot, type TimelineAsset, type TimelineAudioOverlay, type TimelineGeometry, type TimelineImageOverlay, type TimelinePrimaryItem, type TimelineSource, type TimelineVideoOverlay } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
-import { AlignCenter, ChevronLeft, ChevronRight, CopyPlus, Download, Film, GripVertical, ImagePlus, Keyboard, LoaderCircle, MoveLeft, MoveRight, Music, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
+import { AlignCenter, Boxes, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CopyPlus, Crosshair, Download, Film, GripVertical, ImagePlus, Keyboard, Layers, LoaderCircle, MoveLeft, MoveRight, Music, Palette, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
 
-const props = defineProps<{ project: ProjectDetail; shots: Shot[] }>()
+const props = defineProps<{ project: ProjectDetail; shots: Shot[]; compilationId?: string }>()
 const emit = defineEmits<{ variantChange: [variant: OutputVariant] }>()
 const store = useStudioStore()
 const route = useRoute()
 const router = useRouter()
 const timeline = ref<ProjectTimeline | null>(null)
+const compilationExports = ref<ProjectVariantExport[]>([])
 
 interface PersistedTimelineUiState {
   isMuted?: boolean
   zoomLevel?: number
   playheadMs?: number
-  selectedKind?: 'primary' | 'image' | 'text' | 'audio'
+  selectedKind?: 'primary' | 'video' | 'image' | 'text' | 'audio'
   selectedId?: string
   variant?: OutputVariant
   scrollLeft?: number
@@ -25,11 +26,14 @@ interface PersistedTimelineUiState {
 
 const GLOBAL_PREFS_KEY = 'cutline:timeline-prefs'
 
-function uiStorageKey(projectId = props.project.id, episodeId = store.currentEpisodeId): string {
+function uiStorageKey(projectId = props.project.id, episodeId = store.currentEpisodeId, compilationId = props.compilationId): string {
+  if (compilationId) {
+    return `cutline:timeline-ui:${projectId}:compilation:${compilationId}`
+  }
   return `cutline:timeline-ui:${projectId}:${episodeId || 'default'}`
 }
 
-function readPersistedUiState(projectId = props.project.id, episodeId = store.currentEpisodeId): PersistedTimelineUiState {
+function readPersistedUiState(projectId = props.project.id, episodeId = store.currentEpisodeId, compilationId = props.compilationId): PersistedTimelineUiState {
   const result: PersistedTimelineUiState = {}
   try {
     const rawGlobal = localStorage.getItem(GLOBAL_PREFS_KEY)
@@ -40,8 +44,8 @@ function readPersistedUiState(projectId = props.project.id, episodeId = store.cu
   } catch {}
   try {
     const rawScoped =
-      localStorage.getItem(uiStorageKey(projectId, episodeId)) ||
-      (episodeId ? localStorage.getItem(uiStorageKey(projectId, null)) : null)
+      localStorage.getItem(uiStorageKey(projectId, episodeId, compilationId)) ||
+      (!compilationId && episodeId ? localStorage.getItem(uiStorageKey(projectId, null)) : null)
     if (rawScoped) {
       const parsed = JSON.parse(rawScoped) as PersistedTimelineUiState
       if (parsed && typeof parsed === 'object') Object.assign(result, parsed)
@@ -59,12 +63,20 @@ const variant = ref<OutputVariant>(
       ? initialUiState.variant
       : props.project.aspect_ratio === '9:16' ? 'shorts' : 'landscape',
 )
-const selectedKind = ref<'primary' | 'image' | 'text' | 'audio'>(
-  initialUiState.selectedKind === 'image' || initialUiState.selectedKind === 'text' || initialUiState.selectedKind === 'audio'
+const selectedKind = ref<'primary' | 'video' | 'image' | 'text' | 'audio'>(
+  initialUiState.selectedKind === 'video' || initialUiState.selectedKind === 'image' || initialUiState.selectedKind === 'text' || initialUiState.selectedKind === 'audio'
     ? initialUiState.selectedKind
     : 'primary',
 )
 const selectedId = ref(typeof initialUiState.selectedId === 'string' ? initialUiState.selectedId : '')
+export type SelectedTrackKind = 'primary' | 'video' | 'image' | 'text' | 'audio'
+export interface SelectedEntry {
+  kind: SelectedTrackKind
+  id: string
+}
+const selectedEntries = ref<SelectedEntry[]>(
+  selectedId.value ? [{ kind: selectedKind.value, id: selectedId.value }] : []
+)
 const playheadMs = ref(typeof initialUiState.playheadMs === 'number' && initialUiState.playheadMs >= 0 ? initialUiState.playheadMs : 0)
 const playing = ref(false)
 const loopPlayback = ref(false)
@@ -83,6 +95,7 @@ const currentScrollLeft = ref(typeof initialUiState.scrollLeft === 'number' && i
 const showShortcutsModal = ref(false)
 const dragSourceIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
+const dragDuplicateModifier = ref(false)
 // Publish modal state is URL-driven (?publish=1) so refresh preserves it
 const showPublishModal = computed(() => route.query.publish === '1')
 
@@ -216,8 +229,17 @@ let overlayEdit: {
 } | null = null
 
 const targetAspect = computed<AspectRatio>(() => variant.value === 'shorts' ? '9:16' : '16:9')
-const variantExport = computed(() => props.project.variant_exports.find((item) => item.variant === variant.value) ?? null)
+const variantExport = computed(() => {
+  if (props.compilationId) {
+    return compilationExports.value.find((item) => item.variant === variant.value) ?? null
+  }
+  return props.project.variant_exports?.find((item) => item.variant === variant.value) ?? null
+})
 const downloadFilename = computed(() => {
+  if (props.compilationId) {
+    const compTitle = store.activeCompilation?.title || 'Compilation'
+    return `${props.project.title}_${compTitle}_${variant.value}.mp4`.replace(/[\s/\\:]+/g, '_')
+  }
   const epPart = store.currentEpisode ? `_${store.episodeLabel}_${store.currentEpisode.episode_number}` : ''
   return `${props.project.title}${epPart}_${variant.value}.mp4`.replace(/[\s/\\:]+/g, '_')
 })
@@ -276,6 +298,9 @@ const trimRangeStyle = computed(() => {
     width: `${width}%`,
   }
 })
+const videoOverlays = computed(() => timeline.value?.document.video_overlays ?? [])
+const selectedVideo = computed(() => videoOverlays.value.find((item) => item.id === selectedId.value) ?? null)
+const selectedVideoIndex = computed(() => videoOverlays.value.findIndex((item) => item.id === selectedId.value))
 const selectedImage = computed(() => timeline.value?.document.image_overlays.find((item) => item.id === selectedId.value) ?? null)
 const selectedText = computed(() => timeline.value?.document.text_overlays.find((item) => item.id === selectedId.value) ?? null)
 const audioOverlays = computed(() => timeline.value?.document.audio_overlays ?? [])
@@ -287,13 +312,389 @@ const activeIndex = computed(() => {
 const activeItem = computed(() => primary.value[activeIndex.value] ?? null)
 const activeLocalMs = computed(() => playheadMs.value - (starts.value[activeIndex.value] ?? 0))
 
+const isMultiSelect = computed(() => selectedEntries.value.length > 1)
+
+function isSelected(kind: SelectedTrackKind, id: string): boolean {
+  if (selectedEntries.value.length > 1) {
+    return selectedEntries.value.some((entry) => entry.kind === kind && entry.id === id)
+  }
+  return selectedKind.value === kind && selectedId.value === id
+}
+
+function getItemLabel(entry: { kind: string; id: string }): string {
+  if (entry.kind === 'primary') {
+    return primary.value.find((p) => p.id === entry.id)?.label || 'Primary Clip'
+  }
+  if (entry.kind === 'video') {
+    return videoOverlays.value.find((v) => v.id === entry.id)?.label || 'Video Layer'
+  }
+  if (entry.kind === 'audio') {
+    return audioOverlays.value.find((a) => a.id === entry.id)?.label || 'Audio Layer'
+  }
+  if (entry.kind === 'image') {
+    const img = timeline.value?.document.image_overlays.find((i) => i.id === entry.id)
+    return img ? (resolveSource(img.source)?.label || 'Image Layer') : 'Image Layer'
+  }
+  if (entry.kind === 'text') {
+    return timeline.value?.document.text_overlays.find((t) => t.id === entry.id)?.text || 'Text Layer'
+  }
+  return 'Item'
+}
+
+const multiSelectSummary = computed(() => {
+  const pCount = selectedEntries.value.filter((e) => e.kind === 'primary').length
+  const vCount = selectedEntries.value.filter((e) => e.kind === 'video').length
+  const aCount = selectedEntries.value.filter((e) => e.kind === 'audio').length
+  const iCount = selectedEntries.value.filter((e) => e.kind === 'image').length
+  const tCount = selectedEntries.value.filter((e) => e.kind === 'text').length
+
+  const parts: string[] = []
+  if (pCount) parts.push(`${pCount} Primary`)
+  if (vCount) parts.push(`${vCount} Video`)
+  if (aCount) parts.push(`${aCount} Audio`)
+  if (iCount) parts.push(`${iCount} Image`)
+  if (tCount) parts.push(`${tCount} Text`)
+  return parts.join(', ') || `${selectedEntries.value.length} items`
+})
+
+const eligibleSplitCount = computed(() => {
+  const curPlayhead = Math.round(playheadMs.value)
+  const entries = selectedEntries.value.length > 0 ? selectedEntries.value : [{ kind: 'primary' as SelectedTrackKind, id: activeItem.value?.id ?? '' }]
+  let count = 0
+  for (const entry of entries) {
+    if (entry.kind === 'primary') {
+      const pIdx = primary.value.findIndex((p, idx) => {
+        const s = starts.value[idx] ?? 0
+        return p.id === entry.id || (entries.length === 1 && curPlayhead >= s && curPlayhead < s + p.duration_ms)
+      })
+      if (pIdx >= 0) {
+        const item = primary.value[pIdx]
+        const s = starts.value[pIdx] ?? 0
+        const local = curPlayhead - s
+        if (item && item.kind === 'video' && local >= 100 && item.duration_ms - local >= 100) count++
+      }
+    } else if (entry.kind === 'video') {
+      const item = videoOverlays.value.find((v) => v.id === entry.id)
+      if (item && curPlayhead >= item.start_ms + 100 && curPlayhead <= item.start_ms + item.duration_ms - 100) count++
+    } else if (entry.kind === 'audio') {
+      const item = audioOverlays.value.find((a) => a.id === entry.id)
+      if (item && curPlayhead >= item.start_ms + 100 && curPlayhead <= item.start_ms + item.duration_ms - 100) count++
+    }
+  }
+  return count
+})
+
+const canSplitAtPlayhead = computed(() => eligibleSplitCount.value > 0)
+
+function toggleSelectEntry(kind: SelectedTrackKind, id: string) {
+  const existingIdx = selectedEntries.value.findIndex((e) => e.kind === kind && e.id === id)
+  if (existingIdx >= 0) {
+    selectedEntries.value.splice(existingIdx, 1)
+    if (selectedEntries.value.length === 1) {
+      const first = selectedEntries.value[0]
+      if (first) {
+        selectedKind.value = first.kind
+        selectedId.value = first.id
+      }
+    } else if (selectedEntries.value.length === 0) {
+      selectedKind.value = 'primary'
+      selectedId.value = primary.value[0]?.id ?? ''
+      selectedEntries.value = [{ kind: 'primary', id: selectedId.value }]
+    }
+  } else {
+    selectedEntries.value.push({ kind, id })
+    selectedKind.value = kind
+    selectedId.value = id
+  }
+}
+
+function clearMultiSelection() {
+  const first = selectedEntries.value[0]
+  if (first) {
+    selectedEntries.value = [first]
+    selectedKind.value = first.kind
+    selectedId.value = first.id
+  }
+}
+
+watch(
+  [selectedKind, selectedId],
+  ([k, id]) => {
+    if (selectedEntries.value.length <= 1) {
+      if (k && id) {
+        selectedEntries.value = [{ kind: k, id }]
+      }
+    }
+  },
+  { immediate: true },
+)
+
+function ensureCropFields(geom: TimelineGeometry): TimelineGeometry {
+  if (typeof geom.crop_top !== 'number') geom.crop_top = 0
+  if (typeof geom.crop_bottom !== 'number') geom.crop_bottom = 0
+  if (typeof geom.crop_left !== 'number') geom.crop_left = 0
+  if (typeof geom.crop_right !== 'number') geom.crop_right = 0
+  if (typeof geom.offset_x !== 'number') geom.offset_x = 0
+  if (typeof geom.offset_y !== 'number') geom.offset_y = 0
+  if (typeof geom.lut !== 'string') geom.lut = 'none'
+  if (typeof geom.lut_strength !== 'number') geom.lut_strength = 1
+  return geom
+}
+
+const lutPresets = ref<LUTPreset[]>(DEFAULT_LUT_PRESETS)
+
+const lutGroups = computed(() => {
+  const groups: Record<string, LUTPreset[]> = {}
+  for (const preset of lutPresets.value) {
+    const cat = preset.category || 'General'
+    if (!groups[cat]) groups[cat] = []
+    groups[cat].push(preset)
+  }
+  return Object.entries(groups).map(([category, presets]) => ({ category, presets }))
+})
+
+function selectedLutPreset(lutId?: string): LUTPreset | undefined {
+  if (!lutId || lutId === 'none') return undefined
+  return lutPresets.value.find((p) => p.id === lutId)
+}
+
+function resetLut(geom: TimelineGeometry) {
+  mutate(() => {
+    geom.lut = 'none'
+    geom.lut_strength = 1
+  })
+}
+
+function setLutStrength(geom: TimelineGeometry, strength: number) {
+  mutate(() => {
+    geom.lut_strength = Math.max(0, Math.min(1, strength))
+  })
+}
+
+/** Frame aspect (height / width) of the current output, used to express Y offsets in container-width units. */
+const frameHeightOverWidth = computed(() => (targetAspect.value === '9:16' ? 16 / 9 : 9 / 16))
+
+/**
+ * CSS `translate` value shifting media by a fraction of the output frame.
+ * Uses container-query width units (the program monitor is an inline-size container)
+ * so the shift matches the FFmpeg export regardless of the element's own size.
+ */
+function geometryOffsetTranslate(geom: TimelineGeometry): string | undefined {
+  const ox = Number(geom.offset_x ?? 0) || 0
+  const oy = Number(geom.offset_y ?? 0) || 0
+  if (Math.abs(ox) < 1e-4 && Math.abs(oy) < 1e-4) return undefined
+  // Use container width units for X and container height (via cqw * aspect) for Y so
+  // offset 1.0 always equals one full frame edge, matching FFmpeg's width/height pads.
+  return `${(ox * 100).toFixed(2)}cqw ${(oy * 100 * frameHeightOverWidth.value).toFixed(2)}cqw`
+}
+
+/** Track fill style for framing ranges. `center` = bipolar fill from midpoint (position). */
+function framingRangeStyle(
+  value: number | null | undefined,
+  min: number,
+  max: number,
+  mode: 'start' | 'center' = 'start',
+): Record<string, string> {
+  const span = max - min || 1
+  const raw = Number(value)
+  const v = Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : min
+  const pct = ((v - min) / span) * 100
+  if (mode === 'center') {
+    const mid = ((0 - min) / span) * 100
+    const from = Math.min(mid, pct)
+    const to = Math.max(mid, pct)
+    return {
+      '--range-pct': `${pct}%`,
+      '--range-mid': `${mid}%`,
+      '--range-fill-start': `${from}%`,
+      '--range-fill-end': `${to}%`,
+    }
+  }
+  return {
+    '--range-pct': `${pct}%`,
+    '--range-mid': '0%',
+    '--range-fill-start': '0%',
+    '--range-fill-end': `${pct}%`,
+  }
+}
+
+function formatSignedPercent(value: number | null | undefined): string {
+  const pct = Math.round((Number(value) || 0) * 100)
+  if (pct > 0) return `+${pct}%`
+  return `${pct}%`
+}
+
+function nudgeGeometryOffset(geom: TimelineGeometry, dx: number, dy: number) {
+  mutate(() => {
+    const clamp = (v: number) => Math.max(-1, Math.min(1, Math.round(v * 100) / 100))
+    geom.offset_x = clamp((geom.offset_x ?? 0) + dx)
+    geom.offset_y = clamp((geom.offset_y ?? 0) + dy)
+  })
+}
+
+function centerGeometryOffset(geom: TimelineGeometry) {
+  mutate(() => {
+    geom.offset_x = 0
+    geom.offset_y = 0
+  })
+}
+
 function defaultGeometry(item?: { source?: TimelineSource | null }): TimelineGeometry {
-  const reframed = item?.source ? resolveSource(item.source)?.native === false : false
-  return { source_aspect: 'auto', fit: reframed ? 'contain' : 'cover', focal_x: 0.5, focal_y: 0.5, zoom: 1, position: 'center', scale: 1 }
+  return {
+    source_aspect: 'auto',
+    fit: 'cover',
+    focal_x: 0.5,
+    focal_y: 0.5,
+    zoom: 1,
+    position: 'center',
+    scale: 1,
+    crop_top: 0,
+    crop_bottom: 0,
+    crop_left: 0,
+    crop_right: 0,
+    offset_x: 0,
+    offset_y: 0,
+    lut: 'none',
+    lut_strength: 1,
+  }
 }
 function geometryFor(item: { source?: TimelineSource | null; variant: Partial<Record<OutputVariant, TimelineGeometry>> }) {
   if (!item.variant[variant.value]) item.variant[variant.value] = defaultGeometry(item)
-  return item.variant[variant.value]!
+  return ensureCropFields(item.variant[variant.value]!)
+}
+
+function defaultVideoOverlayGeometry(item?: { source?: TimelineSource | null }): TimelineGeometry {
+  return {
+    source_aspect: 'auto',
+    fit: 'cover',
+    focal_x: 0.5,
+    focal_y: 0.5,
+    zoom: 1,
+    position: 'full-frame',
+    scale: 1,
+    crop_top: 0,
+    crop_bottom: 0,
+    crop_left: 0,
+    crop_right: 0,
+    offset_x: 0,
+    offset_y: 0,
+    lut: 'none',
+    lut_strength: 1,
+  }
+}
+function videoOverlayGeometryFor(item: TimelineVideoOverlay) {
+  if (!item.variant[variant.value]) item.variant[variant.value] = defaultVideoOverlayGeometry(item)
+  return ensureCropFields(item.variant[variant.value]!)
+}
+
+function geometryCropClipPath(geom: TimelineGeometry, forceClipForZoom = false): string | undefined {
+  let cTop = Math.max(0, Math.min(0.85, Number(geom.crop_top ?? 0) || 0))
+  let cBottom = Math.max(0, Math.min(0.85, Number(geom.crop_bottom ?? 0) || 0))
+  let cLeft = Math.max(0, Math.min(0.85, Number(geom.crop_left ?? 0) || 0))
+  let cRight = Math.max(0, Math.min(0.85, Number(geom.crop_right ?? 0) || 0))
+  const zoom = Math.max(1, Number(geom.zoom ?? 1) || 1)
+  const hasCrop = cTop > 1e-4 || cBottom > 1e-4 || cLeft > 1e-4 || cRight > 1e-4
+  if (!hasCrop && !(forceClipForZoom && zoom > 1.001)) {
+    return undefined
+  }
+  if (cTop + cBottom > 0.9) {
+    const scaleV = 0.9 / (cTop + cBottom)
+    cTop *= scaleV
+    cBottom *= scaleV
+  }
+  if (cLeft + cRight > 0.9) {
+    const scaleH = 0.9 / (cLeft + cRight)
+    cLeft *= scaleH
+    cRight *= scaleH
+  }
+  const fx = Math.max(0, Math.min(1, Number(geom.focal_x ?? 0.5)))
+  const fy = Math.max(0, Math.min(1, Number(geom.focal_y ?? 0.5)))
+  const localLeft = Math.max(0, Math.min(0.95, fx + (cLeft - fx) / zoom))
+  const localRight = Math.max(0, Math.min(0.95, 1 - (fx + (1 - cRight - fx) / zoom)))
+  const localTop = Math.max(0, Math.min(0.95, fy + (cTop - fy) / zoom))
+  const localBottom = Math.max(0, Math.min(0.95, 1 - (fy + (1 - cBottom - fy) / zoom)))
+  return `inset(${(localTop * 100).toFixed(2)}% ${(localRight * 100).toFixed(2)}% ${(localBottom * 100).toFixed(2)}% ${(localLeft * 100).toFixed(2)}%)`
+}
+
+function hasCropOrZoom(geom: TimelineGeometry): boolean {
+  return (
+    Math.abs((geom.zoom ?? 1) - 1) > 1e-3 ||
+    Math.abs((geom.focal_x ?? 0.5) - 0.5) > 1e-3 ||
+    Math.abs((geom.focal_y ?? 0.5) - 0.5) > 1e-3 ||
+    (geom.crop_top ?? 0) > 1e-3 ||
+    (geom.crop_bottom ?? 0) > 1e-3 ||
+    (geom.crop_left ?? 0) > 1e-3 ||
+    (geom.crop_right ?? 0) > 1e-3 ||
+    Math.abs(geom.offset_x ?? 0) > 1e-3 ||
+    Math.abs(geom.offset_y ?? 0) > 1e-3
+  )
+}
+
+function isCropPresetActive(
+  geom: TimelineGeometry,
+  preset: 'full' | 'center-box' | 'left-half' | 'right-half' | 'top-half' | 'bottom-half',
+): boolean {
+  const t = geom.crop_top ?? 0
+  const b = geom.crop_bottom ?? 0
+  const l = geom.crop_left ?? 0
+  const r = geom.crop_right ?? 0
+  const eq = (a: number, v: number) => Math.abs(a - v) < 0.015
+  if (preset === 'full') return eq(t, 0) && eq(b, 0) && eq(l, 0) && eq(r, 0)
+  if (preset === 'center-box') return eq(t, 0.2) && eq(b, 0.2) && eq(l, 0.2) && eq(r, 0.2)
+  if (preset === 'left-half') return eq(t, 0) && eq(b, 0) && eq(l, 0) && eq(r, 0.5)
+  if (preset === 'right-half') return eq(t, 0) && eq(b, 0) && eq(l, 0.5) && eq(r, 0)
+  if (preset === 'top-half') return eq(t, 0) && eq(b, 0.5) && eq(l, 0) && eq(r, 0)
+  return eq(t, 0.5) && eq(b, 0) && eq(l, 0) && eq(r, 0)
+}
+
+function resetGeometryCropAndZoom(geom: TimelineGeometry) {
+  mutate(() => {
+    geom.crop_top = 0
+    geom.crop_bottom = 0
+    geom.crop_left = 0
+    geom.crop_right = 0
+    geom.zoom = 1
+    geom.focal_x = 0.5
+    geom.focal_y = 0.5
+    geom.offset_x = 0
+    geom.offset_y = 0
+  })
+}
+
+function applyCropPreset(geom: TimelineGeometry, preset: 'full' | 'center-box' | 'left-half' | 'right-half' | 'top-half' | 'bottom-half') {
+  mutate(() => {
+    if (preset === 'full') {
+      geom.crop_top = 0
+      geom.crop_bottom = 0
+      geom.crop_left = 0
+      geom.crop_right = 0
+    } else if (preset === 'center-box') {
+      geom.crop_top = 0.2
+      geom.crop_bottom = 0.2
+      geom.crop_left = 0.2
+      geom.crop_right = 0.2
+    } else if (preset === 'left-half') {
+      geom.crop_top = 0
+      geom.crop_bottom = 0
+      geom.crop_left = 0
+      geom.crop_right = 0.5
+    } else if (preset === 'right-half') {
+      geom.crop_top = 0
+      geom.crop_bottom = 0
+      geom.crop_left = 0.5
+      geom.crop_right = 0
+    } else if (preset === 'top-half') {
+      geom.crop_top = 0
+      geom.crop_bottom = 0.5
+      geom.crop_left = 0
+      geom.crop_right = 0
+    } else if (preset === 'bottom-half') {
+      geom.crop_top = 0.5
+      geom.crop_bottom = 0
+      geom.crop_left = 0
+      geom.crop_right = 0
+    }
+  })
 }
 
 function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
@@ -309,7 +710,8 @@ function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
           (t.selected || (selectedId && t.id === selectedId))
       )
     : null
-  if (activeTake) return { media: activeTake, native: true }
+  const boostStrength = nativeVariant?.color_boost_strength ?? legacy?.color_boost_strength ?? 0
+  if (activeTake) return { media: { ...activeTake, color_boost_strength: boostStrength }, native: true }
   if (nativeVariant) return { media: nativeVariant, native: true }
   if (legacy) return { media: legacy, native: props.project.aspect_ratio === targetAspect.value }
   const fallback = shot.media_variants.find((item) => item.media_type === mediaType)
@@ -320,7 +722,7 @@ function resolveSource(source: TimelineSource | null) {
   if (!source) return null
   if (source.kind === 'asset') {
     const asset = timeline.value?.assets.find((item) => item.id === source.ref_id)
-    return asset ? { url: asset.url, mime_type: asset.mime_type, native: true, label: asset.label } : null
+    return asset ? { url: asset.url, mime_type: asset.mime_type, native: true, label: asset.label, color_boost_strength: 0 } : null
   }
   const shot = props.shots.find((item) => item.id === source.ref_id)
   if (!shot) return null
@@ -331,6 +733,7 @@ function resolveSource(source: TimelineSource | null) {
         mime_type: shot.dialogue_audio_mime || 'audio/wav',
         native: true,
         label: `${shot.title} dialogue`,
+        color_boost_strength: 0,
       }
     }
     const clipResolved = shotMedia(shot, 'clip')
@@ -360,26 +763,136 @@ function blockThumbnailUrl(item: TimelinePrimaryItem): string | null {
 }
 
 const activeMedia = computed(() => resolveSource(activeItem.value?.source ?? null))
-const activeGeometry = computed(() => activeItem.value?.variant[variant.value] ?? defaultGeometry(activeItem.value ?? undefined))
-const activeMediaStyle = computed(() => ({
-  objectFit: activeGeometry.value.fit,
-  objectPosition: `${activeGeometry.value.focal_x * 100}% ${activeGeometry.value.focal_y * 100}%`,
-  transform: `scale(${activeGeometry.value.zoom})`,
-}))
+const activeGeometry = computed(() => ensureCropFields(activeItem.value?.variant[variant.value] ?? defaultGeometry(activeItem.value ?? undefined)))
+const activeMediaStyle = computed(() => {
+  const geom = activeGeometry.value
+  const boostFilter = videoColorBoostFilter(activeMedia.value?.color_boost_strength)
+  const lutFilter = lutCssFilter(geom.lut, geom.lut_strength)
+  const filter = [boostFilter, lutFilter].filter(Boolean).join(' ')
+  const clipPath = geometryCropClipPath(geom)
+  const fx = (geom.focal_x ?? 0.5) * 100
+  const fy = (geom.focal_y ?? 0.5) * 100
+  const zoom = Math.max(1, Number(geom.zoom ?? 1) || 1)
+  const translate = geometryOffsetTranslate(geom)
+  return {
+    objectFit: geom.fit,
+    objectPosition: `${fx}% ${fy}%`,
+    transformOrigin: `${fx}% ${fy}%`,
+    // Keep scale (with focus origin) separate from pan so offsets stay in frame units.
+    transform: `scale(${zoom})`,
+    ...(translate ? { translate } : {}),
+    ...(clipPath ? { clipPath } : {}),
+    ...(filter ? { filter } : {}),
+  }
+})
 const activeBadge = computed(() => {
   if (!activeMedia.value) return activeItem.value?.kind === 'title' ? 'TITLE' : 'MISSING'
   if (!activeMedia.value.mime_type.startsWith('video')) return 'STILL FALLBACK'
   return activeMedia.value.native ? `NATIVE ${targetAspect.value}` : `REFRAMED ${targetAspect.value === '9:16' ? '16:9' : '9:16'}`
 })
 
+function imageOverlayPreviewStyle(overlay: TimelineImageOverlay) {
+  const geom = geometryFor(overlay)
+  const isFullFrame = geom.position === 'full-frame'
+  const lutFilter = lutCssFilter(geom.lut, geom.lut_strength)
+  if (isFullFrame) {
+    return {
+      opacity: overlay.opacity ?? 1,
+      objectFit: (geom.fit || 'cover') as 'cover' | 'contain',
+      ...(lutFilter ? { filter: lutFilter } : {}),
+    }
+  }
+  const scale = geom.scale ?? 1
+  return {
+    opacity: overlay.opacity ?? 1,
+    width: `${Math.round(45 * scale)}%`,
+    maxHeight: `${Math.round(60 * scale)}%`,
+    objectFit: 'contain' as const,
+    ...(lutFilter ? { filter: lutFilter } : {}),
+  }
+}
+
+function videoOverlayPreviewStyle(overlay: TimelineVideoOverlay) {
+  const geom = videoOverlayGeometryFor(overlay)
+  const isFullFrame = geom.position === 'full-frame'
+  const resolved = resolveSource(overlay.source)
+  const boostFilter = videoColorBoostFilter(resolved?.color_boost_strength)
+  const lutFilter = lutCssFilter(geom.lut, geom.lut_strength)
+  const filter = [boostFilter, lutFilter].filter(Boolean).join(' ')
+  const fx = (geom.focal_x ?? 0.5) * 100
+  const fy = (geom.focal_y ?? 0.5) * 100
+  const clipPath = geometryCropClipPath(geom, !isFullFrame)
+  const translate = geometryOffsetTranslate(geom)
+  const zoom = Math.max(1, Number(geom.zoom ?? 1) || 1)
+  if (isFullFrame) {
+    return {
+      opacity: overlay.opacity ?? 1,
+      objectFit: (geom.fit || 'cover') as 'cover' | 'contain',
+      objectPosition: `${fx}% ${fy}%`,
+      transformOrigin: `${fx}% ${fy}%`,
+      transform: `scale(${zoom})`,
+      ...(translate ? { translate } : {}),
+      ...(clipPath ? { clipPath } : {}),
+      ...(filter ? { filter } : {}),
+    }
+  }
+  const scale = geom.scale ?? 1
+  const pos = geom.position || 'center'
+  let baseTransform = ''
+  if (pos === 'center') baseTransform = 'translate(-50%, -50%) '
+  else if (pos === 'top' || pos === 'bottom') baseTransform = 'translateX(-50%) '
+  return {
+    opacity: overlay.opacity ?? 1,
+    width: `${Math.round(45 * scale)}%`,
+    maxHeight: `${Math.round(60 * scale)}%`,
+    objectFit: 'contain' as const,
+    objectPosition: `${fx}% ${fy}%`,
+    transformOrigin: `${fx}% ${fy}%`,
+    transform: `${baseTransform}scale(${geom.zoom ?? 1})`,
+    ...(translate ? { translate } : {}),
+    ...(clipPath ? { clipPath } : {}),
+    ...(filter ? { filter } : {}),
+  }
+}
+
+function packOverlayLanes<T extends { id: string; start_ms: number; duration_ms: number }>(items: T[]) {
+  const laneEnds: number[] = []
+  const laneById: Record<string, number> = {}
+  for (const item of items) {
+    let assigned = -1
+    for (let i = 0; i < laneEnds.length; i++) {
+      if ((laneEnds[i] ?? 0) <= item.start_ms) {
+        assigned = i
+        laneEnds[i] = item.start_ms + item.duration_ms
+        break
+      }
+    }
+    if (assigned < 0) {
+      assigned = laneEnds.length
+      laneEnds.push(item.start_ms + item.duration_ms)
+    }
+    laneById[item.id] = assigned
+  }
+  return {
+    laneById,
+    laneCount: Math.max(1, laneEnds.length),
+  }
+}
+
+const videoOverlayPacking = computed(() => packOverlayLanes(videoOverlays.value))
+const imageOverlayPacking = computed(() => packOverlayLanes(timeline.value?.document.image_overlays ?? []))
+
 let loadedProjectId = props.project.id
 let loadedEpisodeId: string | undefined = store.currentEpisodeId || undefined
+let timelineLoadSequence = 0
 
 async function loadTimeline() {
+  const loadSeq = ++timelineLoadSequence
   loading.value = true
   localError.value = ''
   const reqProjectId = props.project.id
   const reqEpisodeId = store.currentEpisodeId || undefined
+  const reqVariant = variant.value
   const persisted = readPersistedUiState(reqProjectId, reqEpisodeId || null)
   if (typeof persisted.isMuted === 'boolean') {
     isMuted.value = persisted.isMuted
@@ -388,8 +901,19 @@ async function loadTimeline() {
     zoomLevel.value = persisted.zoomLevel
   }
   try {
-    timeline.value = await api.timeline(reqProjectId, variant.value, reqEpisodeId)
-    timeline.value.document.audio_overlays ??= []
+    let fetched: ProjectTimeline
+    if (props.compilationId) {
+      fetched = await api.compilationTimeline(props.compilationId, reqVariant)
+      try {
+        compilationExports.value = await api.compilationExports(props.compilationId)
+      } catch {}
+    } else {
+      fetched = await api.timeline(reqProjectId, reqVariant, reqEpisodeId)
+    }
+    if (loadSeq !== timelineLoadSequence) return
+    fetched.document.video_overlays ??= []
+    fetched.document.audio_overlays ??= []
+    timeline.value = fetched
     loadedProjectId = reqProjectId
     loadedEpisodeId = reqEpisodeId
     const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
@@ -400,7 +924,10 @@ async function loadTimeline() {
       playheadMs.value = timeline.value.document.primary.slice(0, requestedIndex).reduce((sum, item) => sum + item.duration_ms, 0)
     } else {
       const doc = timeline.value.document
-      if (persisted.selectedKind === 'image' && persisted.selectedId && doc.image_overlays.some((item) => item.id === persisted.selectedId)) {
+      if (persisted.selectedKind === 'video' && persisted.selectedId && (doc.video_overlays ?? []).some((item) => item.id === persisted.selectedId)) {
+        selectedKind.value = 'video'
+        selectedId.value = persisted.selectedId
+      } else if (persisted.selectedKind === 'image' && persisted.selectedId && doc.image_overlays.some((item) => item.id === persisted.selectedId)) {
         selectedKind.value = 'image'
         selectedId.value = persisted.selectedId
       } else if (persisted.selectedKind === 'text' && persisted.selectedId && doc.text_overlays.some((item) => item.id === persisted.selectedId)) {
@@ -422,14 +949,17 @@ async function loadTimeline() {
         playheadMs.value = 0
       }
     }
-    if (route.query.variant === 'shorts' || route.query.variant === 'landscape') variant.value = route.query.variant
     history.value = []
     future.value = []
   } catch (cause) {
+    if (loadSeq !== timelineLoadSequence) return
     localError.value = cause instanceof Error ? cause.message : 'Could not load timeline'
   } finally {
-    loading.value = false
+    if (loadSeq === timelineLoadSequence) {
+      loading.value = false
+    }
   }
+  if (loadSeq !== timelineLoadSequence) return
   await nextTick()
   updateContainerWidth()
   if (timelineScrollRef.value) {
@@ -449,12 +979,94 @@ function snapshot() {
   return timeline.value ? JSON.stringify(timeline.value.document) : ''
 }
 
+let inspectorBeforeSnapshot = ''
+
+function captureInspectorSnapshot() {
+  if (!timeline.value) return
+  inspectorBeforeSnapshot = snapshot()
+}
+
+function commitInspectorEdit() {
+  if (!timeline.value) return
+  if (selectedKind.value === 'video' && selectedVideo.value) {
+    if (selectedVideo.value.duration_ms < 100) selectedVideo.value.duration_ms = 100
+    if (selectedVideo.value.source_in_ms < 0) selectedVideo.value.source_in_ms = 0
+    if (totalMs.value > 0 && selectedVideo.value.start_ms + selectedVideo.value.duration_ms > totalMs.value) {
+      selectedVideo.value.start_ms = Math.max(0, totalMs.value - selectedVideo.value.duration_ms)
+    }
+  }
+  if (selectedKind.value === 'image' && selectedImage.value) {
+    if (selectedImage.value.duration_ms < 100) selectedImage.value.duration_ms = 100
+    if (totalMs.value > 0 && selectedImage.value.start_ms + selectedImage.value.duration_ms > totalMs.value) {
+      selectedImage.value.start_ms = Math.max(0, totalMs.value - selectedImage.value.duration_ms)
+    }
+  }
+  const current = snapshot()
+  if (inspectorBeforeSnapshot && inspectorBeforeSnapshot !== current) {
+    history.value.push(inspectorBeforeSnapshot)
+    if (history.value.length > 50) history.value.shift()
+    future.value = []
+  }
+  inspectorBeforeSnapshot = current
+  syncVideoOverlays()
+  syncAudioOverlays()
+  scheduleSave()
+}
+
+function setVideoOverlayDuration(durationMs: number) {
+  if (!selectedVideo.value) return
+  mutate(() => {
+    const clamped = Math.max(100, Math.min(durationMs, totalMs.value || durationMs))
+    selectedVideo.value!.duration_ms = clamped
+    if (totalMs.value > 0 && selectedVideo.value!.start_ms + clamped > totalMs.value) {
+      selectedVideo.value!.start_ms = Math.max(0, totalMs.value - clamped)
+    }
+  })
+}
+
+function moveSelectedVideoLayer(direction: -1 | 1) {
+  if (!timeline.value?.document.video_overlays) return
+  const index = selectedVideoIndex.value
+  const target = index + direction
+  if (index < 0 || target < 0 || target >= timeline.value.document.video_overlays.length) return
+  mutate(() => {
+    const list = timeline.value!.document.video_overlays!
+    const [moved] = list.splice(index, 1)
+    if (!moved) return
+    list.splice(target, 0, moved)
+  })
+}
+
+function setImageOverlayDuration(durationMs: number) {
+  if (!selectedImage.value) return
+  mutate(() => {
+    selectedImage.value!.duration_ms = durationMs
+    if (totalMs.value > 0 && selectedImage.value!.start_ms + durationMs > totalMs.value) {
+      selectedImage.value!.start_ms = Math.max(0, totalMs.value - durationMs)
+    }
+  })
+}
+
+function ensureValidSelection() {
+  if (!timeline.value) return
+  timeline.value.document.video_overlays ??= []
+  timeline.value.document.audio_overlays ??= []
+  if (selectedKind.value === 'primary' && selectedPrimary.value) return
+  if (selectedKind.value === 'video' && selectedVideo.value) return
+  if (selectedKind.value === 'text' && selectedText.value) return
+  if (selectedKind.value === 'image' && selectedImage.value) return
+  if (selectedKind.value === 'audio' && selectedAudio.value) return
+  selectedKind.value = 'primary'
+  selectedId.value = primary.value[0]?.id ?? ''
+}
+
 function mutate(change: () => void) {
   if (!timeline.value) return
   history.value.push(snapshot())
   if (history.value.length > 50) history.value.shift()
   future.value = []
   change()
+  inspectorBeforeSnapshot = ''
   nextTick(scheduleSave)
 }
 
@@ -463,6 +1075,9 @@ function undo() {
   if (!previous || !timeline.value) return
   future.value.push(snapshot())
   timeline.value.document = JSON.parse(previous)
+  ensureValidSelection()
+  inspectorBeforeSnapshot = ''
+  syncVideo()
   scheduleSave()
 }
 
@@ -471,6 +1086,9 @@ function redo() {
   if (!next || !timeline.value) return
   history.value.push(snapshot())
   timeline.value.document = JSON.parse(next)
+  ensureValidSelection()
+  inspectorBeforeSnapshot = ''
+  syncVideo()
   scheduleSave()
 }
 
@@ -507,6 +1125,12 @@ async function saveTimeline() {
         item.source_out_ms = Math.round(item.source_out_ms)
       }
     }
+    timeline.value.document.video_overlays ??= []
+    for (const item of timeline.value.document.video_overlays) {
+      item.start_ms = Math.round(item.start_ms)
+      item.duration_ms = Math.round(item.duration_ms)
+      item.source_in_ms = Math.round(item.source_in_ms || 0)
+    }
     for (const item of timeline.value.document.image_overlays) {
       item.start_ms = Math.round(item.start_ms)
       item.duration_ms = Math.round(item.duration_ms)
@@ -521,9 +1145,18 @@ async function saveTimeline() {
       item.duration_ms = Math.round(item.duration_ms)
       item.source_in_ms = Math.round(item.source_in_ms || 0)
     }
-    const saved = await api.saveTimeline(targetProjectId, timeline.value, targetVariant, targetEpisodeId)
+    const saved = props.compilationId
+      ? await api.saveCompilationTimeline(props.compilationId, timeline.value, targetVariant)
+      : await api.saveTimeline(targetProjectId, timeline.value, targetVariant, targetEpisodeId)
+    saved.document.video_overlays ??= []
     saved.document.audio_overlays ??= []
-    if (props.project.id === targetProjectId && (timeline.value?.edit || variant.value) === targetVariant && (store.currentEpisodeId || undefined) === targetEpisodeId) {
+    if (props.compilationId) {
+      if (!pendingSave && !dirtyDocument) {
+        timeline.value = saved
+      } else if (timeline.value) {
+        timeline.value.revision = saved.revision
+      }
+    } else if (props.project.id === targetProjectId && (timeline.value?.edit || variant.value) === targetVariant && (store.currentEpisodeId || undefined) === targetEpisodeId) {
       if (!pendingSave && !dirtyDocument) {
         timeline.value = saved
       } else if (timeline.value) {
@@ -534,7 +1167,9 @@ async function saveTimeline() {
       saveState.value = 'Saved'
     }
     localError.value = ''
-    await store.loadProject(targetProjectId)
+    if (!props.compilationId) {
+      await store.loadProject(targetProjectId, { episodeId: targetEpisodeId, resumeJobs: false })
+    }
   } catch (cause) {
     localError.value = cause instanceof Error ? cause.message : 'Could not save timeline'
     saveState.value = 'Save failed'
@@ -568,6 +1203,7 @@ function removeInterval(start: number, duration: number) {
     if (nextDuration < 100) return []
     return [{ ...item, start_ms: Math.min(item.start_ms, start), duration_ms: nextDuration }]
   })
+  timeline.value.document.video_overlays = adjust(timeline.value.document.video_overlays ?? [])
   timeline.value.document.image_overlays = adjust(timeline.value.document.image_overlays)
   timeline.value.document.text_overlays = adjust(timeline.value.document.text_overlays)
   timeline.value.document.audio_overlays = adjust(timeline.value.document.audio_overlays ?? [])
@@ -576,6 +1212,7 @@ function removeInterval(start: number, duration: number) {
 function insertInterval(start: number, duration: number) {
   if (!timeline.value) return
   for (const item of [
+    ...(timeline.value.document.video_overlays ?? []),
     ...timeline.value.document.image_overlays,
     ...timeline.value.document.text_overlays,
     ...(timeline.value.document.audio_overlays ?? []),
@@ -646,29 +1283,174 @@ function resetTrim() {
 }
 
 function splitAtPlayhead() {
-  const item = activeItem.value
-  if (!item || item.kind !== 'video' || !timeline.value) return
-  const local = Math.round(activeLocalMs.value)
-  if (local < 100 || item.duration_ms - local < 100) return
-  mutate(() => {
-    const index = activeIndex.value
-    const inMs = Math.round(item.source_in_ms || 0)
-    const totalDuration = Math.round(item.duration_ms)
-    const leftDuration = local
-    const leftSourceOut = inMs + leftDuration
-    const rightDuration = totalDuration - leftDuration
-    const rightSourceIn = leftSourceOut
-    const rightSourceOut = item.source_out_ms != null ? Math.round(item.source_out_ms) : rightSourceIn + rightDuration
+  if (!timeline.value) return
+  const curPlayhead = Math.round(playheadMs.value)
+  const toSplitEntries = selectedEntries.value.length > 0
+    ? [...selectedEntries.value]
+    : [{ kind: 'primary' as SelectedTrackKind, id: activeItem.value?.id ?? '' }]
 
-    const left = { ...item, duration_ms: leftDuration, source_in_ms: inMs, source_out_ms: leftSourceOut }
-    const right = { ...item, id: crypto.randomUUID(), label: `${item.label} B`, source_in_ms: rightSourceIn, duration_ms: rightDuration, source_out_ms: rightSourceOut }
-    timeline.value!.document.primary.splice(index, 1, left, right)
-    selectedId.value = right.id
+  let didSplitAny = false
+  const newSelectionEntries: SelectedEntry[] = []
+
+  mutate(() => {
+    for (const entry of toSplitEntries) {
+      if (entry.kind === 'primary') {
+        const pIdx = primary.value.findIndex((p, idx) => {
+          const s = starts.value[idx] ?? 0
+          return p.id === entry.id || (toSplitEntries.length === 1 && curPlayhead >= s && curPlayhead < s + p.duration_ms)
+        })
+        if (pIdx >= 0) {
+          const item = primary.value[pIdx]
+          if (item && item.kind === 'video') {
+            const start = starts.value[pIdx] ?? 0
+            const local = curPlayhead - start
+            if (local >= 100 && item.duration_ms - local >= 100) {
+              const inMs = Math.round(item.source_in_ms || 0)
+              const totalDuration = Math.round(item.duration_ms)
+              const leftDuration = local
+              const leftSourceOut = inMs + leftDuration
+              const rightDuration = totalDuration - leftDuration
+              const rightSourceIn = leftSourceOut
+              const rightSourceOut = item.source_out_ms != null ? Math.round(item.source_out_ms) : rightSourceIn + rightDuration
+
+              const left = { ...item, duration_ms: leftDuration, source_in_ms: inMs, source_out_ms: leftSourceOut }
+              const right = { ...item, id: crypto.randomUUID(), label: `${item.label} B`, source_in_ms: rightSourceIn, duration_ms: rightDuration, source_out_ms: rightSourceOut }
+              timeline.value!.document.primary.splice(pIdx, 1, left, right)
+              newSelectionEntries.push({ kind: 'primary', id: right.id })
+              didSplitAny = true
+              continue
+            }
+          }
+        }
+        newSelectionEntries.push(entry)
+      } else if (entry.kind === 'video') {
+        const vList = timeline.value!.document.video_overlays ?? []
+        const vIdx = vList.findIndex((v) => v.id === entry.id)
+        if (vIdx >= 0) {
+          const item = vList[vIdx]
+          if (item) {
+            const start = item.start_ms
+            const end = item.start_ms + item.duration_ms
+            if (curPlayhead >= start + 100 && curPlayhead <= end - 100) {
+              const leftDuration = curPlayhead - start
+              const rightDuration = end - curPlayhead
+              const leftSourceIn = Math.round(item.source_in_ms ?? 0)
+              const rightSourceIn = leftSourceIn + leftDuration
+
+              const left: TimelineVideoOverlay = {
+                ...item,
+                duration_ms: leftDuration,
+                source_in_ms: leftSourceIn,
+              }
+              const right: TimelineVideoOverlay = {
+                ...item,
+                id: crypto.randomUUID(),
+                label: `${item.label} B`,
+                start_ms: curPlayhead,
+                duration_ms: rightDuration,
+                source_in_ms: rightSourceIn,
+                variant: JSON.parse(JSON.stringify(item.variant || {})),
+              }
+              vList.splice(vIdx, 1, left, right)
+              newSelectionEntries.push({ kind: 'video', id: right.id })
+              didSplitAny = true
+              continue
+            }
+          }
+        }
+        newSelectionEntries.push(entry)
+      } else if (entry.kind === 'audio') {
+        const aList = timeline.value!.document.audio_overlays ?? []
+        const aIdx = aList.findIndex((a) => a.id === entry.id)
+        if (aIdx >= 0) {
+          const item = aList[aIdx]
+          if (item) {
+            const start = item.start_ms
+            const end = item.start_ms + item.duration_ms
+            if (curPlayhead >= start + 100 && curPlayhead <= end - 100) {
+              const leftDuration = curPlayhead - start
+              const rightDuration = end - curPlayhead
+              const leftSourceIn = Math.round(item.source_in_ms ?? 0)
+              const rightSourceIn = leftSourceIn + leftDuration
+
+              const left: TimelineAudioOverlay = {
+                ...item,
+                duration_ms: leftDuration,
+                source_in_ms: leftSourceIn,
+              }
+              const right: TimelineAudioOverlay = {
+                ...item,
+                id: crypto.randomUUID(),
+                label: `${item.label} B`,
+                start_ms: curPlayhead,
+                duration_ms: rightDuration,
+                source_in_ms: rightSourceIn,
+              }
+              aList.splice(aIdx, 1, left, right)
+              newSelectionEntries.push({ kind: 'audio', id: right.id })
+              didSplitAny = true
+              continue
+            }
+          }
+        }
+        newSelectionEntries.push(entry)
+      } else {
+        newSelectionEntries.push(entry)
+      }
+    }
+
+    if (didSplitAny) {
+      selectedEntries.value = newSelectionEntries
+      const first = newSelectionEntries[0]
+      if (first) {
+        selectedKind.value = first.kind
+        selectedId.value = first.id
+      }
+      syncVideoOverlays()
+      syncAudioOverlays()
+    }
   })
 }
 
 function deleteSelection() {
   if (!timeline.value) return
+  if (selectedEntries.value.length > 1) {
+    mutate(() => {
+      const videoIds = new Set(selectedEntries.value.filter((e) => e.kind === 'video').map((e) => e.id))
+      const imageIds = new Set(selectedEntries.value.filter((e) => e.kind === 'image').map((e) => e.id))
+      const audioIds = new Set(selectedEntries.value.filter((e) => e.kind === 'audio').map((e) => e.id))
+      const textIds = new Set(selectedEntries.value.filter((e) => e.kind === 'text').map((e) => e.id))
+
+      if (videoIds.size) timeline.value!.document.video_overlays = (timeline.value!.document.video_overlays ?? []).filter((v) => !videoIds.has(v.id))
+      if (imageIds.size) timeline.value!.document.image_overlays = (timeline.value!.document.image_overlays ?? []).filter((img) => !imageIds.has(img.id))
+      if (audioIds.size) timeline.value!.document.audio_overlays = (timeline.value!.document.audio_overlays ?? []).filter((a) => !audioIds.has(a.id))
+      if (textIds.size) timeline.value!.document.text_overlays = (timeline.value!.document.text_overlays ?? []).filter((t) => !textIds.has(t.id))
+
+      const primaryIds = new Set(selectedEntries.value.filter((e) => e.kind === 'primary').map((e) => e.id))
+      if (primaryIds.size && primary.value.length > primaryIds.size) {
+        const indicesToDelete = primary.value
+          .map((p, idx) => ({ id: p.id, idx }))
+          .filter((p) => primaryIds.has(p.id))
+          .map((p) => p.idx)
+          .sort((a, b) => b - a)
+
+        for (const idx of indicesToDelete) {
+          const start = starts.value[idx] ?? 0
+          const duration = primary.value[idx]?.duration_ms ?? 0
+          timeline.value!.document.primary.splice(idx, 1)
+          removeInterval(start, duration)
+        }
+      }
+
+      selectedEntries.value = []
+      selectedId.value = primary.value[0]?.id ?? ''
+      selectedKind.value = 'primary'
+      syncVideoOverlays()
+      syncAudioOverlays()
+    })
+    return
+  }
+
   mutate(() => {
     if (selectedKind.value === 'primary') {
       const index = selectedPrimaryIndex.value
@@ -678,6 +1460,11 @@ function deleteSelection() {
       timeline.value!.document.primary.splice(index, 1)
       removeInterval(start, duration)
       selectedId.value = timeline.value!.document.primary[Math.max(0, index - 1)]?.id ?? ''
+    } else if (selectedKind.value === 'video') {
+      timeline.value!.document.video_overlays = (timeline.value!.document.video_overlays ?? []).filter((item) => item.id !== selectedId.value)
+      selectedId.value = primary.value[0]?.id ?? ''
+      selectedKind.value = 'primary'
+      syncVideoOverlays()
     } else if (selectedKind.value === 'image') {
       timeline.value!.document.image_overlays = timeline.value!.document.image_overlays.filter((item) => item.id !== selectedId.value)
       selectedId.value = primary.value[0]?.id ?? ''
@@ -692,6 +1479,7 @@ function deleteSelection() {
       selectedId.value = primary.value[0]?.id ?? ''
       selectedKind.value = 'primary'
     }
+    selectedEntries.value = selectedId.value ? [{ kind: selectedKind.value, id: selectedId.value }] : []
   })
 }
 
@@ -706,17 +1494,56 @@ function moveSelected(direction: -1 | 1) {
   })
 }
 
+function isDuplicateDragEvent(event: DragEvent | PointerEvent | MouseEvent): boolean {
+  return Boolean(event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || dragDuplicateModifier.value)
+}
+
+function getDraggedPrimaryIndex(event: DragEvent): number | null {
+  if (dragSourceIndex.value !== null && dragSourceIndex.value >= 0 && dragSourceIndex.value < primary.value.length) {
+    return dragSourceIndex.value
+  }
+  const raw = event.dataTransfer?.getData('application/x-cutline-primary-index') || event.dataTransfer?.getData('text/plain')
+  if (raw != null && raw.trim() !== '') {
+    const parsed = Number(raw)
+    if (Number.isInteger(parsed) && parsed >= 0 && parsed < primary.value.length) {
+      return parsed
+    }
+  }
+  return null
+}
+
+function clampOverlaysToTotal() {
+  if (!timeline.value) return
+  const total = timeline.value.document.primary.reduce((sum, item) => sum + item.duration_ms, 0)
+  if (total <= 0) return
+  const clampList = <T extends { start_ms: number; duration_ms: number }>(items?: T[]) => {
+    if (!items) return
+    for (const item of items) {
+      item.duration_ms = Math.max(100, Math.min(Math.round(item.duration_ms), total))
+      item.start_ms = Math.max(0, Math.min(Math.round(item.start_ms), Math.max(0, total - item.duration_ms)))
+    }
+  }
+  clampList(timeline.value.document.video_overlays)
+  clampList(timeline.value.document.image_overlays)
+  clampList(timeline.value.document.text_overlays)
+  clampList(timeline.value.document.audio_overlays)
+}
+
 function onPrimaryDragStart(event: DragEvent, index: number) {
   dragSourceIndex.value = index
+  dragDuplicateModifier.value = Boolean(event.ctrlKey || event.shiftKey || event.altKey || event.metaKey)
   if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.effectAllowed = 'copyMove'
     event.dataTransfer.setData('text/plain', String(index))
+    event.dataTransfer.setData('application/x-cutline-primary-index', String(index))
   }
 }
 
 function onPrimaryDragOver(event: DragEvent, index: number) {
-  if (dragSourceIndex.value === null || dragSourceIndex.value === index) return
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const fromIndex = getDraggedPrimaryIndex(event)
+  const isDuplicate = isDuplicateDragEvent(event)
+  if (fromIndex === null || (!isDuplicate && fromIndex === index)) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = isDuplicate ? 'copy' : 'move'
   dragOverIndex.value = index
 }
 
@@ -726,13 +1553,32 @@ function onPrimaryDragLeave(index: number) {
   }
 }
 
-function onPrimaryDrop(_event: DragEvent, targetIndex: number) {
-  const fromIndex = dragSourceIndex.value
+function onPrimaryDrop(event: DragEvent, targetIndex: number) {
+  const fromIndex = getDraggedPrimaryIndex(event)
+  const isDuplicate = isDuplicateDragEvent(event)
   dragSourceIndex.value = null
   dragOverIndex.value = null
-  if (!timeline.value || fromIndex === null || fromIndex === targetIndex) return
+  dragDuplicateModifier.value = false
+  if (!timeline.value || fromIndex === null) return
   if (fromIndex < 0 || fromIndex >= primary.value.length || targetIndex < 0 || targetIndex >= primary.value.length) return
+  if (!isDuplicate && fromIndex === targetIndex) return
   mutate(() => {
+    if (isDuplicate) {
+      const sourceItem = timeline.value!.document.primary[fromIndex]
+      if (!sourceItem) return
+      const duplicate: TimelinePrimaryItem = {
+        ...JSON.parse(JSON.stringify(sourceItem)),
+        id: crypto.randomUUID(),
+        label: `${sourceItem.label} (copy)`,
+      }
+      const insertAt = fromIndex === targetIndex ? targetIndex + 1 : targetIndex
+      const insertionTime = starts.value[insertAt] ?? totalMs.value
+      timeline.value!.document.primary.splice(insertAt, 0, duplicate)
+      insertInterval(insertionTime, duplicate.duration_ms)
+      selectedKind.value = 'primary'
+      selectedId.value = duplicate.id
+      return
+    }
     const [moved] = timeline.value!.document.primary.splice(fromIndex, 1)
     if (!moved) return
     timeline.value!.document.primary.splice(targetIndex, 0, moved)
@@ -751,6 +1597,7 @@ function onPrimaryDrop(_event: DragEvent, targetIndex: number) {
 function onPrimaryDragEnd() {
   dragSourceIndex.value = null
   dragOverIndex.value = null
+  dragDuplicateModifier.value = false
 }
 
 function duplicateSelected() {
@@ -769,6 +1616,20 @@ function duplicateSelected() {
       const insertionTime = (starts.value[index] ?? 0) + selected.duration_ms
       timeline.value!.document.primary.splice(insertionIndex, 0, duplicate)
       insertInterval(insertionTime, duplicate.duration_ms)
+      selectedId.value = duplicate.id
+    })
+  } else if (selectedKind.value === 'video') {
+    const item = selectedVideo.value
+    if (!item) return
+    mutate(() => {
+      const duplicate: TimelineVideoOverlay = {
+        ...JSON.parse(JSON.stringify(item)),
+        id: crypto.randomUUID(),
+        label: `${item.label} (copy)`,
+        start_ms: Math.max(0, Math.min(totalMs.value - item.duration_ms, item.start_ms + item.duration_ms)),
+      }
+      timeline.value!.document.video_overlays ??= []
+      timeline.value!.document.video_overlays.push(duplicate)
       selectedId.value = duplicate.id
     })
   } else if (selectedKind.value === 'image') {
@@ -884,44 +1745,584 @@ function addText() {
   closeAddMenu()
   if (!timeline.value) return
   mutate(() => {
+    const defaultDur = Math.max(500, Math.min(2500, totalMs.value || 2500))
     const playhead = Math.round(playheadMs.value)
-    const duration = Math.round(Math.min(2500, Math.max(100, totalMs.value - playhead)))
-    const item = { id: crypto.randomUUID(), text: 'New text', start_ms: playhead, duration_ms: duration, presentation: 'overlay' as const, size: 'medium' as const, color: 'white' as const, background: 'shadow' as const, variant: {} }
+    const start = Math.max(0, Math.min(playhead, Math.max(0, totalMs.value - defaultDur)))
+    const duration = totalMs.value > 0 ? Math.min(defaultDur, Math.max(500, totalMs.value - start)) : defaultDur
+    const item = { id: crypto.randomUUID(), text: 'New text', start_ms: start, duration_ms: duration, presentation: 'overlay' as const, size: 'medium' as const, color: 'white' as const, background: 'shadow' as const, variant: {} }
     timeline.value!.document.text_overlays.push(item)
     selectedKind.value = 'text'
     selectedId.value = item.id
   })
 }
 
-function addImageOverlay(source?: TimelineSource) {
+const showAddVideoOverlayModal = ref(false)
+const videoFilterQuery = ref('')
+const isDraggingOverVideoTrack = ref(false)
+
+function shotHasVideo(shot?: Shot | null): boolean {
+  if (!shot) return false
+  return Boolean(
+    shot.clip ||
+    shot.media_variants?.some((v) => v.media_type === 'clip') ||
+    shot.takes?.some((t) => t.media_type === 'clip')
+  )
+}
+
+function shotClipUrl(shot: Shot): string {
+  const resolved = shotMedia(shot, 'clip')
+  if (resolved?.media.url) return resolved.media.url
+  if (shot.clip?.url) return shot.clip.url
+  return ''
+}
+
+const availableVideoShots = computed(() => {
+  const query = videoFilterQuery.value.trim().toLowerCase()
+  return props.shots.filter((shot) => {
+    if (!shotHasVideo(shot)) return false
+    if (!query) return true
+    return (shot.title || '').toLowerCase().includes(query) || (shot.action || '').toLowerCase().includes(query)
+  })
+})
+
+const availableVideoAssets = computed(() => {
+  return (timeline.value?.assets || []).filter((a) => a.mime_type.startsWith('video/'))
+})
+
+const selectedShotWithVideo = computed(() => {
+  const refId = selectedPrimary.value?.source?.ref_id || activeItem.value?.source?.ref_id
+  const currentShot = props.shots.find((s) => s.id === refId)
+  if (shotHasVideo(currentShot)) return currentShot!
+  return props.shots.find((s) => shotHasVideo(s)) ?? null
+})
+
+function openAddVideoOverlayModal() {
+  closeAddMenu()
+  showAddVideoOverlayModal.value = true
+}
+
+function primaryHasActiveAudioInRange(startMs: number, durationMs: number): boolean {
+  if (!timeline.value) return false
+  const endMs = startMs + durationMs
+  let elapsed = 0
+  for (const item of timeline.value.document.primary) {
+    const itemStart = elapsed
+    const itemEnd = elapsed + item.duration_ms
+    elapsed = itemEnd
+    if (itemEnd <= startMs || itemStart >= endMs) continue
+    if (item.kind === 'video' && !item.mute_audio) {
+      return true
+    }
+  }
+  return false
+}
+
+function addVideoOverlay(source?: TimelineSource, label?: string, atMs?: number, durationMs?: number) {
+  closeAddMenu()
+  if (!timeline.value) return
+  if (!source) {
+    showAddVideoOverlayModal.value = true
+    return
+  }
+  mutate(() => {
+    const resolved = resolveSource(source)
+    const fallbackDur = durationMs ?? 5000
+    const defaultDur = Math.max(500, Math.min(fallbackDur, totalMs.value || fallbackDur))
+    const playhead = atMs !== undefined ? Math.round(atMs) : Math.round(playheadMs.value)
+    const start = Math.max(0, Math.min(playhead, Math.max(0, totalMs.value - defaultDur)))
+    const duration = totalMs.value > 0 ? Math.min(defaultDur, Math.max(500, totalMs.value - start)) : defaultDur
+    const defaultGeom = defaultVideoOverlayGeometry({ source })
+    const autoMute = primaryHasActiveAudioInRange(start, duration)
+    const item: TimelineVideoOverlay = {
+      id: crypto.randomUUID(),
+      label: label || resolved?.label || 'Video layer',
+      source,
+      start_ms: start,
+      duration_ms: duration,
+      source_in_ms: 0,
+      opacity: 1,
+      volume: 1,
+      mute_audio: autoMute,
+      variant: {
+        [variant.value]: defaultGeom,
+      },
+    }
+    timeline.value!.document.video_overlays ??= []
+    timeline.value!.document.video_overlays.push(item)
+    selectedKind.value = 'video'
+    selectedId.value = item.id
+  })
+  nextTick(() => syncVideoOverlays())
+}
+
+function addShotVideoToTimeline(shot?: Shot | null) {
+  closeAddMenu()
+  const target = shot ?? selectedShotWithVideo.value
+  if (!target) {
+    showAddVideoOverlayModal.value = true
+    return
+  }
+  const source: TimelineSource = { kind: 'shot_clip', ref_id: target.id }
+  addVideoOverlay(source, target.title || 'Shot video', playheadMs.value, target.duration_ms || 5000)
+  showAddShotModal.value = false
+  showAddVideoOverlayModal.value = false
+}
+
+function addAssetVideoToTimeline(asset: TimelineAsset) {
+  closeAddMenu()
+  const source: TimelineSource = { kind: 'asset', ref_id: asset.id }
+  addVideoOverlay(source, asset.label || 'Video layer', playheadMs.value, 5000)
+  showAddVideoOverlayModal.value = false
+}
+
+function probeVideoFileDurationMs(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      resolve(5000)
+      return
+    }
+    let settled = false
+    const objectUrl = URL.createObjectURL(file)
+    const finish = (ms: number) => {
+      if (settled) return
+      settled = true
+      try {
+        URL.revokeObjectURL(objectUrl)
+      } catch {}
+      resolve(ms)
+    }
+    const timer = window.setTimeout(() => finish(5000), 2000)
+    try {
+      const video = document.createElement('video')
+      video.preload = 'metadata'
+      video.onloadedmetadata = () => {
+        window.clearTimeout(timer)
+        const dur = Number.isFinite(video.duration) && video.duration > 0 ? Math.round(video.duration * 1000) : 5000
+        finish(dur)
+      }
+      video.onerror = () => {
+        window.clearTimeout(timer)
+        finish(5000)
+      }
+      video.src = objectUrl
+    } catch {
+      window.clearTimeout(timer)
+      finish(5000)
+    }
+  })
+}
+
+async function uploadVideoOverlayAt(file: File, atMs?: number) {
+  if (!timeline.value) return
+  try {
+    const probedMs = await probeVideoFileDurationMs(file)
+    const cleanLabel = file.name.replace(/\.[^.]+$/, '') || file.name
+    await flushPendingSave()
+    timeline.value = await api.uploadTimelineAsset(
+      props.project.id,
+      file,
+      cleanLabel,
+      variant.value,
+      props.compilationId ? undefined : store.currentEpisodeId || undefined,
+      'video',
+      props.compilationId,
+    )
+    timeline.value.document.video_overlays ??= []
+    timeline.value.document.audio_overlays ??= []
+    const asset = timeline.value.assets[timeline.value.assets.length - 1]
+    if (asset) {
+      const source: TimelineSource = { kind: 'asset', ref_id: asset.id }
+      addVideoOverlay(source, asset.label || cleanLabel, atMs, probedMs)
+    }
+  } catch (cause) {
+    localError.value = cause instanceof Error ? cause.message : 'Could not upload video layer'
+  }
+}
+
+async function uploadVideoOverlayDirect(event: Event) {
+  closeAddMenu()
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  await uploadVideoOverlayAt(file, playheadMs.value)
+  input.value = ''
+  showAddVideoOverlayModal.value = false
+}
+
+function handleVideoTrackDragOver(event: DragEvent) {
+  event.preventDefault()
+  if (event.dataTransfer) {
+    const fromIndex = getDraggedPrimaryIndex(event)
+    const isDuplicate = isDuplicateDragEvent(event)
+    event.dataTransfer.dropEffect = fromIndex !== null && !isDuplicate && primary.value.length > 1 ? 'move' : 'copy'
+  }
+  isDraggingOverVideoTrack.value = true
+}
+
+function handleVideoTrackDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement | null
+  const relatedTarget = event.relatedTarget as Node | null
+  if (currentTarget && relatedTarget && currentTarget.contains(relatedTarget)) {
+    return
+  }
+  isDraggingOverVideoTrack.value = false
+}
+
+async function handleVideoTrackDrop(event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  isDraggingOverVideoTrack.value = false
+
+  const target = event.currentTarget as HTMLElement | null
+  const overlayTrackEl = (target?.querySelector('.overlay-track') ?? (target?.classList.contains('overlay-track') ? target : null)) as HTMLElement | null
+
+  const fromIndex = getDraggedPrimaryIndex(event)
+  if (fromIndex !== null) {
+    const isDuplicate = isDuplicateDragEvent(event)
+    dragSourceIndex.value = null
+    dragOverIndex.value = null
+    dragDuplicateModifier.value = false
+    const draggedItem = primary.value[fromIndex]
+    if (!timeline.value || !draggedItem || !draggedItem.source) return
+
+    const originalStartMs = startAt(fromIndex)
+    const shouldRemovePrimary = !isDuplicate && timeline.value.document.primary.length > 1
+    let dropMs = shouldRemovePrimary ? Math.min(originalStartMs, Math.max(0, totalMs.value - draggedItem.duration_ms)) : originalStartMs
+    if (overlayTrackEl && totalMs.value > 0) {
+      const rect = overlayTrackEl.getBoundingClientRect()
+      if (rect.width > 0 && (event.clientX > 0 || event.clientY > 0)) {
+        const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+        dropMs = Math.round((relativeX / rect.width) * totalMs.value)
+      }
+    }
+
+    mutate(() => {
+      const sourceItem = timeline.value!.document.primary[fromIndex]
+      if (!sourceItem || !sourceItem.source) return
+      const rawSource: TimelineSource = JSON.parse(JSON.stringify(sourceItem.source))
+      const overlaySource: TimelineSource =
+        rawSource.kind === 'shot_image' && shotHasVideo(props.shots.find((s) => s.id === rawSource.ref_id))
+          ? { kind: 'shot_clip', ref_id: rawSource.ref_id }
+          : rawSource
+
+      if (shouldRemovePrimary) {
+        timeline.value!.document.primary.splice(fromIndex, 1)
+      }
+
+      const nextTotalMs = timeline.value!.document.primary.reduce((sum, item) => sum + item.duration_ms, 0)
+      const baseDur = Math.max(500, Math.round(sourceItem.duration_ms || 3000))
+      const duration = nextTotalMs > 0 ? Math.max(100, Math.min(baseDur, nextTotalMs)) : baseDur
+      const start = nextTotalMs > 0 ? Math.max(0, Math.min(Math.round(dropMs), Math.max(0, nextTotalMs - duration))) : 0
+
+      const baseVariant = sourceItem.variant ? JSON.parse(JSON.stringify(sourceItem.variant)) : {}
+      const activeGeom = baseVariant[variant.value] ?? defaultVideoOverlayGeometry({ source: overlaySource })
+      baseVariant[variant.value] = {
+        ...defaultVideoOverlayGeometry({ source: overlaySource }),
+        ...activeGeom,
+        position: 'full-frame',
+      }
+
+      const autoMute = Boolean(sourceItem.mute_audio) || primaryHasActiveAudioInRange(start, duration)
+      const item: TimelineVideoOverlay = {
+        id: crypto.randomUUID(),
+        label: isDuplicate ? `${sourceItem.label} (copy)` : sourceItem.label,
+        source: overlaySource,
+        start_ms: start,
+        duration_ms: duration,
+        source_in_ms: Math.round(sourceItem.source_in_ms || 0),
+        opacity: 1,
+        volume: 1,
+        mute_audio: autoMute,
+        variant: baseVariant,
+      }
+      timeline.value!.document.video_overlays ??= []
+      timeline.value!.document.video_overlays.push(item)
+      clampOverlaysToTotal()
+      selectedKind.value = 'video'
+      selectedId.value = item.id
+      playheadMs.value = item.start_ms
+    })
+    nextTick(() => {
+      syncVideo()
+    })
+    return
+  }
+
+  const files = event.dataTransfer?.files
+  if (!files || files.length === 0) return
+  const file = files[0]
+  const isVideoFile = file && (file.type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.name))
+  if (!isVideoFile) return
+
+  let dropMs = playheadMs.value
+  if (overlayTrackEl && totalMs.value > 0) {
+    const rect = overlayTrackEl.getBoundingClientRect()
+    if (rect.width > 0) {
+      const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+      dropMs = Math.round((relativeX / rect.width) * totalMs.value)
+    }
+  }
+
+  await uploadVideoOverlayAt(file, dropMs)
+}
+
+function handleVideoTrackClick(event: MouseEvent) {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target || totalMs.value <= 0) return
+  const rect = target.getBoundingClientRect()
+  const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+  playheadMs.value = Math.round((relativeX / rect.width) * totalMs.value)
+  syncVideo()
+}
+
+const showAddImageOverlayModal = ref(false)
+const imageFilterQuery = ref('')
+const isDraggingOverImageTrack = ref(false)
+
+function shotHasImage(shot?: Shot | null): boolean {
+  if (!shot) return false
+  return Boolean(
+    shot.image ||
+    shot.image_references?.length ||
+    shot.media_variants?.some((v) => v.media_type === 'image') ||
+    shot.takes?.some((t) => t.media_type === 'image')
+  )
+}
+
+function shotStillUrl(shot: Shot): string {
+  const still = shotMedia(shot, 'image')
+  if (still?.media.url) return still.media.url
+  if (shot.image?.url) return shot.image.url
+  if (shot.image_references?.[0]?.url) return shot.image_references[0].url
+  return ''
+}
+
+const availableImageShots = computed(() => {
+  const query = imageFilterQuery.value.trim().toLowerCase()
+  return props.shots.filter((shot) => {
+    if (!shotHasImage(shot)) return false
+    if (!query) return true
+    return (shot.title || '').toLowerCase().includes(query) || (shot.action || '').toLowerCase().includes(query)
+  })
+})
+
+const availableImageAssets = computed(() => {
+  return (timeline.value?.assets || []).filter((a) => a.mime_type.startsWith('image/'))
+})
+
+const selectedShotWithImage = computed(() => {
+  const refId = selectedPrimary.value?.source?.ref_id || activeItem.value?.source?.ref_id
+  const currentShot = props.shots.find((s) => s.id === refId)
+  if (shotHasImage(currentShot)) return currentShot!
+  return props.shots.find((s) => shotHasImage(s)) ?? null
+})
+
+function openAddImageOverlayModal() {
+  closeAddMenu()
+  showAddImageOverlayModal.value = true
+}
+
+function addImageOverlay(source?: TimelineSource, atMs?: number, durationMs?: number) {
   closeAddMenu()
   if (!timeline.value) return
   const fallback = selectedPrimary.value?.source
   const chosen = source ?? (fallback?.kind === 'asset' ? fallback : fallback ? { kind: 'shot_image' as const, ref_id: fallback.ref_id } : null)
-  if (!chosen) return
+  if (!chosen) {
+    showAddImageOverlayModal.value = true
+    return
+  }
   mutate(() => {
-    const playhead = Math.round(playheadMs.value)
-    const duration = Math.round(Math.min(2500, Math.max(100, totalMs.value - playhead)))
-    const item = { id: crypto.randomUUID(), source: chosen, start_ms: playhead, duration_ms: duration, opacity: 1, variant: {} }
+    const defaultDur = Math.max(500, Math.min(durationMs ?? 3000, totalMs.value || 3000))
+    const playhead = atMs !== undefined ? Math.round(atMs) : Math.round(playheadMs.value)
+    const start = Math.max(0, Math.min(playhead, Math.max(0, totalMs.value - defaultDur)))
+    const duration = totalMs.value > 0 ? Math.min(defaultDur, Math.max(500, totalMs.value - start)) : defaultDur
+    const item: TimelineImageOverlay = {
+      id: crypto.randomUUID(),
+      source: chosen,
+      start_ms: start,
+      duration_ms: duration,
+      opacity: 1,
+      variant: {},
+    }
+    timeline.value!.document.image_overlays ??= []
     timeline.value!.document.image_overlays.push(item)
     selectedKind.value = 'image'
     selectedId.value = item.id
   })
 }
 
+function addShotImageToTimeline(shot?: Shot | null) {
+  closeAddMenu()
+  const target = shot ?? selectedShotWithImage.value
+  if (!target) {
+    showAddImageOverlayModal.value = true
+    return
+  }
+  const source: TimelineSource = { kind: 'shot_image', ref_id: target.id }
+  addImageOverlay(source)
+  showAddShotModal.value = false
+  showAddImageOverlayModal.value = false
+}
+
+function addAssetImageToTimeline(asset: TimelineAsset) {
+  closeAddMenu()
+  const source: TimelineSource = { kind: 'asset', ref_id: asset.id }
+  addImageOverlay(source)
+  showAddImageOverlayModal.value = false
+}
+
+async function uploadImageOverlayAt(file: File, atMs?: number) {
+  if (!timeline.value) return
+  await flushPendingSave()
+  timeline.value = await api.uploadTimelineAsset(
+    props.project.id,
+    file,
+    file.name,
+    variant.value,
+    props.compilationId ? undefined : store.currentEpisodeId || undefined,
+    'image',
+    props.compilationId,
+  )
+  timeline.value.document.video_overlays ??= []
+  timeline.value.document.image_overlays ??= []
+  const asset = timeline.value.assets[timeline.value.assets.length - 1]
+  if (asset) {
+    const source: TimelineSource = { kind: 'asset', ref_id: asset.id }
+    addImageOverlay(source, atMs)
+  }
+}
+
+async function uploadImageOverlayDirect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  await uploadImageOverlayAt(file, playheadMs.value)
+  input.value = ''
+  showAddImageOverlayModal.value = false
+}
+
+function handleImageTrackDragOver(event: DragEvent) {
+  event.preventDefault()
+  if (event.dataTransfer) {
+    const fromIndex = getDraggedPrimaryIndex(event)
+    const isDuplicate = isDuplicateDragEvent(event)
+    event.dataTransfer.dropEffect = fromIndex !== null && !isDuplicate && primary.value.length > 1 ? 'move' : 'copy'
+  }
+  isDraggingOverImageTrack.value = true
+}
+
+function handleImageTrackDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement | null
+  const relatedTarget = event.relatedTarget as Node | null
+  if (currentTarget && relatedTarget && currentTarget.contains(relatedTarget)) {
+    return
+  }
+  isDraggingOverImageTrack.value = false
+}
+
+async function handleImageTrackDrop(event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  isDraggingOverImageTrack.value = false
+
+  const target = event.currentTarget as HTMLElement | null
+  const overlayTrackEl = (target?.querySelector('.overlay-track') ?? (target?.classList.contains('overlay-track') ? target : null)) as HTMLElement | null
+
+  const fromIndex = getDraggedPrimaryIndex(event)
+  if (fromIndex !== null) {
+    const isDuplicate = isDuplicateDragEvent(event)
+    dragSourceIndex.value = null
+    dragOverIndex.value = null
+    dragDuplicateModifier.value = false
+    const draggedItem = primary.value[fromIndex]
+    if (!timeline.value || !draggedItem || !draggedItem.source) return
+
+    const originalStartMs = startAt(fromIndex)
+    const shouldRemovePrimary = !isDuplicate && timeline.value.document.primary.length > 1
+    let dropMs = shouldRemovePrimary ? Math.min(originalStartMs, Math.max(0, totalMs.value - draggedItem.duration_ms)) : originalStartMs
+    if (overlayTrackEl && totalMs.value > 0) {
+      const rect = overlayTrackEl.getBoundingClientRect()
+      if (rect.width > 0 && (event.clientX > 0 || event.clientY > 0)) {
+        const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+        dropMs = Math.round((relativeX / rect.width) * totalMs.value)
+      }
+    }
+
+    mutate(() => {
+      const sourceItem = timeline.value!.document.primary[fromIndex]
+      if (!sourceItem || !sourceItem.source) return
+      const rawSource: TimelineSource = JSON.parse(JSON.stringify(sourceItem.source))
+      const overlaySource: TimelineSource =
+        rawSource.kind === 'shot_clip' ? { kind: 'shot_image', ref_id: rawSource.ref_id } : rawSource
+
+      if (shouldRemovePrimary) {
+        timeline.value!.document.primary.splice(fromIndex, 1)
+      }
+
+      const nextTotalMs = timeline.value!.document.primary.reduce((sum, item) => sum + item.duration_ms, 0)
+      const baseDur = Math.max(500, Math.round(sourceItem.duration_ms || 3000))
+      const duration = nextTotalMs > 0 ? Math.max(100, Math.min(baseDur, nextTotalMs)) : baseDur
+      const start = nextTotalMs > 0 ? Math.max(0, Math.min(Math.round(dropMs), Math.max(0, nextTotalMs - duration))) : 0
+
+      const item: TimelineImageOverlay = {
+        id: crypto.randomUUID(),
+        source: overlaySource,
+        start_ms: start,
+        duration_ms: duration,
+        opacity: 1,
+        variant: {},
+      }
+      timeline.value!.document.image_overlays ??= []
+      timeline.value!.document.image_overlays.push(item)
+      clampOverlaysToTotal()
+      selectedKind.value = 'image'
+      selectedId.value = item.id
+      playheadMs.value = item.start_ms
+    })
+    nextTick(() => {
+      syncVideo()
+    })
+    return
+  }
+
+  const files = event.dataTransfer?.files
+  if (!files || files.length === 0) return
+  const file = files[0]
+  if (!file || !file.type.startsWith('image/')) return
+
+  let dropMs = playheadMs.value
+  if (overlayTrackEl && totalMs.value > 0) {
+    const rect = overlayTrackEl.getBoundingClientRect()
+    if (rect.width > 0) {
+      const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+      dropMs = Math.round((relativeX / rect.width) * totalMs.value)
+    }
+  }
+
+  await uploadImageOverlayAt(file, dropMs)
+}
+
+function handleImageTrackClick(event: MouseEvent) {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target || totalMs.value <= 0) return
+  const rect = target.getBoundingClientRect()
+  const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+  playheadMs.value = Math.round((relativeX / rect.width) * totalMs.value)
+}
+
 function addAudioOverlay(source: TimelineSource, label = 'Audio clip', preferredDurationMs = 3000) {
   closeAddMenu()
   if (!timeline.value) return
   mutate(() => {
-    const maxStart = Math.max(0, totalMs.value - 100)
-    const playhead = Math.min(maxStart, Math.max(0, Math.round(playheadMs.value)))
-    const remaining = Math.max(100, totalMs.value - playhead)
-    const duration = Math.round(Math.min(Math.max(100, preferredDurationMs), remaining))
+    const defaultDur = Math.max(500, Math.min(preferredDurationMs, totalMs.value || preferredDurationMs))
+    const playhead = Math.round(playheadMs.value)
+    const start = Math.max(0, Math.min(playhead, Math.max(0, totalMs.value - defaultDur)))
+    const duration = totalMs.value > 0 ? Math.min(defaultDur, Math.max(500, totalMs.value - start)) : defaultDur
     const item: TimelineAudioOverlay = {
       id: crypto.randomUUID(),
       label,
       source,
-      start_ms: playhead,
+      start_ms: start,
       duration_ms: duration,
       source_in_ms: 0,
       volume: 1,
@@ -1001,7 +2402,16 @@ async function uploadAudioAsset(event: Event) {
     const probedMs = await probeFileDurationMs(file)
     const cleanLabel = file.name.replace(/\.[^.]+$/, '') || file.name
     await flushPendingSave()
-    timeline.value = await api.uploadTimelineAsset(props.project.id, file, cleanLabel, variant.value, store.currentEpisodeId || undefined)
+    timeline.value = await api.uploadTimelineAsset(
+      props.project.id,
+      file,
+      cleanLabel,
+      variant.value,
+      props.compilationId ? undefined : store.currentEpisodeId || undefined,
+      'audio',
+      props.compilationId,
+    )
+    timeline.value.document.video_overlays ??= []
     timeline.value.document.audio_overlays ??= []
     const asset = timeline.value.assets[timeline.value.assets.length - 1]
     if (asset) {
@@ -1020,7 +2430,16 @@ async function uploadAsset(event: Event, append: boolean) {
   const file = input.files?.[0]
   if (!file || !timeline.value) return
   await flushPendingSave()
-  timeline.value = await api.uploadTimelineAsset(props.project.id, file, file.name, variant.value, store.currentEpisodeId || undefined)
+  timeline.value = await api.uploadTimelineAsset(
+    props.project.id,
+    file,
+    file.name,
+    variant.value,
+    props.compilationId ? undefined : store.currentEpisodeId || undefined,
+    'image',
+    props.compilationId,
+  )
+  timeline.value.document.video_overlays ??= []
   timeline.value.document.audio_overlays ??= []
   const asset = timeline.value.assets[timeline.value.assets.length - 1]
   if (asset) {
@@ -1039,17 +2458,35 @@ async function uploadAsset(event: Event, append: boolean) {
   input.value = ''
 }
 
-function selectItem(kind: 'primary' | 'image' | 'text' | 'audio', id: string, start: number) {
+let lastModifierToggleTime = 0
+let lastModifierToggledId = ''
+
+function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: string, start: number, event?: MouseEvent) {
   stopPlayback()
+  if (event && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+    if (Date.now() - lastModifierToggleTime > 300 || lastModifierToggledId !== id) {
+      lastModifierToggleTime = Date.now()
+      lastModifierToggledId = id
+      toggleSelectEntry(kind, id)
+    }
+    return
+  }
   selectedKind.value = kind
   selectedId.value = id
+  selectedEntries.value = [{ kind, id }]
   playheadMs.value = start
+  syncVideo()
 }
 
 function handlePrimaryBlockClick(event: MouseEvent, item: TimelinePrimaryItem, index: number) {
   stopPlayback()
+  if (event.shiftKey || event.ctrlKey || event.metaKey) {
+    toggleSelectEntry('primary', item.id)
+    return
+  }
   selectedKind.value = 'primary'
   selectedId.value = item.id
+  selectedEntries.value = [{ kind: 'primary', id: item.id }]
   const start = startAt(index)
   const target = event.currentTarget as HTMLElement | null
   if (target) {
@@ -1097,14 +2534,21 @@ function jumpClip(direction: -1 | 1) {
   }
 }
 
-function beginOverlayEdit(event: PointerEvent, kind: 'image' | 'text' | 'audio', item: OverlayItem, mode: OverlayEditMode) {
+function beginOverlayEdit(event: PointerEvent, kind: 'video' | 'image' | 'text' | 'audio', item: OverlayItem, mode: OverlayEditMode) {
   if (event.button !== 0 || !timeline.value || totalMs.value <= 0) return
+  if (mode === 'move' && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+    lastModifierToggleTime = Date.now()
+    lastModifierToggledId = item.id
+    toggleSelectEntry(kind, item.id)
+    return
+  }
   const track = (event.currentTarget as HTMLElement).closest('.overlay-track')
   if (!track) return
   event.preventDefault()
   stopPlayback()
   selectedKind.value = kind
   selectedId.value = item.id
+  selectedEntries.value = [{ kind, id: item.id }]
   playheadMs.value = mode === 'resize-end' ? item.start_ms + item.duration_ms : item.start_ms
   overlayEdit = {
     pointerId: event.pointerId,
@@ -1168,13 +2612,72 @@ function startAt(index: number) {
 function seek(event: Event) {
   stopPlayback()
   playheadMs.value = Number((event.target as HTMLInputElement).value)
-  const item = activeItem.value
-  if (item) {
+  if (!selectedId.value && activeItem.value) {
     selectedKind.value = 'primary'
-    selectedId.value = item.id
+    selectedId.value = activeItem.value.id
   }
   syncVideo()
   persistUiState()
+}
+
+const videoOverlayEls = new Map<string, HTMLVideoElement>()
+
+function setVideoOverlayRef(id: string, el: HTMLVideoElement | null) {
+  if (el) {
+    videoOverlayEls.set(id, el)
+  } else {
+    videoOverlayEls.delete(id)
+  }
+}
+
+function pauseAllVideoOverlays() {
+  for (const el of videoOverlayEls.values()) {
+    try {
+      el.pause()
+    } catch {}
+  }
+}
+
+function syncVideoOverlays() {
+  const items = videoOverlays.value
+  const activeIds = new Set(items.map((item) => item.id))
+  for (const [id, el] of videoOverlayEls.entries()) {
+    if (!activeIds.has(id)) {
+      try {
+        el.pause()
+      } catch {}
+      videoOverlayEls.delete(id)
+    }
+  }
+  for (const overlay of items) {
+    const el = videoOverlayEls.get(overlay.id)
+    if (!el) continue
+    const inWindow = playheadMs.value >= overlay.start_ms && playheadMs.value < overlay.start_ms + overlay.duration_ms
+    const muted = isMuted.value || Boolean(overlay.mute_audio) || (overlay.volume ?? 1) <= 0
+    el.muted = muted
+    el.volume = Math.max(0, Math.min(1, overlay.volume ?? 1))
+    const targetSec = Math.max(0, ((overlay.source_in_ms || 0) + (playheadMs.value - overlay.start_ms)) / 1000)
+    if (playing.value && inWindow) {
+      try {
+        if (Math.abs((el.currentTime || 0) - targetSec) > 0.25) {
+          el.currentTime = Number.isFinite(el.duration) ? Math.min(targetSec, el.duration) : targetSec
+        }
+        if (el.paused) {
+          void el.play()?.catch?.(() => {
+            el.muted = true
+            void el.play()?.catch?.(() => undefined)
+          })
+        }
+      } catch {}
+    } else {
+      try {
+        if (!el.paused) el.pause()
+        if (inWindow && Math.abs((el.currentTime || 0) - targetSec) > 0.04) {
+          el.currentTime = Number.isFinite(el.duration) ? Math.min(targetSec, el.duration) : targetSec
+        }
+      } catch {}
+    }
+  }
 }
 
 const audioOverlayPlayers = new Map<string, HTMLAudioElement>()
@@ -1255,11 +2758,13 @@ function toggleMute() {
   if (previewVideo.value) {
     previewVideo.value.muted = isMuted.value || Boolean(activeItem.value?.mute_audio)
   }
+  syncVideoOverlays()
   syncAudioOverlays()
   persistUiState()
 }
 
 function syncVideo() {
+  syncVideoOverlays()
   syncAudioOverlays()
   const video = previewVideo.value
   const item = activeItem.value
@@ -1272,6 +2777,14 @@ function syncVideo() {
 }
 
 function toggleSelectedAudio() {
+  if (selectedKind.value === 'video' && selectedVideo.value) {
+    const videoItem = selectedVideo.value
+    mutate(() => {
+      videoItem.mute_audio = !videoItem.mute_audio
+    })
+    syncVideoOverlays()
+    return
+  }
   if (selectedKind.value === 'audio' && selectedAudio.value) {
     const audioItem = selectedAudio.value
     mutate(() => {
@@ -1286,6 +2799,193 @@ function toggleSelectedAudio() {
     item.mute_audio = !item.mute_audio
   })
   syncVideo()
+}
+
+function toggleBlockAudio(kind: 'primary' | 'video' | 'audio', id: string) {
+  if (!timeline.value) return
+  if (kind === 'primary') {
+    const target = timeline.value.document.primary.find((item) => item.id === id)
+    if (!target || target.kind !== 'video') return
+    mutate(() => {
+      target.mute_audio = !target.mute_audio
+    })
+    syncVideo()
+    return
+  }
+  if (kind === 'video') {
+    const target = (timeline.value.document.video_overlays ?? []).find((item) => item.id === id)
+    if (!target) return
+    mutate(() => {
+      target.mute_audio = !target.mute_audio
+    })
+    syncVideoOverlays()
+    return
+  }
+  const target = (timeline.value.document.audio_overlays ?? []).find((item) => item.id === id)
+  if (!target) return
+  mutate(() => {
+    target.mute_audio = !target.mute_audio
+  })
+  syncAudioOverlays()
+}
+
+function detachSelectedVideoAudio() {
+  if (!timeline.value) return
+  if (selectedKind.value === 'video' && selectedVideo.value) {
+    const videoItem = selectedVideo.value
+    mutate(() => {
+      const audioSource: TimelineSource =
+        videoItem.source.kind === 'shot_image'
+          ? { kind: 'shot_audio', ref_id: videoItem.source.ref_id }
+          : JSON.parse(JSON.stringify(videoItem.source))
+      const audioItem: TimelineAudioOverlay = {
+        id: crypto.randomUUID(),
+        label: `${videoItem.label.replace(/ \(copy\)$/i, '')} audio`,
+        source: audioSource,
+        start_ms: Math.round(videoItem.start_ms),
+        duration_ms: Math.round(videoItem.duration_ms),
+        source_in_ms: Math.round(videoItem.source_in_ms || 0),
+        volume: videoItem.volume ?? 1,
+        mute_audio: false,
+      }
+      videoItem.mute_audio = true
+      timeline.value!.document.audio_overlays ??= []
+      timeline.value!.document.audio_overlays.push(audioItem)
+      clampOverlaysToTotal()
+    })
+    syncVideo()
+    return
+  }
+  const primaryItem = selectedPrimary.value
+  const primaryIndex = selectedPrimaryIndex.value
+  if (!primaryItem || primaryItem.kind !== 'video' || !primaryItem.source || primaryIndex < 0) return
+  const clipStartMs = startAt(primaryIndex)
+  mutate(() => {
+    const rawSource: TimelineSource = JSON.parse(JSON.stringify(primaryItem.source!))
+    const audioSource: TimelineSource =
+      rawSource.kind === 'shot_image' ? { kind: 'shot_audio', ref_id: rawSource.ref_id } : rawSource
+    const audioItem: TimelineAudioOverlay = {
+      id: crypto.randomUUID(),
+      label: `${primaryItem.label.replace(/ \(copy\)$/i, '')} audio`,
+      source: audioSource,
+      start_ms: Math.round(clipStartMs),
+      duration_ms: Math.round(primaryItem.duration_ms),
+      source_in_ms: Math.round(primaryItem.source_in_ms || 0),
+      volume: 1,
+      mute_audio: false,
+    }
+    primaryItem.mute_audio = true
+    timeline.value!.document.audio_overlays ??= []
+    timeline.value!.document.audio_overlays.push(audioItem)
+    clampOverlaysToTotal()
+  })
+  syncVideo()
+}
+
+function soloVideoLayerAudio() {
+  if (!timeline.value || !selectedVideo.value) return
+  const videoItem = selectedVideo.value
+  mutate(() => {
+    videoItem.mute_audio = false
+    const startMs = videoItem.start_ms
+    const endMs = videoItem.start_ms + videoItem.duration_ms
+    let elapsed = 0
+    for (const item of timeline.value!.document.primary) {
+      const itemStart = elapsed
+      const itemEnd = elapsed + item.duration_ms
+      elapsed = itemEnd
+      if (itemEnd <= startMs || itemStart >= endMs) continue
+      if (item.kind === 'video') {
+        item.mute_audio = true
+      }
+    }
+  })
+  syncVideo()
+}
+
+const isDraggingOverAudioTrack = ref(false)
+
+function handleAudioTrackDragOver(event: DragEvent) {
+  event.preventDefault()
+  if (event.dataTransfer) {
+    const fromIndex = getDraggedPrimaryIndex(event)
+    const isDuplicate = isDuplicateDragEvent(event)
+    event.dataTransfer.dropEffect = fromIndex !== null && !isDuplicate ? 'move' : 'copy'
+  }
+  isDraggingOverAudioTrack.value = true
+}
+
+function handleAudioTrackDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement | null
+  const relatedTarget = event.relatedTarget as Node | null
+  if (currentTarget && relatedTarget && currentTarget.contains(relatedTarget)) {
+    return
+  }
+  isDraggingOverAudioTrack.value = false
+}
+
+async function handleAudioTrackDrop(event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  isDraggingOverAudioTrack.value = false
+
+  const target = event.currentTarget as HTMLElement | null
+  const overlayTrackEl = (target?.querySelector('.overlay-track') ?? (target?.classList.contains('overlay-track') ? target : null)) as HTMLElement | null
+
+  const fromIndex = getDraggedPrimaryIndex(event)
+  if (fromIndex !== null) {
+    const isDuplicate = isDuplicateDragEvent(event)
+    dragSourceIndex.value = null
+    dragOverIndex.value = null
+    dragDuplicateModifier.value = false
+    const draggedItem = primary.value[fromIndex]
+    if (!timeline.value || !draggedItem || !draggedItem.source) return
+
+    let dropMs = startAt(fromIndex)
+    if (overlayTrackEl && totalMs.value > 0) {
+      const rect = overlayTrackEl.getBoundingClientRect()
+      if (rect.width > 0 && (event.clientX > 0 || event.clientY > 0)) {
+        const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+        dropMs = Math.round((relativeX / rect.width) * totalMs.value)
+      }
+    }
+
+    mutate(() => {
+      const sourceItem = timeline.value!.document.primary[fromIndex]
+      if (!sourceItem || !sourceItem.source) return
+      const rawSource: TimelineSource = JSON.parse(JSON.stringify(sourceItem.source))
+      const audioSource: TimelineSource =
+        rawSource.kind === 'shot_image' ? { kind: 'shot_audio', ref_id: rawSource.ref_id } : rawSource
+      const nextTotalMs = timeline.value!.document.primary.reduce((sum, item) => sum + item.duration_ms, 0)
+      const baseDur = Math.max(500, Math.round(sourceItem.duration_ms || 3000))
+      const duration = nextTotalMs > 0 ? Math.max(100, Math.min(baseDur, nextTotalMs)) : baseDur
+      const start = nextTotalMs > 0 ? Math.max(0, Math.min(Math.round(dropMs), Math.max(0, nextTotalMs - duration))) : 0
+
+      if (!isDuplicate) {
+        sourceItem.mute_audio = true
+      }
+
+      const audioItem: TimelineAudioOverlay = {
+        id: crypto.randomUUID(),
+        label: `${sourceItem.label.replace(/ \(copy\)$/i, '')} audio`,
+        source: audioSource,
+        start_ms: start,
+        duration_ms: duration,
+        source_in_ms: Math.round(sourceItem.source_in_ms || 0),
+        volume: 1,
+        mute_audio: false,
+      }
+      timeline.value!.document.audio_overlays ??= []
+      timeline.value!.document.audio_overlays.push(audioItem)
+      clampOverlaysToTotal()
+      selectedKind.value = 'audio'
+      selectedId.value = audioItem.id
+      playheadMs.value = audioItem.start_ms
+    })
+    nextTick(() => {
+      syncVideo()
+    })
+  }
 }
 
 function handleLoadedMetadata() {
@@ -1317,6 +3017,7 @@ function stopPlayback() {
   if (playbackTimer !== undefined) cancelAnimationFrame(playbackTimer)
   playbackTimer = undefined
   previewVideo.value?.pause()
+  pauseAllVideoOverlays()
   pauseAllAudioOverlays()
   if (wasPlaying && !loading.value) persistUiState()
 }
@@ -1334,6 +3035,7 @@ function togglePlayback() {
     if (!playing.value) return
     playheadMs.value = Math.min(totalMs.value, playheadMs.value + now - previous)
     previous = now
+    syncVideoOverlays()
     syncAudioOverlays()
     scrollPlayheadIntoView()
     if (playheadMs.value >= totalMs.value) {
@@ -1353,7 +3055,14 @@ function togglePlayback() {
 
 async function renderVariant() {
   await flushPendingSave()
-  await store.renderFinalCut(variant.value)
+  if (props.compilationId) {
+    await store.renderCompilationExport(props.compilationId, variant.value)
+    try {
+      compilationExports.value = await api.compilationExports(props.compilationId)
+    } catch {}
+  } else {
+    await store.renderFinalCut(variant.value)
+  }
 }
 
 async function resetTimeline() {
@@ -1362,13 +3071,20 @@ async function resetTimeline() {
   saveTimer = undefined
   dirtyDocument = false
   pendingSave = false
-  timeline.value = await api.resetTimeline(props.project.id, store.currentEpisodeId || undefined)
+  if (props.compilationId) {
+    timeline.value = await api.resetCompilationTimeline(props.compilationId, variant.value)
+  } else {
+    timeline.value = await api.resetTimeline(props.project.id, store.currentEpisodeId || undefined)
+  }
+  timeline.value.document.video_overlays ??= []
   timeline.value.document.audio_overlays ??= []
   selectedKind.value = 'primary'
   selectedId.value = timeline.value.document.primary[0]?.id ?? ''
   playheadMs.value = 0
   persistUiState()
-  await store.loadProject(props.project.id)
+  if (!props.compilationId) {
+    await store.loadProject(props.project.id, { episodeId: store.currentEpisodeId || undefined, resumeJobs: false })
+  }
 }
 
 watch([isMuted, zoomLevel, selectedKind, selectedId, variant], () => {
@@ -1377,7 +3093,8 @@ watch([isMuted, zoomLevel, selectedKind, selectedId, variant], () => {
 watch(playheadMs, () => {
   if (!loading.value && !playing.value) persistUiState()
 })
-watch(() => [props.project.id, store.currentEpisodeId], async () => {
+watch([() => props.project.id, () => store.currentEpisodeId, () => props.compilationId], async ([newProjectId, newEpisodeId, newCompId], [oldProjectId, oldEpisodeId, oldCompId]) => {
+  if (newProjectId === oldProjectId && newEpisodeId === oldEpisodeId && newCompId === oldCompId) return
   await flushPendingSave()
   await loadTimeline()
 })
@@ -1424,12 +3141,14 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 function handleKeydown(event: KeyboardEvent) {
   if (isTypingTarget(event.target)) return
-  if (showShortcutsModal.value || showAddShotModal.value || showPublishModal.value) {
+  if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value) {
     if (event.key === 'Escape') {
       event.preventDefault()
       if (showPublishModal.value) closePublishModal()
       showShortcutsModal.value = false
       showAddShotModal.value = false
+      showAddVideoOverlayModal.value = false
+      showAddImageOverlayModal.value = false
     }
     return
   }
@@ -1571,11 +3290,13 @@ function handleKeydown(event: KeyboardEvent) {
 
   // Escape: Close shortcuts modal or deselect
   if (event.key === 'Escape') {
-    if (showShortcutsModal.value || showAddShotModal.value || showPublishModal.value) {
+    if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value) {
       closePublishModal()
       event.preventDefault()
       showShortcutsModal.value = false
       showAddShotModal.value = false
+      showAddVideoOverlayModal.value = false
+      showAddImageOverlayModal.value = false
     }
   }
 }
@@ -1599,6 +3320,11 @@ onMounted(() => {
   window.addEventListener('pointerdown', handleDocumentPointerDown)
   window.addEventListener('beforeunload', handleBeforeUnload)
   void loadTimeline()
+  void api.getTimelineLuts().then((list) => {
+    if (Array.isArray(list) && list.length > 0) {
+      lutPresets.value = list
+    }
+  }).catch(() => {})
 })
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect()
@@ -1617,7 +3343,21 @@ onBeforeUnmount(() => {
   <section class="timeline-editor">
     <header class="editor-header">
       <div class="editor-title-block">
-        <h2>Timeline</h2>
+        <div class="timeline-title-row">
+          <h2>Timeline</h2>
+          <div v-if="props.compilationId && store.activeCompilation" class="compilation-badge-pill">
+            <Boxes :size="13" />
+            <span>Box: {{ store.activeCompilation.title }}</span>
+            <button
+              type="button"
+              class="exit-compilation-btn"
+              title="Exit compilation mode and return to episode timeline"
+              @click="store.selectCompilation(null)"
+            >
+              <X :size="12" />
+            </button>
+          </div>
+        </div>
         <p>
           <span>{{ primary.length }} {{ primary.length === 1 ? 'clip' : 'clips' }}</span>
           <span class="meta-dot">·</span>
@@ -1642,6 +3382,7 @@ onBeforeUnmount(() => {
         </button>
         <a v-if="variantExport" class="secondary-button" :href="variantExport.url" :download="downloadFilename"><Download :size="15" />MP4</a>
         <button
+          v-if="!props.compilationId"
           class="secondary-button publish-header-btn"
           title="Publish to YouTube and social channels"
           @click="openPublishModal()"
@@ -1662,11 +3403,32 @@ onBeforeUnmount(() => {
         <div class="preview-pane">
           <section class="program-monitor" :class="variant">
             <video v-if="activeMedia?.mime_type.startsWith('video')" ref="previewVideo" :src="activeMedia.url" :style="activeMediaStyle" :muted="isMuted || Boolean(activeItem?.mute_audio)" playsinline preload="auto" @loadedmetadata="handleLoadedMetadata"></video>
-            <img v-else-if="activeMedia" :src="activeMedia.url" :style="activeMediaStyle" alt="" />
+            <img v-else-if="activeMedia" class="preview-primary-media" :src="activeMedia.url" :style="activeMediaStyle" alt="" />
             <div v-else-if="activeItem?.kind === 'title'" class="preview-title">{{ activeItem.text }}</div>
             <div v-else class="preview-missing">Missing media</div>
+            <template v-for="overlay in videoOverlays" :key="overlay.id">
+              <video
+                v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms && resolveSource(overlay.source)?.mime_type.startsWith('video')"
+                :ref="(el) => setVideoOverlayRef(overlay.id, el as HTMLVideoElement | null)"
+                class="preview-video-overlay"
+                :class="[videoOverlayGeometryFor(overlay).position, { 'is-full-frame': videoOverlayGeometryFor(overlay).position === 'full-frame' }]"
+                :style="videoOverlayPreviewStyle(overlay)"
+                :src="resolveSource(overlay.source)!.url"
+                :muted="isMuted || Boolean(overlay.mute_audio) || (overlay.volume ?? 1) <= 0"
+                playsinline
+                preload="auto"
+                @loadedmetadata="syncVideoOverlays"
+              ></video>
+            </template>
             <template v-for="overlay in timeline.document.image_overlays" :key="overlay.id">
-              <img v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms && resolveSource(overlay.source)" class="preview-image-overlay" :class="geometryFor(overlay).position" :style="{ opacity: overlay.opacity, width: `${30 * geometryFor(overlay).scale}%` }" :src="resolveSource(overlay.source)!.url" alt="" />
+              <img
+                v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms && resolveSource(overlay.source)"
+                class="preview-image-overlay"
+                :class="[geometryFor(overlay).position, { 'is-full-frame': geometryFor(overlay).position === 'full-frame' }]"
+                :style="imageOverlayPreviewStyle(overlay)"
+                :src="resolveSource(overlay.source)!.url"
+                alt=""
+              />
             </template>
             <template v-for="overlay in timeline.document.text_overlays" :key="overlay.id">
               <div v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms" class="preview-text-overlay" :class="[geometryFor(overlay).position, overlay.presentation, overlay.background, overlay.size, overlay.color]">{{ overlay.text }}</div>
@@ -1712,14 +3474,56 @@ onBeforeUnmount(() => {
             <span class="preview-shortcut">Space play · ←/→ step · S split</span>
           </div>
         </div>
-        <aside class="timeline-inspector">
+        <aside class="timeline-inspector" @focusin="captureInspectorSnapshot" @pointerdown="captureInspectorSnapshot">
           <header class="inspector-header">
-            <span class="inspector-eyebrow">Inspector · {{ selectedKind.toUpperCase() }}</span>
-            <strong>{{ selectedPrimary?.label || selectedText?.text || selectedAudio?.label || (selectedImage ? 'Image overlay' : 'Nothing selected') }}</strong>
+            <span class="inspector-eyebrow">Inspector · {{ isMultiSelect ? 'MULTI-SELECTION' : selectedKind.toUpperCase() }}</span>
+            <strong>{{ isMultiSelect ? `${selectedEntries.length} items selected` : (selectedPrimary?.label || selectedVideo?.label || selectedText?.text || selectedAudio?.label || (selectedImage ? 'Image overlay' : 'Nothing selected')) }}</strong>
           </header>
-          <template v-if="selectedPrimary">
-            <label>Name<input v-model="selectedPrimary.label" @change="scheduleSave" /></label>
-            <label v-if="selectedPrimary.kind === 'title'">Text<textarea v-model="selectedPrimary.text" rows="3" @change="scheduleSave"></textarea></label>
+          <template v-if="isMultiSelect">
+            <div class="multi-select-inspector">
+              <div class="multi-select-summary-badge">{{ multiSelectSummary }}</div>
+              <div class="multi-select-list">
+                <div v-for="entry in selectedEntries" :key="entry.kind + '-' + entry.id" class="multi-select-item-chip">
+                  <span class="chip-kind-badge">{{ entry.kind }}</span>
+                  <span class="chip-name">{{ getItemLabel(entry) }}</span>
+                  <button type="button" class="chip-remove" title="Remove from selection" @click="toggleSelectEntry(entry.kind, entry.id)">×</button>
+                </div>
+              </div>
+              <div class="multi-select-actions">
+                <button
+                  type="button"
+                  class="inspector-action-btn primary-action-btn"
+                  :disabled="!canSplitAtPlayhead"
+                  @click="splitAtPlayhead"
+                  title="Split all intersecting selected clips at playhead (S / C)"
+                >
+                  <Split :size="13" />
+                  <span>Split at playhead{{ eligibleSplitCount > 0 ? ` (${eligibleSplitCount})` : '' }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="inspector-action-btn danger-action-btn"
+                  @click="deleteSelection"
+                  title="Delete all selected items (Delete / Backspace)"
+                >
+                  <Trash2 :size="13" />
+                  <span>Delete selected ({{ selectedEntries.length }})</span>
+                </button>
+                <button
+                  type="button"
+                  class="inspector-action-btn"
+                  @click="clearMultiSelection"
+                  title="Clear multi-selection"
+                >
+                  <X :size="13" />
+                  <span>Deselect all</span>
+                </button>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="selectedPrimary">
+            <label>Name<input v-model="selectedPrimary.label" @change="commitInspectorEdit" /></label>
+            <label v-if="selectedPrimary.kind === 'title'">Text<textarea v-model="selectedPrimary.text" rows="3" @change="commitInspectorEdit"></textarea></label>
             <label>Duration (seconds)<input type="number" min="0.1" step="0.1" :value="selectedPrimary.duration_ms / 1000" @change="resizeSelected" /></label>
             <template v-if="selectedPrimary.kind === 'video'">
               <div class="trim-heading">
@@ -1758,39 +3562,831 @@ onBeforeUnmount(() => {
                 >
                   <VolumeX v-if="selectedPrimary.mute_audio" :size="13" />
                   <Volume2 v-else :size="13" />
-                  <span>{{ selectedPrimary.mute_audio ? 'Audio removed' : 'Audio active' }}</span>
+                  <span>{{ selectedPrimary.mute_audio ? 'Video only (Muted)' : 'Audio active' }}</span>
                 </button>
               </div>
+              <button
+                type="button"
+                class="inspector-action-btn"
+                title="Extract this clip's audio onto the AUDIO track and mute the video clip"
+                @click="detachSelectedVideoAudio"
+              >
+                <Music :size="13" />Detach audio to AUDIO track
+              </button>
             </template>
-            <details class="inspector-section"><summary>Framing &amp; crop</summary>
-            <label>Fit<select v-model="geometryFor(selectedPrimary).fit" @change="scheduleSave"><option value="cover">Fill frame (crop)</option><option value="contain">Full frame (no crop)</option></select></label>
-            <label>Horizontal focus<input v-model.number="geometryFor(selectedPrimary).focal_x" type="range" min="0" max="1" step="0.01" @change="scheduleSave" /></label>
-            <label>Vertical focus<input v-model.number="geometryFor(selectedPrimary).focal_y" type="range" min="0" max="1" step="0.01" @change="scheduleSave" /></label>
-            <label>Crop zoom<input v-model.number="geometryFor(selectedPrimary).zoom" type="range" min="1" max="3" step="0.05" @change="scheduleSave" /></label>
+            <details class="inspector-section framing-section" open>
+              <summary class="inspector-section-summary">
+                <span>Framing, zoom &amp; crop</span>
+                <button
+                  v-if="hasCropOrZoom(geometryFor(selectedPrimary))"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Reset crop & zoom"
+                  @click.stop.prevent="resetGeometryCropAndZoom(geometryFor(selectedPrimary))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <div class="framing-panel">
+                <label class="framing-fit-label">
+                  <span>Fit</span>
+                  <select v-model="geometryFor(selectedPrimary).fit" @change="commitInspectorEdit">
+                    <option value="cover">Fill frame (crop)</option>
+                    <option value="contain">Full frame (no crop)</option>
+                  </select>
+                </label>
+
+                <div class="framing-card position-card">
+                  <div class="framing-card-header">
+                    <span class="quick-dur-label">Position</span>
+                    <span class="framing-crop-readout">
+                      X {{ formatSignedPercent(geometryFor(selectedPrimary).offset_x) }} · Y {{ formatSignedPercent(geometryFor(selectedPrimary).offset_y) }}
+                    </span>
+                  </div>
+                  <div class="position-body">
+                    <div class="nudge-pad" role="group" aria-label="Shift video position">
+                      <button type="button" class="nudge-btn nudge-up" title="Shift up" aria-label="Shift up" @click="nudgeGeometryOffset(geometryFor(selectedPrimary), 0, -0.02)"><ChevronUp :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-left" title="Shift left" aria-label="Shift left" @click="nudgeGeometryOffset(geometryFor(selectedPrimary), -0.02, 0)"><ChevronLeft :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-center" title="Re-center position" aria-label="Re-center position" @click="centerGeometryOffset(geometryFor(selectedPrimary))"><Crosshair :size="12" /></button>
+                      <button type="button" class="nudge-btn nudge-right" title="Shift right" aria-label="Shift right" @click="nudgeGeometryOffset(geometryFor(selectedPrimary), 0.02, 0)"><ChevronRight :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-down" title="Shift down" aria-label="Shift down" @click="nudgeGeometryOffset(geometryFor(selectedPrimary), 0, 0.02)"><ChevronDown :size="13" /></button>
+                    </div>
+                    <div class="position-sliders">
+                      <label class="framing-slider-field bipolar">
+                        <span class="framing-field-head"><span>X · left ↔ right</span><b>{{ formatSignedPercent(geometryFor(selectedPrimary).offset_x) }}</b></span>
+                        <input
+                          v-model.number="geometryFor(selectedPrimary).offset_x"
+                          type="range"
+                          min="-1"
+                          max="1"
+                          step="0.01"
+                          aria-label="Horizontal position"
+                          :style="framingRangeStyle(geometryFor(selectedPrimary).offset_x, -1, 1, 'center')"
+                          @change="commitInspectorEdit"
+                        />
+                      </label>
+                      <label class="framing-slider-field bipolar">
+                        <span class="framing-field-head"><span>Y · up ↕ down</span><b>{{ formatSignedPercent(geometryFor(selectedPrimary).offset_y) }}</b></span>
+                        <input
+                          v-model.number="geometryFor(selectedPrimary).offset_y"
+                          type="range"
+                          min="-1"
+                          max="1"
+                          step="0.01"
+                          aria-label="Vertical position"
+                          :style="framingRangeStyle(geometryFor(selectedPrimary).offset_y, -1, 1, 'center')"
+                          @change="commitInspectorEdit"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="framing-card">
+                  <label class="framing-slider-field">
+                    <span class="framing-field-head">
+                      <span>Zoom</span>
+                      <b>{{ (geometryFor(selectedPrimary).zoom ?? 1).toFixed(2) }}×</b>
+                    </span>
+                    <input
+                      v-model.number="geometryFor(selectedPrimary).zoom"
+                      type="range"
+                      min="1"
+                      max="3"
+                      step="0.05"
+                      aria-label="Zoom"
+                      :style="framingRangeStyle(geometryFor(selectedPrimary).zoom, 1, 3)"
+                      @change="commitInspectorEdit"
+                    />
+                  </label>
+                  <div class="framing-grid-2col">
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Focus X</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).focal_x ?? 0.5) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).focal_x"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        aria-label="Focus X"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_x ?? 0.5, 0, 1)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Focus Y</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).focal_y ?? 0.5) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).focal_y"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        aria-label="Focus Y"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_y ?? 0.5, 0, 1)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="framing-card">
+                  <div class="framing-card-header">
+                    <span class="quick-dur-label">Crop region</span>
+                    <span class="framing-crop-readout">
+                      {{ Math.round(Math.max(10, (1 - (geometryFor(selectedPrimary).crop_left ?? 0) - (geometryFor(selectedPrimary).crop_right ?? 0)) * 100)) }}% × {{ Math.round(Math.max(10, (1 - (geometryFor(selectedPrimary).crop_top ?? 0) - (geometryFor(selectedPrimary).crop_bottom ?? 0)) * 100)) }}%
+                    </span>
+                  </div>
+                  <div class="quick-dur-buttons crop-preset-grid">
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'full') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'full')"><span class="crop-glyph full"><i></i></span><span>Full</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'center-box') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'center-box')"><span class="crop-glyph center"><i></i></span><span>Center</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'left-half') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'left-half')"><span class="crop-glyph left"><i></i></span><span>Left ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'right-half') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'right-half')"><span class="crop-glyph right"><i></i></span><span>Right ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'top-half') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'top-half')"><span class="crop-glyph top"><i></i></span><span>Top ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(geometryFor(selectedPrimary), 'bottom-half') }" @click="applyCropPreset(geometryFor(selectedPrimary), 'bottom-half')"><span class="crop-glyph bottom"><i></i></span><span>Bottom ½</span></button>
+                  </div>
+                  <div class="crop-edges-grid">
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Top</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).crop_top ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).crop_top"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop top"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).crop_top, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Bottom</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).crop_bottom ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).crop_bottom"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop bottom"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).crop_bottom, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Left</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).crop_left ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).crop_left"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop left"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).crop_left, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Right</span>
+                        <b>{{ Math.round((geometryFor(selectedPrimary).crop_right ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="geometryFor(selectedPrimary).crop_right"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop right"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).crop_right, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  class="framing-reset-btn"
+                  :disabled="!hasCropOrZoom(geometryFor(selectedPrimary))"
+                  @click="resetGeometryCropAndZoom(geometryFor(selectedPrimary))"
+                >
+                  Reset crop &amp; zoom
+                </button>
+              </div>
+            </details>
+            <details class="inspector-section lut-section" open>
+              <summary class="inspector-section-summary">
+                <span class="inspector-section-title"><Palette :size="13" />Color grade &amp; LUT</span>
+                <button
+                  v-if="geometryFor(selectedPrimary).lut && geometryFor(selectedPrimary).lut !== 'none'"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Reset color grade"
+                  @click.stop.prevent="resetLut(geometryFor(selectedPrimary))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <div class="lut-panel">
+                <label>
+                  Look / Preset
+                  <select v-model="geometryFor(selectedPrimary).lut" @change="commitInspectorEdit">
+                    <option value="none">None (Original colors)</option>
+                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
+                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
+                        {{ preset.label }}
+                      </option>
+                    </optgroup>
+                  </select>
+                </label>
+                <div v-if="selectedLutPreset(geometryFor(selectedPrimary).lut)" class="lut-description">
+                  {{ selectedLutPreset(geometryFor(selectedPrimary).lut)?.description }}
+                </div>
+                <template v-if="geometryFor(selectedPrimary).lut && geometryFor(selectedPrimary).lut !== 'none'">
+                  <label class="framing-slider-field">
+                    <span class="framing-field-head">
+                      <span>Strength</span>
+                      <b>{{ Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) }}%</b>
+                    </span>
+                    <input
+                      v-model.number="geometryFor(selectedPrimary).lut_strength"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      aria-label="LUT strength"
+                      :style="framingRangeStyle(geometryFor(selectedPrimary).lut_strength ?? 1, 0, 1)"
+                      @change="commitInspectorEdit"
+                    />
+                  </label>
+                  <div class="quick-dur-buttons">
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 25 }"
+                      @click="setLutStrength(geometryFor(selectedPrimary), 0.25)"
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 50 }"
+                      @click="setLutStrength(geometryFor(selectedPrimary), 0.5)"
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 75 }"
+                      @click="setLutStrength(geometryFor(selectedPrimary), 0.75)"
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 100 }"
+                      @click="setLutStrength(geometryFor(selectedPrimary), 1)"
+                    >
+                      100%
+                    </button>
+                  </div>
+                </template>
+              </div>
             </details>
           </template>
+          <template v-else-if="selectedVideo">
+            <div class="inspector-layer-order">
+              <span class="quick-dur-label">Layer {{ selectedVideoIndex + 1 }} of {{ videoOverlays.length }}</span>
+              <button type="button" class="quick-dur-btn" title="Add another secondary video layer onto the VIDEO track" @click="openAddVideoOverlayModal">
+                + Add video layer
+              </button>
+            </div>
+            <label>Label<input v-model="selectedVideo.label" @change="commitInspectorEdit" /></label>
+            <label>Start (ms)<input v-model.number="selectedVideo.start_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Duration (ms)<input v-model.number="selectedVideo.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
+            <div class="inspector-quick-durations">
+              <span class="quick-dur-label">Quick duration:</span>
+              <div class="quick-dur-buttons">
+                <button type="button" class="quick-dur-btn" @click="setVideoOverlayDuration(3000)">3s</button>
+                <button type="button" class="quick-dur-btn" @click="setVideoOverlayDuration(5000)">5s</button>
+                <button type="button" class="quick-dur-btn" @click="setVideoOverlayDuration(10000)">10s</button>
+              </div>
+            </div>
+            <label>Trim in (ms)<input v-model.number="selectedVideo.source_in_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Layout / Scale
+              <select v-model="videoOverlayGeometryFor(selectedVideo).position" @change="commitInspectorEdit">
+                <option value="full-frame">Full frame (Same as primary)</option>
+                <option value="center">Picture-in-Picture · Center</option>
+                <option value="top-left">Picture-in-Picture · Top left</option>
+                <option value="top-right">Picture-in-Picture · Top right</option>
+                <option value="bottom-left">Picture-in-Picture · Bottom left</option>
+                <option value="bottom-right">Picture-in-Picture · Bottom right</option>
+                <option value="top">Picture-in-Picture · Top center</option>
+                <option value="bottom">Picture-in-Picture · Bottom center</option>
+              </select>
+            </label>
+            <label v-if="videoOverlayGeometryFor(selectedVideo).position === 'full-frame'">
+              Fit
+              <select v-model="videoOverlayGeometryFor(selectedVideo).fit" @change="commitInspectorEdit">
+                <option value="cover">Fill frame (Cover / Crop)</option>
+                <option value="contain">Fit frame (Contain / No crop)</option>
+              </select>
+            </label>
+            <label v-else class="framing-slider-field">
+              <span class="framing-field-head">
+                <span>Scale</span>
+                <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).scale ?? 1) * 100) }}%</b>
+              </span>
+              <input v-model.number="videoOverlayGeometryFor(selectedVideo).scale" type="range" min="0.1" max="2" step="0.05" @change="commitInspectorEdit" />
+            </label>
+            <details class="inspector-section framing-section" open>
+              <summary class="inspector-section-summary">
+                <span>Framing, zoom &amp; crop</span>
+                <button
+                  v-if="hasCropOrZoom(videoOverlayGeometryFor(selectedVideo))"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Reset crop & zoom"
+                  @click.stop.prevent="resetGeometryCropAndZoom(videoOverlayGeometryFor(selectedVideo))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <div class="framing-panel">
+                <div class="framing-card position-card">
+                  <div class="framing-card-header">
+                    <span class="quick-dur-label">Position</span>
+                    <span class="framing-crop-readout">
+                      X {{ formatSignedPercent(videoOverlayGeometryFor(selectedVideo).offset_x) }} · Y {{ formatSignedPercent(videoOverlayGeometryFor(selectedVideo).offset_y) }}
+                    </span>
+                  </div>
+                  <div class="position-body">
+                    <div class="nudge-pad" role="group" aria-label="Shift layer position">
+                      <button type="button" class="nudge-btn nudge-up" title="Shift up" aria-label="Shift up" @click="nudgeGeometryOffset(videoOverlayGeometryFor(selectedVideo), 0, -0.02)"><ChevronUp :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-left" title="Shift left" aria-label="Shift left" @click="nudgeGeometryOffset(videoOverlayGeometryFor(selectedVideo), -0.02, 0)"><ChevronLeft :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-center" title="Re-center position" aria-label="Re-center position" @click="centerGeometryOffset(videoOverlayGeometryFor(selectedVideo))"><Crosshair :size="12" /></button>
+                      <button type="button" class="nudge-btn nudge-right" title="Shift right" aria-label="Shift right" @click="nudgeGeometryOffset(videoOverlayGeometryFor(selectedVideo), 0.02, 0)"><ChevronRight :size="13" /></button>
+                      <button type="button" class="nudge-btn nudge-down" title="Shift down" aria-label="Shift down" @click="nudgeGeometryOffset(videoOverlayGeometryFor(selectedVideo), 0, 0.02)"><ChevronDown :size="13" /></button>
+                    </div>
+                    <div class="position-sliders">
+                      <label class="framing-slider-field bipolar">
+                        <span class="framing-field-head"><span>X · left ↔ right</span><b>{{ formatSignedPercent(videoOverlayGeometryFor(selectedVideo).offset_x) }}</b></span>
+                        <input
+                          v-model.number="videoOverlayGeometryFor(selectedVideo).offset_x"
+                          type="range"
+                          min="-1"
+                          max="1"
+                          step="0.01"
+                          aria-label="Horizontal position"
+                          :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).offset_x, -1, 1, 'center')"
+                          @change="commitInspectorEdit"
+                        />
+                      </label>
+                      <label class="framing-slider-field bipolar">
+                        <span class="framing-field-head"><span>Y · up ↕ down</span><b>{{ formatSignedPercent(videoOverlayGeometryFor(selectedVideo).offset_y) }}</b></span>
+                        <input
+                          v-model.number="videoOverlayGeometryFor(selectedVideo).offset_y"
+                          type="range"
+                          min="-1"
+                          max="1"
+                          step="0.01"
+                          aria-label="Vertical position"
+                          :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).offset_y, -1, 1, 'center')"
+                          @change="commitInspectorEdit"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="framing-card">
+                  <label class="framing-slider-field">
+                    <span class="framing-field-head">
+                      <span>Zoom</span>
+                      <b>{{ (videoOverlayGeometryFor(selectedVideo).zoom ?? 1).toFixed(2) }}×</b>
+                    </span>
+                    <input
+                      v-model.number="videoOverlayGeometryFor(selectedVideo).zoom"
+                      type="range"
+                      min="1"
+                      max="3"
+                      step="0.05"
+                      aria-label="Zoom"
+                      :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).zoom, 1, 3)"
+                      @change="commitInspectorEdit"
+                    />
+                  </label>
+                  <div class="framing-grid-2col">
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Focus X</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).focal_x"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        aria-label="Focus X"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5, 0, 1)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Focus Y</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).focal_y ?? 0.5) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).focal_y"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        aria-label="Focus Y"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_y ?? 0.5, 0, 1)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="framing-card">
+                  <div class="framing-card-header">
+                    <span class="quick-dur-label">Crop region</span>
+                    <span class="framing-crop-readout">
+                      {{ Math.round(Math.max(10, (1 - (videoOverlayGeometryFor(selectedVideo).crop_left ?? 0) - (videoOverlayGeometryFor(selectedVideo).crop_right ?? 0)) * 100)) }}% × {{ Math.round(Math.max(10, (1 - (videoOverlayGeometryFor(selectedVideo).crop_top ?? 0) - (videoOverlayGeometryFor(selectedVideo).crop_bottom ?? 0)) * 100)) }}%
+                    </span>
+                  </div>
+                  <div class="quick-dur-buttons crop-preset-grid">
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'full') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'full')"><span class="crop-glyph full"><i></i></span><span>Full</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'center-box') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'center-box')"><span class="crop-glyph center"><i></i></span><span>Center</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'left-half') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'left-half')"><span class="crop-glyph left"><i></i></span><span>Left ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'right-half') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'right-half')"><span class="crop-glyph right"><i></i></span><span>Right ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'top-half') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'top-half')"><span class="crop-glyph top"><i></i></span><span>Top ½</span></button>
+                    <button type="button" class="quick-dur-btn crop-preset-btn" :class="{ active: isCropPresetActive(videoOverlayGeometryFor(selectedVideo), 'bottom-half') }" @click="applyCropPreset(videoOverlayGeometryFor(selectedVideo), 'bottom-half')"><span class="crop-glyph bottom"><i></i></span><span>Bottom ½</span></button>
+                  </div>
+                  <div class="crop-edges-grid">
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Top</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).crop_top ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).crop_top"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop top"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).crop_top, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Bottom</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).crop_bottom ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).crop_bottom"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop bottom"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).crop_bottom, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Left</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).crop_left ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).crop_left"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop left"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).crop_left, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                    <label class="framing-slider-field">
+                      <span class="framing-field-head">
+                        <span>Right</span>
+                        <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).crop_right ?? 0) * 100) }}%</b>
+                      </span>
+                      <input
+                        v-model.number="videoOverlayGeometryFor(selectedVideo).crop_right"
+                        type="range"
+                        min="0"
+                        max="0.85"
+                        step="0.01"
+                        aria-label="Crop right"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).crop_right, 0, 0.85)"
+                        @change="commitInspectorEdit"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  class="framing-reset-btn"
+                  :disabled="!hasCropOrZoom(videoOverlayGeometryFor(selectedVideo))"
+                  @click="resetGeometryCropAndZoom(videoOverlayGeometryFor(selectedVideo))"
+                >
+                  Reset crop &amp; zoom
+                </button>
+              </div>
+            </details>
+            <details class="inspector-section lut-section" open>
+              <summary class="inspector-section-summary">
+                <span class="inspector-section-title"><Palette :size="13" />Color grade &amp; LUT</span>
+                <button
+                  v-if="videoOverlayGeometryFor(selectedVideo).lut && videoOverlayGeometryFor(selectedVideo).lut !== 'none'"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Reset color grade"
+                  @click.stop.prevent="resetLut(videoOverlayGeometryFor(selectedVideo))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <div class="lut-panel">
+                <label>
+                  Look / Preset
+                  <select v-model="videoOverlayGeometryFor(selectedVideo).lut" @change="commitInspectorEdit">
+                    <option value="none">None (Original colors)</option>
+                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
+                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
+                        {{ preset.label }}
+                      </option>
+                    </optgroup>
+                  </select>
+                </label>
+                <div v-if="selectedLutPreset(videoOverlayGeometryFor(selectedVideo).lut)" class="lut-description">
+                  {{ selectedLutPreset(videoOverlayGeometryFor(selectedVideo).lut)?.description }}
+                </div>
+                <template v-if="videoOverlayGeometryFor(selectedVideo).lut && videoOverlayGeometryFor(selectedVideo).lut !== 'none'">
+                  <label class="framing-slider-field">
+                    <span class="framing-field-head">
+                      <span>Strength</span>
+                      <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) }}%</b>
+                    </span>
+                    <input
+                      v-model.number="videoOverlayGeometryFor(selectedVideo).lut_strength"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      aria-label="LUT strength"
+                      :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1, 0, 1)"
+                      @change="commitInspectorEdit"
+                    />
+                  </label>
+                  <div class="quick-dur-buttons">
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 25 }"
+                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.25)"
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 50 }"
+                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.5)"
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 75 }"
+                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.75)"
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 100 }"
+                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 1)"
+                    >
+                      100%
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </details>
+            <label>Opacity · {{ Math.round((selectedVideo.opacity ?? 1) * 100) }}%<input v-model.number="selectedVideo.opacity" type="range" min="0" max="1" step="0.05" @change="commitInspectorEdit" /></label>
+            <label>Volume · {{ Math.round((selectedVideo.volume ?? 1) * 100) }}%<input v-model.number="selectedVideo.volume" type="range" min="0" max="2" step="0.05" @input="syncVideoOverlays" @change="commitInspectorEdit" /></label>
+            <div v-if="videoOverlays.length > 1" class="trim-actions">
+              <button type="button" :disabled="selectedVideoIndex <= 0" @click="moveSelectedVideoLayer(-1)">Send backward</button>
+              <button type="button" :disabled="selectedVideoIndex >= videoOverlays.length - 1" @click="moveSelectedVideoLayer(1)">Bring forward</button>
+            </div>
+            <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this video layer (Ctrl+D)">
+              <CopyPlus :size="13" />Duplicate video layer
+            </button>
+            <div class="inspector-audio-row">
+              <span class="inspector-label"><Volume2 :size="13" />Layer audio</span>
+              <button
+                type="button"
+                class="audio-toggle-action"
+                :class="{ muted: selectedVideo.mute_audio }"
+                @click="toggleSelectedAudio"
+                :title="selectedVideo.mute_audio ? 'Unmute video layer audio' : 'Mute video layer audio (video only)'"
+              >
+                <VolumeX v-if="selectedVideo.mute_audio" :size="13" />
+                <Volume2 v-else :size="13" />
+                <span>{{ selectedVideo.mute_audio ? 'Video only (Muted)' : 'Video + Audio' }}</span>
+              </button>
+            </div>
+            <div class="trim-actions">
+              <button
+                type="button"
+                title="Unmute this video layer and mute overlapping primary clips underneath"
+                @click="soloVideoLayerAudio"
+              >
+                Use layer audio (mute primary)
+              </button>
+              <button
+                type="button"
+                title="Extract this layer's audio onto the AUDIO track and make this layer video-only"
+                @click="detachSelectedVideoAudio"
+              >
+                Detach audio
+              </button>
+            </div>
+          </template>
           <template v-else-if="selectedText">
-            <label>Text<textarea v-model="selectedText.text" rows="3" @change="scheduleSave"></textarea></label>
-            <label>Start (ms)<input v-model.number="selectedText.start_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
-            <label>Duration (ms)<input v-model.number="selectedText.duration_ms" type="number" min="100" step="100" @change="scheduleSave" /></label>
-            <label>Presentation<select v-model="selectedText.presentation" @change="scheduleSave"><option value="overlay">Overlay</option><option value="full-frame">Full frame</option></select></label>
-            <label>Position<select v-model="geometryFor(selectedText).position" @change="scheduleSave"><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option><option value="bottom-left">Lower left</option><option value="bottom-right">Lower right</option></select></label>
-            <label>Size<select v-model="selectedText.size" @change="scheduleSave"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
-            <label>Background<select v-model="selectedText.background" @change="scheduleSave"><option value="none">None</option><option value="shadow">Shadow</option><option value="translucent">Translucent</option><option value="solid">Solid</option></select></label>
+            <label>Text<textarea v-model="selectedText.text" rows="3" @change="commitInspectorEdit"></textarea></label>
+            <label>Start (ms)<input v-model.number="selectedText.start_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Duration (ms)<input v-model.number="selectedText.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
+            <label>Presentation<select v-model="selectedText.presentation" @change="commitInspectorEdit"><option value="overlay">Overlay</option><option value="full-frame">Full frame</option></select></label>
+            <label>Position<select v-model="geometryFor(selectedText).position" @change="commitInspectorEdit"><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option><option value="bottom-left">Lower left</option><option value="bottom-right">Lower right</option></select></label>
+            <label>Size<select v-model="selectedText.size" @change="commitInspectorEdit"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
+            <label>Background<select v-model="selectedText.background" @change="commitInspectorEdit"><option value="none">None</option><option value="shadow">Shadow</option><option value="translucent">Translucent</option><option value="solid">Solid</option></select></label>
           </template>
           <template v-else-if="selectedImage">
-            <label>Start (ms)<input v-model.number="selectedImage.start_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
-            <label>Duration (ms)<input v-model.number="selectedImage.duration_ms" type="number" min="100" step="100" @change="scheduleSave" /></label>
-            <label>Position<select v-model="geometryFor(selectedImage).position" @change="scheduleSave"><option value="top-left">Top left</option><option value="top-right">Top right</option><option value="center">Center</option><option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option></select></label>
-            <label>Scale<input v-model.number="geometryFor(selectedImage).scale" type="range" min="0.1" max="2" step="0.05" @change="scheduleSave" /></label>
-            <label>Opacity<input v-model.number="selectedImage.opacity" type="range" min="0" max="1" step="0.05" @change="scheduleSave" /></label>
+            <div v-if="resolveSource(selectedImage.source)?.url" class="inspector-image-preview">
+              <img :src="resolveSource(selectedImage.source)!.url" alt="Selected image overlay" />
+              <div class="inspector-image-meta">
+                <strong>{{ resolveSource(selectedImage.source)?.label || 'Image overlay' }}</strong>
+                <span>{{ (selectedImage.duration_ms / 1000).toFixed(1) }}s</span>
+              </div>
+            </div>
+            <label>Start (ms)<input v-model.number="selectedImage.start_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Duration (ms)<input v-model.number="selectedImage.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
+            <div class="inspector-quick-durations">
+              <span class="quick-dur-label">Quick duration:</span>
+              <div class="quick-dur-buttons">
+                <button type="button" class="quick-dur-btn" @click="setImageOverlayDuration(1000)">1s</button>
+                <button type="button" class="quick-dur-btn" @click="setImageOverlayDuration(3000)">3s</button>
+                <button type="button" class="quick-dur-btn" @click="setImageOverlayDuration(5000)">5s</button>
+              </div>
+            </div>
+            <label>Position
+              <select v-model="geometryFor(selectedImage).position" @change="commitInspectorEdit">
+                <option value="center">Center</option>
+                <option value="full-frame">Full frame (Cover)</option>
+                <option value="top-left">Top left</option>
+                <option value="top-right">Top right</option>
+                <option value="bottom-left">Bottom left</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="top">Top center</option>
+                <option value="bottom">Bottom center</option>
+              </select>
+            </label>
+            <label v-if="geometryFor(selectedImage).position === 'full-frame'">
+              Fit
+              <select v-model="geometryFor(selectedImage).fit" @change="commitInspectorEdit">
+                <option value="cover">Fill frame (Cover / Crop)</option>
+                <option value="contain">Fit frame (Contain / No crop)</option>
+              </select>
+            </label>
+            <label v-else>
+              Scale · {{ Math.round((geometryFor(selectedImage).scale ?? 1) * 100) }}%
+              <input v-model.number="geometryFor(selectedImage).scale" type="range" min="0.1" max="2" step="0.05" @change="commitInspectorEdit" />
+            </label>
+            <label>Opacity · {{ Math.round((selectedImage.opacity ?? 1) * 100) }}%<input v-model.number="selectedImage.opacity" type="range" min="0" max="1" step="0.05" @change="commitInspectorEdit" /></label>
+            <details class="inspector-section lut-section" open>
+              <summary class="inspector-section-summary">
+                <span class="inspector-section-title"><Palette :size="13" />Color grade &amp; LUT</span>
+                <button
+                  v-if="geometryFor(selectedImage).lut && geometryFor(selectedImage).lut !== 'none'"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Reset color grade"
+                  @click.stop.prevent="resetLut(geometryFor(selectedImage))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <div class="lut-panel">
+                <label>
+                  Look / Preset
+                  <select v-model="geometryFor(selectedImage).lut" @change="commitInspectorEdit">
+                    <option value="none">None (Original colors)</option>
+                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
+                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
+                        {{ preset.label }}
+                      </option>
+                    </optgroup>
+                  </select>
+                </label>
+                <div v-if="selectedLutPreset(geometryFor(selectedImage).lut)" class="lut-description">
+                  {{ selectedLutPreset(geometryFor(selectedImage).lut)?.description }}
+                </div>
+                <template v-if="geometryFor(selectedImage).lut && geometryFor(selectedImage).lut !== 'none'">
+                  <label class="framing-slider-field">
+                    <span class="framing-field-head">
+                      <span>Strength</span>
+                      <b>{{ Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) }}%</b>
+                    </span>
+                    <input
+                      v-model.number="geometryFor(selectedImage).lut_strength"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      aria-label="LUT strength"
+                      :style="framingRangeStyle(geometryFor(selectedImage).lut_strength ?? 1, 0, 1)"
+                      @change="commitInspectorEdit"
+                    />
+                  </label>
+                  <div class="quick-dur-buttons">
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 25 }"
+                      @click="setLutStrength(geometryFor(selectedImage), 0.25)"
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 50 }"
+                      @click="setLutStrength(geometryFor(selectedImage), 0.5)"
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 75 }"
+                      @click="setLutStrength(geometryFor(selectedImage), 0.75)"
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      class="quick-dur-btn"
+                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 100 }"
+                      @click="setLutStrength(geometryFor(selectedImage), 1)"
+                    >
+                      100%
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </details>
+            <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this image overlay (Ctrl+D)">
+              <CopyPlus :size="13" />Duplicate image overlay
+            </button>
           </template>
           <template v-else-if="selectedAudio">
-            <label>Label<input v-model="selectedAudio.label" @change="scheduleSave" /></label>
-            <label>Start (ms)<input v-model.number="selectedAudio.start_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
-            <label>Duration (ms)<input v-model.number="selectedAudio.duration_ms" type="number" min="100" step="100" @change="scheduleSave" /></label>
-            <label>Trim in (ms)<input v-model.number="selectedAudio.source_in_ms" type="number" min="0" step="100" @change="scheduleSave" /></label>
-            <label>Volume · {{ Math.round((selectedAudio.volume ?? 1) * 100) }}%<input v-model.number="selectedAudio.volume" type="range" min="0" max="2" step="0.05" @input="syncAudioOverlays" @change="scheduleSave" /></label>
+            <label>Label<input v-model="selectedAudio.label" @change="commitInspectorEdit" /></label>
+            <label>Start (ms)<input v-model.number="selectedAudio.start_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Duration (ms)<input v-model.number="selectedAudio.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
+            <label>Trim in (ms)<input v-model.number="selectedAudio.source_in_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
+            <label>Volume · {{ Math.round((selectedAudio.volume ?? 1) * 100) }}%<input v-model.number="selectedAudio.volume" type="range" min="0" max="2" step="0.05" @input="syncAudioOverlays" @change="commitInspectorEdit" /></label>
             <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this audio clip (Ctrl+D)">
               <CopyPlus :size="13" />Duplicate audio clip
             </button>
@@ -1816,17 +4412,24 @@ onBeforeUnmount(() => {
         <button title="Undo (Ctrl+Z)" :disabled="!history.length" @click="undo"><Undo2 :size="16" /></button>
         <button title="Redo (Ctrl+Shift+Z / Ctrl+Y)" :disabled="!future.length" @click="redo"><Redo2 :size="16" /></button>
         <span></span>
-        <button title="Split at playhead (S / C)" :disabled="activeItem?.kind !== 'video'" @click="splitAtPlayhead"><Split :size="16" /><span>Split</span></button>
-        <button title="Duplicate selected item (Ctrl+D)" :disabled="!selectedPrimary && !selectedImage && !selectedText && !selectedAudio" @click="duplicateSelected"><CopyPlus :size="16" /><span>Duplicate</span></button>
+        <button
+          :title="isMultiSelect ? `Split ${eligibleSplitCount} selected clip(s) at playhead (S / C)` : 'Split at playhead (S / C)'"
+          :disabled="!canSplitAtPlayhead"
+          @click="splitAtPlayhead"
+        >
+          <Split :size="16" />
+          <span>Split{{ eligibleSplitCount > 1 ? ` (${eligibleSplitCount})` : '' }}</span>
+        </button>
+        <button title="Duplicate selected item (Ctrl+D)" :disabled="!selectedPrimary && !selectedVideo && !selectedImage && !selectedText && !selectedAudio" @click="duplicateSelected"><CopyPlus :size="16" /><span>Duplicate</span></button>
         <button class="add-shot-toolbar-btn" title="Add/insert shot from project into timeline" @click="showAddShotModal = true"><Plus :size="15" /><span>Add shot</span></button>
         <button
           type="button"
-          :title="selectedAudio ? (selectedAudio.mute_audio ? 'Unmute audio clip (M)' : 'Mute audio clip (M)') : selectedPrimary?.kind === 'video' ? (selectedPrimary.mute_audio ? 'Unmute clip audio (M)' : 'Mute/remove audio from clip (M)') : 'Mute clip audio (select video or audio)'"
-          :disabled="selectedPrimary?.kind !== 'video' && !selectedAudio"
-          :class="{ 'item-muted-active': selectedAudio ? selectedAudio.mute_audio : selectedPrimary?.mute_audio }"
+          :title="selectedAudio ? (selectedAudio.mute_audio ? 'Unmute audio clip (M)' : 'Mute audio clip (M)') : selectedVideo ? (selectedVideo.mute_audio ? 'Unmute video layer audio (M)' : 'Mute video layer audio (M)') : selectedPrimary?.kind === 'video' ? (selectedPrimary.mute_audio ? 'Unmute clip audio (M)' : 'Mute/remove audio from clip (M)') : 'Mute clip audio (select video or audio)'"
+          :disabled="selectedPrimary?.kind !== 'video' && !selectedVideo && !selectedAudio"
+          :class="{ 'item-muted-active': selectedAudio ? selectedAudio.mute_audio : selectedVideo ? selectedVideo.mute_audio : selectedPrimary?.mute_audio }"
           @click="toggleSelectedAudio"
         >
-          <VolumeX v-if="selectedAudio ? selectedAudio.mute_audio : selectedPrimary?.mute_audio" :size="16" />
+          <VolumeX v-if="selectedAudio ? selectedAudio.mute_audio : selectedVideo ? selectedVideo.mute_audio : selectedPrimary?.mute_audio" :size="16" />
           <Volume2 v-else :size="16" />
         </button>
         <button :disabled="!selectedPrimary || selectedPrimaryIndex <= 0" title="Move left" @click="moveSelected(-1)"><MoveLeft :size="16" /></button>
@@ -1835,13 +4438,28 @@ onBeforeUnmount(() => {
         <button title="Append current storyboard frame" @click="appendStill"><ImagePlus :size="16" /><span>Append storyboard frame</span></button>
         <label class="tool-upload" title="Upload and append image"><Upload :size="16" /><span>Upload image</span><input type="file" aria-label="Upload and append image" accept="image/png,image/jpeg,image/webp" @change="uploadAsset($event, true)" /></label>
         <button title="Add title card" @click="addTitle"><AlignCenter :size="16" /><span>Title card</span></button>
+        <button title="Add secondary video layer" @click="openAddVideoOverlayModal"><Layers :size="16" /><span>Video layer</span></button>
+        <label class="tool-upload" title="Upload secondary video onto VIDEO track"><Upload :size="16" /><span>Upload video layer</span><input type="file" aria-label="Upload video overlay" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" @change="uploadVideoOverlayDirect" /></label>
         <button title="Add text overlay" @click="addText"><Type :size="16" /><span>Text overlay</span></button>
         <button title="Add image overlay" @click="addImageOverlay()"><ImagePlus :size="16" /><span>Image overlay</span></button>
         <label class="tool-upload" title="Upload image overlay"><Upload :size="16" /><span>Upload image</span><input type="file" aria-label="Upload image overlay" accept="image/png,image/jpeg,image/webp" @change="uploadAsset($event, false)" /></label>
         <label class="tool-upload" title="Upload audio onto AUDIO track"><Music :size="16" /><span>Upload audio</span><input type="file" aria-label="Upload audio overlay" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm" @change="uploadAudioAsset($event)" /></label>
         <button v-if="activeShotWithAudio" title="Add shot audio onto AUDIO track" @click="addShotAudioToTimeline()"><Volume2 :size="16" /><span>Shot audio</span></button>
         </div></details>
-        <button class="danger-tool" title="Delete selected item (Delete / Backspace)" @click="deleteSelection"><Trash2 :size="16" /></button>
+        <button
+          class="danger-tool"
+          :title="isMultiSelect ? `Delete ${selectedEntries.length} selected items (Delete / Backspace)` : 'Delete selected item (Delete / Backspace)'"
+          @click="deleteSelection"
+        >
+          <Trash2 :size="16" />
+        </button>
+        <div v-if="isMultiSelect" class="multi-select-pill" :title="`Selected: ${multiSelectSummary}`">
+          <span class="multi-select-pill-count">{{ selectedEntries.length }} selected</span>
+          <span class="multi-select-pill-summary">({{ multiSelectSummary }})</span>
+          <button type="button" class="multi-select-pill-clear" title="Clear multi-selection" @click="clearMultiSelection">
+            <X :size="11" />
+          </button>
+        </div>
         <span></span>
         <div class="zoom-toolbar-group">
           <button type="button" :title="`Zoom out (-) · Current: ${zoomLevel === 1 ? 'Fit' : `${zoomLevel.toFixed(1)}x`}`" :disabled="zoomLevel <= 1" @click="zoomOut"><ZoomOut :size="14" /></button>
@@ -1878,19 +4496,23 @@ onBeforeUnmount(() => {
             :key="item.id"
             class="timeline-block"
             draggable="true"
-            :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to reorder)`"
-            :aria-pressed="selectedKind === 'primary' && selectedId === item.id"
+            :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to reorder, drop onto VIDEO for B-roll, or drop onto AUDIO to detach audio · Ctrl/Shift+drag to duplicate)`"
+            :aria-pressed="isSelected('primary', item.id)"
             :class="[
               item.kind,
               {
-                selected: selectedKind === 'primary' && selectedId === item.id,
+                selected: isSelected('primary', item.id),
                 'is-muted': item.mute_audio,
                 'is-dragging': dragSourceIndex === index,
                 'is-drop-target': dragOverIndex === index,
               },
             ]"
-            :style="{ width: `${item.duration_ms / totalMs * 100}%` }"
+            :style="{
+              left: `${(startAt(index) / (totalMs || 1)) * 100}%`,
+              width: `${(item.duration_ms / (totalMs || 1)) * 100}%`,
+            }"
             @click="handlePrimaryBlockClick($event, item, index)"
+            @contextmenu="(e) => { if (e.ctrlKey) e.preventDefault() }"
             @dragstart="onPrimaryDragStart($event, index)"
             @dragover.prevent="onPrimaryDragOver($event, index)"
             @dragleave="onPrimaryDragLeave(index)"
@@ -1902,11 +4524,23 @@ onBeforeUnmount(() => {
               <span class="block-kind-pill">
                 <GripVertical class="block-grip" :size="10" />
                 <em>#{{ index + 1 }}</em>
-                <span>{{ item.kind.toUpperCase() }}</span>
+                <span class="block-kind-label">{{ item.kind.toUpperCase() }}</span>
               </span>
               <span class="block-status-icons">
                 <Scissors v-if="item.kind === 'video' && (item.source_in_ms > 0)" class="block-trim-icon" :size="10" title="Trimmed clip" />
-                <VolumeX v-if="item.mute_audio" class="block-muted-icon" :size="11" title="Audio muted" />
+                <span
+                  v-if="item.kind === 'video'"
+                  role="button"
+                  tabindex="-1"
+                  class="block-audio-toggle"
+                  :class="{ muted: item.mute_audio }"
+                  :title="item.mute_audio ? 'Video only · Audio muted (click to unmute)' : 'Audio active (click for video only)'"
+                  @pointerdown.stop
+                  @click.stop="toggleBlockAudio('primary', item.id)"
+                >
+                  <VolumeX v-if="item.mute_audio" class="block-muted-icon" :size="11" />
+                  <Volume2 v-else class="block-active-audio-icon" :size="11" />
+                </span>
               </span>
             </span>
             <span class="block-bottom">
@@ -1915,9 +4549,181 @@ onBeforeUnmount(() => {
             </span>
           </button>
         </div></div>
-        <div class="track-row"><strong>IMAGE</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in timeline.document.image_overlays" :key="item.id" class="overlay-block image" :class="{ selected: selectedKind === 'image' && selectedId === item.id }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" title="Drag to move image overlay" @pointerdown="beginOverlayEdit($event, 'image', item, 'move')" @click="selectItem('image', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-start')"></span><span class="overlay-label">IMAGE</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-end')"></span></button></div></div>
-        <div class="track-row"><strong>TEXT</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in timeline.document.text_overlays" :key="item.id" class="overlay-block text" :class="{ selected: selectedKind === 'text' && selectedId === item.id }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" title="Drag to move text overlay" @pointerdown="beginOverlayEdit($event, 'text', item, 'move')" @click="selectItem('text', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-start')"></span><span class="overlay-label">{{ item.text }}</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-end')"></span></button></div></div>
-        <div class="track-row"><strong>AUDIO</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in audioOverlays" :key="item.id" class="overlay-block audio" :class="{ selected: selectedKind === 'audio' && selectedId === item.id, 'is-muted': item.mute_audio }" :style="{ left: `${item.start_ms / totalMs * 100}%`, width: `${Math.max(2, item.duration_ms / totalMs * 100)}%` }" :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to move)`" @pointerdown="beginOverlayEdit($event, 'audio', item, 'move')" @click="selectItem('audio', item.id, item.start_ms)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-start')"></span><VolumeX v-if="item.mute_audio" class="overlay-audio-icon muted" :size="11" /><Music v-else class="overlay-audio-icon" :size="11" /><span class="overlay-label">{{ item.label }}</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-end')"></span></button></div></div>
+        <div
+          class="track-row video-track-row"
+          :class="{ 'drag-over': isDraggingOverVideoTrack }"
+          :style="{ minHeight: `${Math.max(38, videoOverlayPacking.laneCount * 32 + 6)}px` }"
+          @dragover.prevent="handleVideoTrackDragOver"
+          @dragleave="handleVideoTrackDragLeave"
+          @drop.prevent="handleVideoTrackDrop"
+        >
+          <strong class="track-header-cell">
+            <span>VIDEO</span>
+            <span class="track-header-actions">
+              <button
+                type="button"
+                class="track-action-btn"
+                title="Add secondary video layer (+)"
+                @click="openAddVideoOverlayModal"
+              >
+                <Plus :size="11" />
+              </button>
+              <label class="track-action-upload" title="Upload video file to VIDEO track">
+                <Upload :size="10" />
+                <input type="file" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" @change="uploadVideoOverlayDirect" />
+              </label>
+            </span>
+          </strong>
+          <div
+            class="overlay-track"
+            :style="{ minHeight: `${Math.max(38, videoOverlayPacking.laneCount * 32 + 6)}px` }"
+            @click="handleVideoTrackClick"
+          >
+            <i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+            <div
+              v-if="!videoOverlays.length"
+              class="empty-track-cta"
+              @click.stop="openAddVideoOverlayModal"
+            >
+              <Plus :size="11" />
+              <span>Click or drop secondary video here</span>
+            </div>
+            <button
+              v-for="item in videoOverlays"
+              :key="item.id"
+              class="overlay-block video"
+              :class="{ selected: isSelected('video', item.id), 'is-muted': item.mute_audio }"
+              :style="{
+                left: `${item.start_ms / (totalMs || 1) * 100}%`,
+                width: `${(item.duration_ms / (totalMs || 1)) * 100}%`,
+                top: `${5 + (videoOverlayPacking.laneById[item.id] ?? 0) * 32}px`,
+              }"
+              :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (${item.mute_audio ? 'Video only' : 'Video + Audio'} · drag to move)`"
+              @pointerdown="beginOverlayEdit($event, 'video', item, 'move')"
+              @click.stop="selectItem('video', item.id, item.start_ms, $event)"
+            >
+              <span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'video', item, 'resize-start')"></span>
+              <Film :size="11" class="overlay-icon" />
+              <span
+                role="button"
+                tabindex="-1"
+                class="overlay-audio-toggle"
+                :class="{ muted: item.mute_audio }"
+                :title="item.mute_audio ? 'Video only · B-roll (click to enable layer audio)' : 'Layer audio active (click for video only)'"
+                @pointerdown.stop
+                @click.stop="toggleBlockAudio('video', item.id)"
+              >
+                <VolumeX v-if="item.mute_audio" class="overlay-audio-icon muted" :size="10" />
+                <Volume2 v-else class="overlay-audio-icon" :size="10" />
+              </span>
+              <span class="overlay-label">{{ item.label || resolveSource(item.source)?.label || 'VIDEO' }}</span>
+              <small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small>
+              <span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'video', item, 'resize-end')"></span>
+            </button>
+          </div>
+        </div>
+        <div
+          class="track-row image-track-row"
+          :class="{ 'drag-over': isDraggingOverImageTrack }"
+          :style="{ minHeight: `${Math.max(38, imageOverlayPacking.laneCount * 32 + 6)}px` }"
+          @dragover.prevent="handleImageTrackDragOver"
+          @dragleave="handleImageTrackDragLeave"
+          @drop.prevent="handleImageTrackDrop"
+        >
+          <strong class="track-header-cell">
+            <span>IMAGE</span>
+            <span class="track-header-actions">
+              <button
+                type="button"
+                class="track-action-btn"
+                title="Add image overlay (+)"
+                @click="openAddImageOverlayModal"
+              >
+                <Plus :size="11" />
+              </button>
+              <label class="track-action-upload" title="Upload image file to IMAGE track">
+                <Upload :size="10" />
+                <input type="file" accept="image/png,image/jpeg,image/webp" @change="uploadImageOverlayDirect" />
+              </label>
+            </span>
+          </strong>
+          <div
+            class="overlay-track"
+            :style="{ minHeight: `${Math.max(38, imageOverlayPacking.laneCount * 32 + 6)}px` }"
+            @click="handleImageTrackClick"
+          >
+            <i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+            <div
+              v-if="!timeline.document.image_overlays?.length"
+              class="empty-track-cta"
+              @click.stop="openAddImageOverlayModal"
+            >
+              <Plus :size="11" />
+              <span>Click or drop image here</span>
+            </div>
+            <button
+              v-for="item in timeline.document.image_overlays"
+              :key="item.id"
+              class="overlay-block image"
+              :class="{ selected: isSelected('image', item.id) }"
+              :style="{
+                left: `${item.start_ms / (totalMs || 1) * 100}%`,
+                width: `${(item.duration_ms / (totalMs || 1)) * 100}%`,
+                top: `${5 + (imageOverlayPacking.laneById[item.id] ?? 0) * 32}px`,
+              }"
+              title="Drag to move image overlay"
+              @pointerdown="beginOverlayEdit($event, 'image', item, 'move')"
+              @click.stop="selectItem('image', item.id, item.start_ms, $event)"
+            >
+              <span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-start')"></span>
+              <img v-if="resolveSource(item.source)?.url" :src="resolveSource(item.source)!.url" class="overlay-thumb" alt="" />
+              <ImagePlus v-else :size="11" class="overlay-icon" />
+              <span class="overlay-label">{{ resolveSource(item.source)?.label || 'IMAGE' }}</span>
+              <small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small>
+              <span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'image', item, 'resize-end')"></span>
+            </button>
+          </div>
+        </div>
+        <div class="track-row"><strong>TEXT</strong><div class="overlay-track"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i><button v-for="item in timeline.document.text_overlays" :key="item.id" class="overlay-block text" :class="{ selected: isSelected('text', item.id) }" :style="{ left: `${item.start_ms / (totalMs || 1) * 100}%`, width: `${(item.duration_ms / (totalMs || 1)) * 100}%` }" title="Drag to move text overlay" @pointerdown="beginOverlayEdit($event, 'text', item, 'move')" @click.stop="selectItem('text', item.id, item.start_ms, $event)"><span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-start')"></span><span class="overlay-label">{{ item.text }}</span><small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small><span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'text', item, 'resize-end')"></span></button></div></div>
+        <div
+          class="track-row audio-track-row"
+          :class="{ 'drag-over': isDraggingOverAudioTrack }"
+          @dragover.prevent="handleAudioTrackDragOver"
+          @dragleave="handleAudioTrackDragLeave"
+          @drop.prevent="handleAudioTrackDrop"
+        >
+          <strong>AUDIO</strong>
+          <div class="overlay-track">
+            <i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+            <button
+              v-for="item in audioOverlays"
+              :key="item.id"
+              class="overlay-block audio"
+              :class="{ selected: isSelected('audio', item.id), 'is-muted': item.mute_audio }"
+              :style="{ left: `${item.start_ms / (totalMs || 1) * 100}%`, width: `${(item.duration_ms / (totalMs || 1)) * 100}%` }"
+              :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to move)`"
+              @pointerdown="beginOverlayEdit($event, 'audio', item, 'move')"
+              @click.stop="selectItem('audio', item.id, item.start_ms, $event)"
+            >
+              <span class="resize-handle start" title="Adjust start" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-start')"></span>
+              <span
+                role="button"
+                tabindex="-1"
+                class="overlay-audio-toggle"
+                :class="{ muted: item.mute_audio }"
+                :title="item.mute_audio ? 'Audio muted (click to unmute)' : 'Audio active (click to mute)'"
+                @pointerdown.stop
+                @click.stop="toggleBlockAudio('audio', item.id)"
+              >
+                <VolumeX v-if="item.mute_audio" class="overlay-audio-icon muted" :size="11" />
+                <Music v-else class="overlay-audio-icon" :size="11" />
+              </span>
+              <span class="overlay-label">{{ item.label }}</span>
+              <small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small>
+              <span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-end')"></span>
+            </button>
+          </div>
+        </div>
         </section>
       </div>
 
@@ -1942,6 +4748,12 @@ onBeforeUnmount(() => {
                 <strong>{{ shot.title || 'Untitled shot' }}</strong>
                 <span>{{ shot.clip ? 'Video clip' : 'Storyboard still' }} · {{ (shot.duration_ms / 1000).toFixed(1) }}s</span>
               </div>
+              <button v-if="shotHasVideo(shot)" type="button" class="add-shot-insert-btn secondary" title="Add shot clip onto VIDEO overlay track" @click="addShotVideoToTimeline(shot)">
+                <Layers :size="13" />Video layer
+              </button>
+              <button v-if="shotHasImage(shot)" type="button" class="add-shot-insert-btn secondary" title="Add shot frame onto IMAGE track" @click="addShotImageToTimeline(shot)">
+                <ImagePlus :size="13" />Image
+              </button>
               <button v-if="shotHasAudio(shot)" type="button" class="add-shot-insert-btn secondary" title="Add shot audio onto AUDIO track" @click="addShotAudioToTimeline(shot)">
                 <Music :size="13" />Audio
               </button>
@@ -1950,6 +4762,111 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div v-if="!availableShots.length" class="empty-shot-state">No shots found matching your search.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ADD VIDEO OVERLAY MODAL -->
+      <div v-if="showAddVideoOverlayModal" class="add-shot-backdrop" @click.self="showAddVideoOverlayModal = false">
+        <div class="add-shot-card add-image-card">
+          <header>
+            <div class="add-shot-title"><Layers :size="16" /><span>Add secondary video layer to timeline</span></div>
+            <button type="button" class="mini-icon" aria-label="Close" @click="showAddVideoOverlayModal = false"><X :size="15" /></button>
+          </header>
+          <div class="add-image-modal-toolbar">
+            <div class="add-shot-search">
+              <input v-model="videoFilterQuery" type="text" placeholder="Filter video clips by title or description..." />
+            </div>
+            <label class="add-image-upload-btn" title="Upload new video from your computer">
+              <Upload :size="13" />
+              <span>Upload video</span>
+              <input type="file" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" @change="uploadVideoOverlayDirect" />
+            </label>
+          </div>
+          <div class="add-shot-list">
+            <div v-if="availableVideoAssets.length" class="modal-section-title">Uploaded video layers</div>
+            <div v-for="asset in availableVideoAssets" :key="asset.id" class="add-shot-row">
+              <div class="add-shot-thumb">
+                <video :src="asset.url" muted preload="metadata"></video>
+              </div>
+              <div class="add-shot-info">
+                <strong>{{ asset.label }}</strong>
+                <span>Uploaded video asset · Full-frame scale by default</span>
+              </div>
+              <button type="button" class="add-shot-insert-btn" @click="addAssetVideoToTimeline(asset)">
+                <Plus :size="13" />Insert at playhead
+              </button>
+            </div>
+
+            <div class="modal-section-title">Project shot video clips</div>
+            <div v-for="shot in availableVideoShots" :key="shot.id" class="add-shot-row">
+              <div class="add-shot-thumb">
+                <video v-if="shotClipUrl(shot)" :src="shotClipUrl(shot)" muted preload="metadata"></video>
+                <Film v-else :size="18" />
+              </div>
+              <div class="add-shot-info">
+                <strong>{{ shot.title || 'Untitled shot' }}</strong>
+                <span>Video clip · {{ (shot.duration_ms / 1000).toFixed(1) }}s · Full-frame scale by default</span>
+              </div>
+              <button type="button" class="add-shot-insert-btn" @click="addShotVideoToTimeline(shot)">
+                <Plus :size="13" />Insert at playhead
+              </button>
+            </div>
+            <div v-if="!availableVideoShots.length && !availableVideoAssets.length" class="empty-shot-state">
+              No video clips found matching your search. You can upload a video (.mp4, .webm, .mov) using the button above.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ADD IMAGE OVERLAY MODAL -->
+      <div v-if="showAddImageOverlayModal" class="add-shot-backdrop" @click.self="showAddImageOverlayModal = false">
+        <div class="add-shot-card add-image-card">
+          <header>
+            <div class="add-shot-title"><ImagePlus :size="16" /><span>Add image to timeline</span></div>
+            <button type="button" class="mini-icon" aria-label="Close" @click="showAddImageOverlayModal = false"><X :size="15" /></button>
+          </header>
+          <div class="add-image-modal-toolbar">
+            <div class="add-shot-search">
+              <input v-model="imageFilterQuery" type="text" placeholder="Filter shots by title or description..." />
+            </div>
+            <label class="add-image-upload-btn" title="Upload new image from your computer">
+              <Upload :size="13" />
+              <span>Upload image</span>
+              <input type="file" accept="image/png,image/jpeg,image/webp" @change="uploadImageOverlayDirect" />
+            </label>
+          </div>
+          <div class="add-shot-list">
+            <div v-if="availableImageAssets.length" class="modal-section-title">Uploaded images</div>
+            <div v-for="asset in availableImageAssets" :key="asset.id" class="add-shot-row">
+              <div class="add-shot-thumb">
+                <img :src="asset.url" alt="" />
+              </div>
+              <div class="add-shot-info">
+                <strong>{{ asset.label }}</strong>
+                <span>Uploaded image asset</span>
+              </div>
+              <button type="button" class="add-shot-insert-btn" @click="addAssetImageToTimeline(asset)">
+                <Plus :size="13" />Insert at playhead
+              </button>
+            </div>
+
+            <div class="modal-section-title">Project shots &amp; storyboard frames</div>
+            <div v-for="shot in availableImageShots" :key="shot.id" class="add-shot-row">
+              <div class="add-shot-thumb">
+                <img :src="shotStillUrl(shot)" alt="" />
+              </div>
+              <div class="add-shot-info">
+                <strong>{{ shot.title || 'Untitled shot' }}</strong>
+                <span>Storyboard still · {{ (shot.duration_ms / 1000).toFixed(1) }}s</span>
+              </div>
+              <button type="button" class="add-shot-insert-btn" @click="addShotImageToTimeline(shot)">
+                <Plus :size="13" />Insert at playhead
+              </button>
+            </div>
+            <div v-if="!availableImageShots.length && !availableImageAssets.length" class="empty-shot-state">
+              No images found matching your search. You can upload an image using the button above.
+            </div>
           </div>
         </div>
       </div>
@@ -1985,6 +4902,7 @@ onBeforeUnmount(() => {
           <PublishPanel
             :project="project"
             :variant="variant"
+            :episode-id="store.currentEpisodeId || undefined"
             as-modal
             @close="closePublishModal()"
             @published="store.loadProject(project.id); closePublishModal()"
@@ -2026,11 +4944,52 @@ onBeforeUnmount(() => {
 }
 
 .editor-title-block h2 {
-  margin: 0 0 2px;
+  margin: 0;
   color: var(--text-primary);
   font-size: 17px;
   font-weight: 650;
   letter-spacing: -0.02em;
+}
+
+.timeline-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.compilation-badge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.exit-compilation-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #c7d2fe;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s ease;
+}
+
+.exit-compilation-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
 }
 
 .editor-title-block p {
@@ -2204,14 +5163,16 @@ onBeforeUnmount(() => {
   position: relative;
   display: grid;
   place-items: center;
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
-  max-height: 100%;
+  min-width: 0;
+  max-height: calc(100% - 46px);
   max-width: 100%;
-  width: 100%;
-  height: auto;
+  width: auto;
+  height: 100%;
   margin: auto;
   aspect-ratio: 16 / 9;
+  container-type: inline-size;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--preview-well);
@@ -2226,8 +5187,10 @@ onBeforeUnmount(() => {
   aspect-ratio: 9 / 16;
 }
 
-.program-monitor video,
-.program-monitor > img {
+.program-monitor video:not(.preview-video-overlay),
+.program-monitor .preview-primary-media {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -2271,10 +5234,98 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+.preview-video-overlay,
 .preview-image-overlay {
   position: absolute;
-  max-height: 50%;
-  object-fit: contain;
+  z-index: 2;
+  height: auto;
+  pointer-events: none;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.preview-video-overlay.is-full-frame,
+.preview-video-overlay.full-frame,
+.preview-image-overlay.is-full-frame,
+.preview-image-overlay.full-frame {
+  inset: 0 !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.preview-image-overlay.is-full-frame,
+.preview-image-overlay.full-frame {
+  transform: none !important;
+}
+
+.preview-video-overlay.center,
+.preview-image-overlay.center {
+  top: 50%;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+}
+
+.preview-video-overlay.top-left,
+.preview-image-overlay.top-left {
+  top: 8%;
+  left: 8%;
+  right: auto;
+  bottom: auto;
+  transform: none;
+}
+
+.preview-video-overlay.top-right,
+.preview-image-overlay.top-right {
+  top: 8%;
+  right: 8%;
+  left: auto;
+  bottom: auto;
+  transform: none;
+}
+
+.preview-video-overlay.bottom-left,
+.preview-image-overlay.bottom-left {
+  bottom: 8%;
+  left: 8%;
+  right: auto;
+  top: auto;
+  transform: none;
+}
+
+.preview-video-overlay.bottom-right,
+.preview-image-overlay.bottom-right {
+  bottom: 8%;
+  right: 8%;
+  left: auto;
+  top: auto;
+  transform: none;
+}
+
+.preview-video-overlay.top,
+.preview-image-overlay.top {
+  top: 8%;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translateX(-50%);
+}
+
+.preview-video-overlay.bottom,
+.preview-image-overlay.bottom {
+  bottom: 8%;
+  left: 50%;
+  right: auto;
+  top: auto;
+  transform: translateX(-50%);
 }
 
 .preview-text-overlay {
@@ -2303,12 +5354,12 @@ onBeforeUnmount(() => {
   place-items: center;
 }
 
-.top, .top-left, .top-right { top: 8%; }
-.bottom, .bottom-left, .bottom-right { bottom: 10%; }
-.center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
-.top, .bottom { left: 50%; transform: translateX(-50%); }
-.top-left, .bottom-left { left: 7%; }
-.top-right, .bottom-right { right: 7%; }
+.preview-text-overlay.top, .preview-text-overlay.top-left, .preview-text-overlay.top-right { top: 8%; }
+.preview-text-overlay.bottom, .preview-text-overlay.bottom-left, .preview-text-overlay.bottom-right { bottom: 10%; }
+.preview-text-overlay.center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.preview-text-overlay.top, .preview-text-overlay.bottom { left: 50%; transform: translateX(-50%); }
+.preview-text-overlay.top-left, .preview-text-overlay.bottom-left { left: 7%; }
+.preview-text-overlay.top-right, .preview-text-overlay.bottom-right { right: 7%; }
 
 /* ==========================================================================
    PROGRAM MONITOR TRANSPORT CONTROLS
@@ -2442,10 +5493,13 @@ onBeforeUnmount(() => {
    INSPECTOR PANEL & VISUAL TRIM RANGE BAR
    ========================================================================== */
 .timeline-inspector {
+  min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
   padding: 14px 16px;
   background: var(--chrome-bg);
   color: var(--ink);
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -2475,6 +5529,7 @@ onBeforeUnmount(() => {
 
 .timeline-inspector label {
   display: grid;
+  min-width: 0;
   gap: 5px;
   margin: 10px 0;
   font-size: 11px;
@@ -2636,6 +5691,158 @@ onBeforeUnmount(() => {
   color: var(--accent);
 }
 
+.inspector-action-btn.primary-action-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 700;
+}
+
+.inspector-action-btn.primary-action-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+  color: #fff;
+}
+
+.inspector-action-btn.danger-action-btn {
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #ef4444;
+}
+
+.inspector-action-btn.danger-action-btn:hover {
+  background: rgba(220, 38, 38, 0.18);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.multi-select-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.multi-select-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(235, 101, 84, 0.25);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  width: fit-content;
+}
+
+.multi-select-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.multi-select-item-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.multi-select-item-chip .chip-kind-badge {
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--fill-muted);
+  color: var(--text-secondary);
+}
+
+.multi-select-item-chip .chip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.multi-select-item-chip .chip-remove {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: all 0.12s ease;
+}
+
+.multi-select-item-chip .chip-remove:hover {
+  background: var(--fill-muted-hover);
+  color: var(--text-primary);
+}
+
+.multi-select-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.multi-select-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(235, 101, 84, 0.35);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.multi-select-pill-count {
+  font-weight: 750;
+}
+
+.multi-select-pill-summary {
+  opacity: 0.85;
+  font-size: 10px;
+}
+
+.multi-select-pill-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 3px;
+  opacity: 0.8;
+  min-height: auto;
+  min-width: auto;
+}
+
+.multi-select-pill-clear:hover {
+  opacity: 1;
+  background: rgba(235, 101, 84, 0.2);
+}
+
 .inspector-audio-row {
   display: flex;
   align-items: center;
@@ -2681,6 +5888,7 @@ onBeforeUnmount(() => {
 }
 
 .inspector-section {
+  min-width: 0;
   margin-top: 14px;
   border-top: 1px solid var(--line);
   padding-top: 12px;
@@ -2691,6 +5899,405 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 650;
   color: var(--text-secondary);
+}
+
+.inspector-section-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  user-select: none;
+  list-style: none;
+}
+
+.inspector-section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.inspector-section-summary > span::before {
+  content: '▾';
+  display: inline-block;
+  margin-right: 5px;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.14s ease;
+}
+
+details.inspector-section:not([open]) .inspector-section-summary > span::before {
+  transform: rotate(-90deg);
+}
+
+.framing-inline-reset {
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(235, 101, 84, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.framing-inline-reset:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.framing-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+.inspector-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lut-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+.lut-description {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line-subtle);
+}
+
+.framing-fit-label {
+  margin: 0 !important;
+}
+
+.framing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+  min-width: 0;
+}
+
+.framing-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.framing-crop-readout {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--fill-muted);
+  border: 1px solid var(--line-subtle);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.framing-slider-field {
+  margin: 0 !important;
+  gap: 2px !important;
+  min-width: 0;
+}
+
+.framing-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.framing-field-head b {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.framing-slider-field input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-height: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  cursor: pointer;
+  /* Disable native left-fill so bipolar (center=0) tracks aren't misleading. */
+  accent-color: transparent;
+}
+
+.framing-slider-field input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.12) 0%,
+    rgba(255, 255, 255, 0.12) var(--range-fill-start, 0%),
+    var(--accent) var(--range-fill-start, 0%),
+    var(--accent) var(--range-fill-end, 0%),
+    rgba(255, 255, 255, 0.12) var(--range-fill-end, 0%),
+    rgba(255, 255, 255, 0.12) 100%
+  );
+}
+
+.framing-slider-field.bipolar input[type="range"]::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(
+      to right,
+      transparent calc(var(--range-mid, 50%) - 0.5px),
+      rgba(255, 255, 255, 0.45) calc(var(--range-mid, 50%) - 0.5px),
+      rgba(255, 255, 255, 0.45) calc(var(--range-mid, 50%) + 0.5px),
+      transparent calc(var(--range-mid, 50%) + 0.5px)
+    ),
+    linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.12) 0%,
+      rgba(255, 255, 255, 0.12) var(--range-fill-start, 50%),
+      var(--accent) var(--range-fill-start, 50%),
+      var(--accent) var(--range-fill-end, 50%),
+      rgba(255, 255, 255, 0.12) var(--range-fill-end, 50%),
+      rgba(255, 255, 255, 0.12) 100%
+    );
+}
+
+.framing-slider-field input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 2px solid var(--chrome-bg, #1a1d1b);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.framing-slider-field input[type="range"]::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.framing-slider-field input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.framing-slider-field.bipolar input[type="range"]::-moz-range-progress {
+  background: transparent;
+}
+
+.framing-slider-field input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--chrome-bg, #1a1d1b);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.framing-grid-2col,
+.crop-edges-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+  min-width: 0;
+}
+
+.crop-edges-grid {
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.crop-preset-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px !important;
+  min-width: 0;
+}
+
+.crop-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 6px !important;
+  font-size: 10.5px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crop-preset-btn.active {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
+.crop-glyph {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.crop-preset-btn.active .crop-glyph {
+  border-color: var(--accent);
+}
+
+.crop-glyph i {
+  position: absolute;
+  background: currentColor;
+  opacity: 0.75;
+}
+
+.crop-glyph.full i {
+  inset: 1px;
+}
+
+.crop-glyph.center i {
+  inset: 2px 3px;
+}
+
+.crop-glyph.left i {
+  inset: 1px 50% 1px 1px;
+}
+
+.crop-glyph.right i {
+  inset: 1px 1px 1px 50%;
+}
+
+.crop-glyph.top i {
+  inset: 1px 1px 50% 1px;
+}
+
+.crop-glyph.bottom i {
+  inset: 50% 1px 1px 1px;
+}
+
+.framing-reset-btn {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--fill-muted);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.framing-reset-btn:hover:not(:disabled) {
+  background: var(--fill-muted-hover);
+  border-color: var(--line-emphasis);
+  color: var(--text-primary);
+}
+
+.framing-reset-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.position-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.nudge-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 26px);
+  grid-template-rows: repeat(3, 26px);
+  gap: 3px;
+  width: 84px;
+  height: 84px;
+  flex-shrink: 0;
+}
+
+.nudge-btn {
+  width: 26px;
+  height: 26px;
+  min-width: 26px !important;
+  min-height: 26px !important;
+  max-width: 26px;
+  max-height: 26px;
+  box-sizing: border-box;
+  position: static !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 !important;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--fill-muted);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.nudge-btn:hover {
+  background: var(--fill-muted-hover);
+  border-color: var(--line-emphasis);
+  color: var(--text-primary);
+}
+
+.nudge-btn:active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.nudge-btn.nudge-up { grid-column: 2; grid-row: 1; }
+.nudge-btn.nudge-left { grid-column: 1; grid-row: 2; }
+.nudge-btn.nudge-center { grid-column: 2; grid-row: 2; color: var(--muted); }
+.nudge-btn.nudge-right { grid-column: 3; grid-row: 2; }
+.nudge-btn.nudge-down { grid-column: 2; grid-row: 3; }
+
+.position-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 /* ==========================================================================
@@ -2920,7 +6527,7 @@ onBeforeUnmount(() => {
 
 .timeline-scroll .playhead-scrubber {
   display: grid;
-  grid-template-columns: 70px minmax(var(--track-width, 1000px), 1fr);
+  grid-template-columns: 70px var(--track-width, 1000px);
   align-items: center;
   gap: 0;
   min-width: var(--full-track-width, 1106px);
@@ -2933,8 +6540,14 @@ onBeforeUnmount(() => {
 }
 
 .playhead-scrubber > strong {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
   align-self: start;
   padding: 2px 8px 0;
+  background: var(--chrome-bg);
   color: var(--muted);
   font-size: 10px;
   letter-spacing: 0.05em;
@@ -3105,7 +6718,7 @@ onBeforeUnmount(() => {
 
 .track-row {
   display: grid;
-  grid-template-columns: 70px var(--track-width, 1000px);
+  grid-template-columns: 82px var(--track-width, 1000px);
   min-height: 38px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
@@ -3114,17 +6727,265 @@ onBeforeUnmount(() => {
   min-height: 74px;
 }
 
-.track-row > strong {
+.track-row > strong,
+.track-header {
   position: sticky;
   left: 0;
   z-index: 6;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 8px;
   background: var(--preview-well);
   color: var(--muted);
   font-size: 10px;
   letter-spacing: 0.05em;
+}
+
+.track-header strong {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.track-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.track-action-btn,
+.track-action-upload {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s ease;
+}
+
+.track-action-upload input {
+  display: none;
+}
+
+.track-action-btn:hover,
+.track-action-upload:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.track-row.video-track-row.drag-over .overlay-track,
+.track-row.image-track-row.drag-over .overlay-track,
+.track-row.audio-track-row.drag-over .overlay-track {
+  background-color: rgba(56, 189, 248, 0.15) !important;
+  outline: 1.5px dashed #38bdf8;
+  outline-offset: -1px;
+}
+
+.block-audio-toggle,
+.overlay-audio-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 3px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+
+.block-audio-toggle:hover,
+.overlay-audio-toggle:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  transform: scale(1.1);
+}
+
+.block-audio-toggle.muted,
+.overlay-audio-toggle.muted {
+  background: rgba(239, 106, 106, 0.22);
+  color: #fca5a5;
+}
+
+.empty-track-cta {
+  position: absolute;
+  top: 7px;
+  left: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.empty-track-cta:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.26);
+  color: var(--text-primary);
+}
+
+.overlay-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+  margin-right: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.inspector-image-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.inspector-image-preview img,
+.inspector-image-preview video {
+  width: 44px;
+  height: 44px;
+  border-radius: 5px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.inspector-layer-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 6px;
+}
+
+.inspector-layer-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.inspector-image-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.inspector-image-meta strong {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.inspector-image-meta span {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.inspector-quick-durations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: -2px;
+  margin-bottom: 6px;
+}
+
+.quick-dur-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.quick-dur-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.quick-dur-btn {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.quick-dur-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--line-hover);
+}
+
+.add-image-card {
+  max-width: 580px;
+}
+
+.add-image-modal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.add-image-modal-toolbar .add-shot-search {
+  flex: 1;
+}
+
+.add-image-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.add-image-upload-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.add-image-upload-btn input {
+  display: none;
+}
+
+.modal-section-title {
+  padding: 8px 12px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
 }
 
 .track-content,
@@ -3137,9 +6998,10 @@ onBeforeUnmount(() => {
 }
 
 .track-content {
-  display: flex;
-  gap: 2px;
-  padding: 4px 0;
+  position: relative;
+  min-height: 74px;
+  height: 74px;
+  overflow: visible;
 }
 
 .overlay-track {
@@ -3161,15 +7023,18 @@ onBeforeUnmount(() => {
 
 /* PRIMARY FILMSTRIP BLOCKS */
 .timeline-block {
-  position: relative;
-  flex: none;
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  box-sizing: border-box;
+  container-type: inline-size;
   min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 6px 8px;
+  padding: 5px 6px;
   border: 1px solid var(--line-default);
-  border-radius: 7px;
+  border-radius: 6px;
   background: linear-gradient(180deg, #212a31 0%, #171e24 100%);
   color: #f4f6f8;
   text-align: left;
@@ -3177,6 +7042,21 @@ onBeforeUnmount(() => {
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   transition: border-color 0.14s ease, filter 0.14s ease, transform 0.12s ease, opacity 0.14s ease;
+}
+
+@container (max-width: 68px) {
+  .block-kind-label {
+    display: none;
+  }
+}
+
+@container (max-width: 46px) {
+  .block-grip {
+    display: none;
+  }
+  .timeline-block small {
+    display: none;
+  }
 }
 
 .timeline-block.image {
@@ -3194,6 +7074,7 @@ onBeforeUnmount(() => {
 
 .timeline-block.selected,
 .overlay-block.selected {
+  z-index: 4;
   border-color: var(--accent);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -3207,11 +7088,14 @@ onBeforeUnmount(() => {
 .timeline-block.is-dragging {
   opacity: 0.45;
   transform: scale(0.98);
+  z-index: 10;
 }
 
 .timeline-block.is-drop-target {
-  border-left: 3px solid var(--accent);
-  box-shadow: -3px 0 12px rgba(235, 101, 84, 0.45);
+  z-index: 4;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: 0 0 12px rgba(235, 101, 84, 0.45);
 }
 
 .block-thumb-bg {
@@ -3308,6 +7192,7 @@ onBeforeUnmount(() => {
   top: 5px;
   height: 28px;
   min-width: 24px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -3327,6 +7212,26 @@ onBeforeUnmount(() => {
 
 .overlay-block:active {
   cursor: grabbing;
+}
+
+.overlay-block.video {
+  background: linear-gradient(180deg, #2b5a7d 0%, #1c3d56 100%);
+  color: #fff;
+}
+
+.overlay-block.video.is-muted {
+  border-bottom: 2px dashed var(--danger);
+}
+
+.overlay-layer-badge {
+  flex: none;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(9, 12, 15, 0.55);
+  color: #7dd3fc;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
 }
 
 .overlay-block.image {

@@ -150,8 +150,27 @@ def _shot_clip_asset(shot: Shot, variant: str, project_aspect: str) -> PublishAs
     )
 
 
-def final_asset(project: Project, variant: str) -> PublishAsset | None:
-    export = next((item for item in project.variant_exports if item.variant == variant), None)
+def final_asset(
+    project: Project,
+    variant: str,
+    episode_id: str | None = None,
+) -> PublishAsset | None:
+    # Never publish compilation boxes as an episode/project final cut.
+    candidates = [
+        item
+        for item in project.variant_exports
+        if item.variant == variant and not getattr(item, "compilation_id", None)
+    ]
+    export = None
+    if episode_id:
+        export = next((item for item in candidates if item.episode_id == episode_id), None)
+        if not export:
+            # Legacy project-level export (episode_id NULL) used by episode 1.
+            export = next((item for item in candidates if item.episode_id is None), None)
+    else:
+        export = next((item for item in candidates if item.episode_id is None), None)
+        if not export:
+            export = next(iter(candidates), None)
     if not export:
         return None
     path = settings.media_dir / export.filename
@@ -212,10 +231,15 @@ def _asset_dict(item: PublishAsset) -> dict[str, Any]:
     }
 
 
-def build_publish_plan(project: Project, variant: str, db: Session | None = None) -> dict[str, Any]:
+def build_publish_plan(
+    project: Project,
+    variant: str,
+    db: Session | None = None,
+    episode_id: str | None = None,
+) -> dict[str, Any]:
     if variant not in {"landscape", "shorts"}:
         raise RuntimeError("variant must be landscape or shorts")
-    final = final_asset(project, variant)
+    final = final_asset(project, variant, episode_id=episode_id)
     shots = shot_assets(project, variant)
     return {
         "variant": variant,
@@ -269,6 +293,7 @@ def _timeline_for_scene(project: Project, scene_id: str, variant: str, db: Sessi
         raise RuntimeError("Scene has no publishable timeline media")
     doc = document.model_copy(deep=True)
     doc.primary = primary
+    doc.video_overlays = []
     doc.image_overlays = []
     doc.text_overlays = []
     return doc
@@ -295,9 +320,10 @@ def _render_scene_asset(project: Project, scene_id: str, variant: str, db: Sessi
 def collect_publish_assets(project: Project, payload: dict[str, Any], db: Session) -> list[PublishAsset]:
     scope = payload["scope"]
     variant = payload["variant"]
+    episode_id = payload.get("episode_id")
     selected = _selected_ids(payload)
     if scope == "final":
-        asset = final_asset(project, variant)
+        asset = final_asset(project, variant, episode_id=episode_id)
         assets = [asset] if asset else []
     elif scope == "shots":
         assets = shot_assets(project, variant)

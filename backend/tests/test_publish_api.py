@@ -7,7 +7,17 @@ from sqlalchemy.orm import Session
 
 from backend import api, tasks
 from backend.database import Base, get_db
-from backend.models import Job, Project, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, PublishRecord
+from backend.models import (
+    Compilation,
+    Job,
+    Project,
+    ProjectVariantExport,
+    PublishRecord,
+    Scene,
+    ScriptVersion,
+    Shot,
+    ShotClip,
+)
 from backend.settings import settings
 
 
@@ -70,6 +80,43 @@ def test_queue_publish_persists_record_and_job_snapshot(tmp_path, monkeypatch):
         assert record.title == "Launch"
         assert record.platforms == ["youtube", "facebook"]
         assert job.attempts[0]["publish_record_id"] == record.id
+    finally:
+        api.app.dependency_overrides.clear()
+        session.close()
+        engine.dispose()
+
+
+def test_publish_plan_ignores_compilation_exports(tmp_path, monkeypatch):
+    engine, session, client, project, _shot = setup_project(tmp_path, monkeypatch)
+    try:
+        (settings.media_dir / "comp.mp4").write_bytes(b"comp")
+        # Make the compilation export "newer" in iteration order by inserting first-match risk.
+        comp = Compilation(project_id=project.id, title="Reel", episode_ids=[])
+        session.add(comp)
+        session.flush()
+        session.add(
+            ProjectVariantExport(
+                project_id=project.id,
+                compilation_id=comp.id,
+                variant="landscape",
+                filename="comp.mp4",
+                duration_ms=9000,
+                width=1920,
+                height=1080,
+                clip_count=2,
+                fallback_count=0,
+            )
+        )
+        session.commit()
+        session.refresh(project)
+        response = client.get(f"/api/projects/{project.id}/publish/plan?variant=landscape")
+        assert response.status_code == 200, response.text
+        final = response.json()["final"][0]
+        assert final["duration_ms"] == 4000
+        assert final["source_ref"] != comp.id
+        # Prefer the episode/project export filename, not the compilation box.
+        export_ids = {item.id for item in project.variant_exports if not item.compilation_id}
+        assert final["source_ref"] in export_ids
     finally:
         api.app.dependency_overrides.clear()
         session.close()

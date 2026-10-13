@@ -353,3 +353,299 @@ def test_upload_shot_image_and_followup_edit_take(setup, monkeypatch):
     # Original shot.image_prompt remains intact
     assert updated_shot.image_prompt == 'Wide view of an empty room'
 
+
+def test_cross_aspect_conversion_and_non_destructive_draft(setup, monkeypatch):
+    db, client, project, shots = setup
+    project.aspect_ratio = '9:16'
+    shot = shots[0]
+    shot.image_prompt = 'Wide view of an empty room. Vertical 9:16 composition for Shorts.'
+    shot.video_prompt = 'Camera pans slowly. Vertical 9:16 composition for Shorts.'
+    db.commit()
+
+    seen_image_calls = []
+
+    def fake_request(provider, prompt, aspect, progress=None, references=None, conversation_url=None):
+        seen_image_calls.append((prompt, aspect, list(references or [])))
+        return png('cyan'), 'gpt-image', {}
+
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    monkeypatch.setattr(media, '_request_provider_image', fake_request)
+
+    res = client.post(
+        f'/api/shots/{shot.id}/image/generate',
+        json={'aspect_ratio': '16:9', 'use_default_image_reference': True},
+    )
+    assert res.status_code == 202, res.text
+    job_id = res.json()['id']
+    tasks._generate_shot_image(shot.id, job_id, '16:9')
+    db.expire_all()
+
+    assert len(seen_image_calls) == 1
+    prompt, aspect, refs = seen_image_calls[0]
+    assert aspect == '16:9'
+    assert '1344x768' in prompt
+    assert 'Vertical 9:16' not in prompt
+    assert 'for Shorts' not in prompt
+    assert 'Aspect ratio conversion: Reframe and expand/outpaint' in prompt
+    assert len(refs) == 1
+    assert refs[0].reference_type == 'edit_target'
+    assert refs[0].data == png('red')
+
+    refreshed_shot = db.get(Shot, shot.id)
+    assert refreshed_shot.image.filename == 'still-0.png'
+    variant_img = next(
+        (v for v in refreshed_shot.media_variants if v.media_type == 'image' and v.aspect_ratio == '16:9'),
+        None,
+    )
+    assert variant_img is not None
+    assert variant_img.filename != 'still-0.png'
+
+
+def test_both_aspects_and_generate_video_pipeline(setup, monkeypatch):
+    db, client, project, shots = setup
+    project.aspect_ratio = '16:9'
+    shot = shots[0]
+    shot.image_prompt = 'Wide view of an empty room'
+    shot.video_prompt = 'Camera pans slowly across the room'
+    db.commit()
+
+    seen_image_calls = []
+    chained_clips = []
+
+    def fake_request(provider, prompt, aspect, progress=None, references=None, conversation_url=None):
+        seen_image_calls.append((prompt, aspect, list(references or [])))
+        return png('cyan' if aspect == '16:9' else 'magenta'), 'gpt-image', {}
+
+    def fake_enqueue_clip(shot_id, job_id, aspect_ratio=None, prompt_override=None, include_cast_references=False):
+        chained_clips.append((shot_id, job_id, aspect_ratio, include_cast_references))
+        return type('Task', (), {'id': f'task-{aspect_ratio}'})()
+
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    monkeypatch.setattr(media, '_request_provider_image', fake_request)
+    monkeypatch.setattr(tasks, 'enqueue_shot_clip', fake_enqueue_clip)
+
+    res = client.post(
+        f'/api/shots/{shot.id}/image/generate?aspect_ratio=16:9',
+        json={
+            'both_aspects': True,
+            'generate_video': True,
+            'include_cast_references': True,
+            'use_default_image_reference': False,
+        },
+    )
+    assert res.status_code == 202, res.text
+    job_id = res.json()['id']
+    tasks._generate_shot_image(shot.id, job_id, '16:9')
+    db.expire_all()
+
+    assert len(seen_image_calls) == 2
+    assert seen_image_calls[0][1] == '16:9'
+    assert seen_image_calls[1][1] == '9:16'
+    assert len(seen_image_calls[1][2]) == 1
+    assert seen_image_calls[1][2][0].reference_type == 'edit_target'
+
+    assert len(chained_clips) == 2
+    assert chained_clips[0][2] == '16:9'
+    assert chained_clips[0][3] is True
+    assert chained_clips[1][2] == '9:16'
+    assert chained_clips[1][3] is True
+
+
+def test_both_aspects_reuses_conversation_thread(setup, monkeypatch):
+    db, client, project, shots = setup
+    project.aspect_ratio = '16:9'
+    shot = shots[0]
+    shot.image_prompt = 'A beach at sunrise'
+    db.commit()
+
+    seen_calls = []
+
+    def fake_request(provider, prompt, aspect, progress=None, references=None, conversation_url=None):
+        seen_calls.append({
+            'prompt': prompt,
+            'aspect': aspect,
+            'refs': list(references or []),
+            'conversation_url': conversation_url,
+        })
+        if progress:
+            progress({'provider': provider, 'phase': 'saving', 'conversation_url': 'https://chatgpt.com/c/beach-thread'})
+        return png('cyan' if aspect == '16:9' else 'magenta'), 'gpt-image', {'conversation_url': 'https://chatgpt.com/c/beach-thread'}
+
+    monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
+    monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
+    monkeypatch.setattr(media, '_request_provider_image', fake_request)
+
+    res = client.post(
+        f'/api/shots/{shot.id}/image/generate?aspect_ratio=16:9',
+        json={'both_aspects': True, 'use_default_image_reference': False},
+    )
+    assert res.status_code == 202, res.text
+    job_id = res.json()['id']
+    tasks._generate_shot_image(shot.id, job_id, '16:9')
+    db.expire_all()
+
+    assert len(seen_calls) == 2
+    # First call: creates new conversation
+    assert seen_calls[0]['aspect'] == '16:9'
+    assert seen_calls[0]['conversation_url'] is None
+
+    # Second call: reuses conversation thread with edit_target_fallback (no re-upload needed)
+    assert seen_calls[1]['aspect'] == '9:16'
+    assert seen_calls[1]['conversation_url'] == 'https://chatgpt.com/c/beach-thread'
+    assert len(seen_calls[1]['refs']) == 1
+    assert seen_calls[1]['refs'][0].reference_type == 'edit_target_fallback'
+    assert 'Aspect ratio conversion: Reframe and expand/outpaint' in seen_calls[1]['prompt']
+
+
+def test_chatgpt_dual_generates_both_takes(setup, monkeypatch):
+    import uuid
+    from backend.models import Shot
+    db, client, project, shots = setup
+    shot = shots[0]
+
+    def fake_dual(prompt, scene_title, framing, progress=None, references=None, conversation_url=None):
+        fn_16 = f"dual-16-9-{uuid.uuid4()}.png"
+        fn_9 = f"dual-9-16-{uuid.uuid4()}.png"
+        (settings.media_dir / fn_16).write_bytes(png("red"))
+        (settings.media_dir / fn_9).write_bytes(png("blue"))
+        return (fn_16, "image/png"), (fn_9, "image/png"), "chatgpt_web"
+
+    monkeypatch.setattr(media, "generate_storyboard_chatgpt_dual", fake_dual)
+
+    res = client.post(
+        f"/api/shots/{shot.id}/image/generate",
+        json={"chatgpt_dual": True},
+    )
+    assert res.status_code == 202, res.text
+    job_id = res.json()["id"]
+    tasks._generate_shot_image(shot.id, job_id, "16:9")
+    db.expire_all()
+
+    shot_row = db.get(Shot, shot.id)
+    assert shot_row.status == "image_ready"
+    variants = {v.aspect_ratio: v for v in shot_row.media_variants if v.media_type == "image"}
+    assert "16:9" in variants
+    assert "9:16" in variants
+
+    takes = [t for t in shot_row.takes if t.media_type == "image"]
+    take_aspects = {t.aspect_ratio for t in takes}
+    assert "16:9" in take_aspects
+    assert "9:16" in take_aspects
+
+
+def test_expand_color_retouch_prompt():
+    assert "Do NOT modify, add, remove, or reposition" in media.expand_color_retouch_prompt("retouch")
+    assert "Do NOT modify, add, remove, or reposition" in media.expand_color_retouch_prompt("Retouch this image!")
+    assert "Do NOT modify, add, remove, or reposition" in media.expand_color_retouch_prompt("repaint")
+    assert "Do NOT modify, add, remove, or reposition" in media.expand_color_retouch_prompt("revive color")
+    assert media.expand_color_retouch_prompt("change her blouse to red") == "change her blouse to red"
+
+
+def test_retouch_shot_take_color_endpoint(setup):
+    db, client, project, shots = setup
+    shot = shots[0]
+    upload_res = client.post(
+        f"/api/shots/{shot.id}/image/upload",
+        files={"file": ("faint.png", png("gray"), "image/png")},
+    )
+    assert upload_res.status_code == 200, upload_res.text
+    image_takes = [t for t in upload_res.json()["takes"] if t["media_type"] == "image"]
+    assert len(image_takes) >= 1
+    base_take = image_takes[0]
+
+    res = client.post(f"/api/shots/{shot.id}/takes/{base_take['id']}/retouch-color")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    new_takes = [t for t in body["takes"] if t["media_type"] == "image" and t["id"] != base_take["id"]]
+    assert len(new_takes) == 1
+    retouched = new_takes[0]
+    assert retouched["provider"] == "color-boost"
+    assert retouched["selected"] is True
+    assert retouched["settings"]["parent_take_id"] == base_take["id"]
+    assert "Instant Color Boost" in retouched["settings"]["edit_prompt"]
+
+
+def test_retouch_and_repaint_shot_reference_endpoint(setup, monkeypatch):
+    db, client, project, shots = setup
+    shot1, shot2 = shots[0], shots[1]
+    sources = client.get(f"/api/shots/{shot2.id}/image-reference/sources").json()
+    src = next(item for item in sources[0]["media"] if item["source_media_type"] == "image")
+
+    save_res = client.post(
+        f"/api/shots/{shot2.id}/image-reference",
+        data={
+            "source_shot_id": shot1.id,
+            "source_media_id": src["source_media_id"],
+            "source_media_kind": src["source_media_kind"],
+            "aspect_ratio": "16:9",
+            "mode": "visual_continuity",
+        },
+    )
+    assert save_res.status_code == 200, save_res.text
+    original_ref_url = save_res.json()["image_references"][0]["url"]
+
+    retouch_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9")
+    assert retouch_res.status_code == 200, retouch_res.text
+    ref_after_boost = retouch_res.json()["image_references"][0]
+    updated_ref_url = ref_after_boost["url"]
+    assert updated_ref_url != original_ref_url
+    assert "image-reference-retouched-" in updated_ref_url
+    assert ref_after_boost["color_boost_strength"] == 1.0
+    assert ref_after_boost["can_undo_color"] is True
+    assert ref_after_boost["can_redo_color"] is False
+
+    inc_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9&action=increase")
+    assert inc_res.status_code == 200, inc_res.text
+    ref_after_inc = inc_res.json()["image_references"][0]
+    assert ref_after_inc["color_boost_strength"] == 1.25
+    assert ref_after_inc["can_undo_color"] is True
+
+    dec_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9&action=decrease")
+    assert dec_res.status_code == 200, dec_res.text
+    ref_after_dec = dec_res.json()["image_references"][0]
+    assert ref_after_dec["color_boost_strength"] == 1.0
+
+    undo_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9&action=undo")
+    assert undo_res.status_code == 200, undo_res.text
+    ref_after_undo = undo_res.json()["image_references"][0]
+    assert ref_after_undo["color_boost_strength"] == 1.25
+    assert ref_after_undo["can_redo_color"] is True
+
+    redo_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9&action=redo")
+    assert redo_res.status_code == 200, redo_res.text
+    ref_after_redo = redo_res.json()["image_references"][0]
+    assert ref_after_redo["color_boost_strength"] == 1.0
+
+    reset_res = client.post(f"/api/shots/{shot2.id}/image-reference/retouch-color?aspect_ratio=16:9&action=reset")
+    assert reset_res.status_code == 200, reset_res.text
+    ref_after_reset = reset_res.json()["image_references"][0]
+    assert ref_after_reset["color_boost_strength"] == 0.0
+    assert ref_after_reset["url"] == original_ref_url
+
+    captured_prompts = []
+    def fake_request(provider, prompt, aspect, progress=None, references=None, **kwargs):
+        captured_prompts.append(prompt)
+        return png("orange"), "test", {}
+
+    monkeypatch.setattr(settings, "image_providers", "chatgpt_web")
+    monkeypatch.setattr(media, "image_provider_statuses", lambda: [{"id": "chatgpt_web", "available": True}])
+    monkeypatch.setattr(media, "_request_provider_image", fake_request)
+
+    repaint_res = client.post(
+        f"/api/shots/{shot2.id}/image-reference/repaint",
+        data={"aspect_ratio": "16:9", "prompt": "repaint this image"},
+    )
+    assert repaint_res.status_code == 202, repaint_res.text
+    job_id = repaint_res.json()["id"]
+    tasks._generate_shot_image(shot2.id, job_id, "16:9")
+    db.expire_all()
+    assert len(captured_prompts) == 1
+    assert "Do NOT modify, add, remove, or reposition" in captured_prompts[0]
+    shot2_read = client.get(f"/api/shots/{shot2.id}").json()
+    repainted_ref_url = shot2_read["image_references"][0]["url"]
+    assert "image-reference-repainted-" in repainted_ref_url
+
+
+

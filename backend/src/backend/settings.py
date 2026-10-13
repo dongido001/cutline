@@ -18,8 +18,17 @@ class Settings(BaseSettings):
 
     app_name: str = "Cutline Studio API"
     data_dir: Path = BACKEND_ROOT / "data"
+    # Empty = SQLite under data_dir. Example: postgresql+psycopg://cutline:cutline@127.0.0.1:5432/cutline
+    database_dsn: str = ""
+    # sqlite (default, local files) or redis
+    queue_backend: str = "sqlite"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    # Soft fairness caps per project (queued + running). 0 disables a lane cap.
+    max_active_image_jobs_per_project: int = Field(default=4, ge=0)
+    max_active_video_jobs_per_project: int = Field(default=2, ge=0)
+    max_active_text_jobs_per_project: int = Field(default=2, ge=0)
     text_provider: str = "mock"
-    deep_review_max_input_chars: int = Field(default=160000, ge=1000)
+    deep_review_max_input_chars: int = Field(default=2000000, ge=1000)
     deep_review_ollama_max_input_chars: int = Field(default=32000, ge=1000)
     deep_review_timeout_seconds: int = Field(default=300, ge=10, le=1800)
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -47,6 +56,8 @@ class Settings(BaseSettings):
     comfyui_workflow_path: Path = BACKEND_ROOT / "data" / "comfyui_i2v_workflow.json"
     comfyui_timeout_seconds: int = 1800
     video_fps: int = 16
+    clip_trim_trailing_black: bool = True
+    clip_audio_denoise: bool = True
     runway_api_key: str = ""
     # gen4_turbo is cheaper/faster for long-form drafts; set gen4.5 for highest quality.
     runway_model: str = "gen4_turbo"
@@ -67,6 +78,10 @@ class Settings(BaseSettings):
     export_height_landscape: int = 1080
     export_width_shorts: int = 1080
     export_height_shorts: int = 1920
+    # Final/timeline MP4 encode: lower CRF + slower preset = sharper, less banding.
+    export_video_crf: int = Field(default=14, ge=0, le=51)
+    export_video_preset: str = "slow"
+    export_audio_bitrate_k: int = Field(default=320, ge=64, le=512)
     publish_mode: str = "mock"
     youtube_access_token: str = ""
     youtube_channel_id: str = ""
@@ -87,7 +102,18 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        dsn = (self.database_dsn or "").strip()
+        if dsn:
+            return dsn
         return f"sqlite:///{self.data_dir / 'movie_creator.db'}"
+
+    @property
+    def uses_sqlite(self) -> bool:
+        return self.database_url.startswith("sqlite:")
+
+    @property
+    def uses_redis_queue(self) -> bool:
+        return (self.queue_backend or "sqlite").strip().lower() == "redis"
 
     @property
     def queue_path(self) -> Path:

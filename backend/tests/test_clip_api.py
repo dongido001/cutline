@@ -12,6 +12,7 @@ from backend.models import (
     Shot,
     ShotClip,
     ShotContinuityFrame,
+    ShotMediaVariant,
 )
 from backend.settings import settings
 
@@ -394,4 +395,67 @@ def test_select_take_syncs_variant_and_subsequent_upload_or_delete(tmp_path, mon
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_clip_generation_creates_adapted_variant_for_missing_aspect(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'adapted.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Adapted clip test", aspect_ratio="16:9", status="shot_plan")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="INT. OFFICE - DAY")
+    shot = Shot(scene=scene, order_index=0, title="Shot 1")
+    session.add(project)
+    session.commit()
+
+    filename = "test-clip-16-9.mp4"
+    mime_type = "video/mp4"
+    provider = "google-flow"
+    effective_prompt = "Camera zooms in"
+
+    # 16:9 native clip
+    shot.clip = ShotClip(
+        shot_id=shot.id,
+        filename=filename,
+        mime_type=mime_type,
+        source="generated",
+        provider=provider,
+        prompt=effective_prompt,
+    )
+    # Adapted 9:16 variant
+    shot.media_variants.append(
+        ShotMediaVariant(
+            shot_id=shot.id,
+            media_type="clip",
+            aspect_ratio="9:16",
+            filename=filename,
+            mime_type=mime_type,
+            source="adapted",
+            provider=provider,
+            prompt=effective_prompt,
+        )
+    )
+    session.commit()
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    try:
+        res = client.get(f"/api/shots/{shot.id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["clip"]["source"] == "generated"
+        adapted_variant = next(
+            v for v in data["media_variants"]
+            if v["media_type"] == "clip" and v["aspect_ratio"] == "9:16"
+        )
+        assert adapted_variant["source"] == "adapted"
+        assert adapted_variant["url"].split("?")[0] == data["clip"]["url"].split("?")[0]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
 

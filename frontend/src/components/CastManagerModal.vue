@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, Sparkles, Trash2, Upload, X } from '@lucide/vue'
-import type { Character } from '@/lib/api'
+import { Box, Check, Sparkles, Trash2, Upload, X } from '@lucide/vue'
+import type { Character, ReferenceViewType } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
 
 const props = defineProps<{
@@ -16,6 +16,7 @@ const emit = defineEmits<{
 
 const store = useStudioStore()
 const fileInput = ref<HTMLInputElement | null>(null)
+const pendingUploadViewType = ref<ReferenceViewType>('main')
 const notesDraft = ref(props.character.notes || '')
 const voiceDescriptionDraft = ref(props.character.voice_description || '')
 const savingNotes = ref(false)
@@ -23,6 +24,39 @@ const notesSaved = ref(false)
 const savingVoice = ref(false)
 const voiceSaved = ref(false)
 const busy = ref(false)
+
+const elementKind = computed(() => props.character.kind || 'character')
+
+const elementKindLabel = computed(() => {
+  if (elementKind.value === 'scene') return 'Scene / Set Reference'
+  if (elementKind.value === 'prop') return 'Prop Element'
+  return 'Cast Character'
+})
+
+const elementTag = computed(() => {
+  const slug = (props.character.name || 'ELEMENT')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return `@${slug || 'ELEMENT'}`
+})
+
+const mainReferences = computed(() =>
+  (props.character.references || []).filter((r) => (r.view_type || 'main') !== '3d_view'),
+)
+
+const turnaroundReferences = computed(() =>
+  (props.character.references || []).filter((r) => r.view_type === '3d_view'),
+)
+
+const primaryMainRef = computed(() =>
+  mainReferences.value.length ? mainReferences.value[mainReferences.value.length - 1] : null,
+)
+
+const primary3dRef = computed(() =>
+  turnaroundReferences.value.length ? turnaroundReferences.value[turnaroundReferences.value.length - 1] : null,
+)
 
 watch(
   () => props.character.notes,
@@ -82,21 +116,26 @@ async function saveVoiceDescription() {
   }
 }
 
-async function handleGenerate() {
+async function handleGenerate(look?: string) {
   if (notesChanged.value) {
     await saveNotes()
   }
-  if (voiceChanged.value) {
+  if (elementKind.value === 'character' && voiceChanged.value) {
     await saveVoiceDescription()
   }
   try {
-    await store.generateCharacterReference(props.character.id)
+    const effectiveLook =
+      look || (elementKind.value === 'scene' ? 'scene' : elementKind.value === 'prop' ? 'prop' : undefined)
+    await store.generateCharacterReference(props.character.id, effectiveLook)
   } catch {
     // Store error surface
   }
 }
 
-function triggerUpload() {
+function triggerUpload(viewType?: ReferenceViewType) {
+  const defaultType: ReferenceViewType =
+    elementKind.value === 'scene' ? 'scene' : elementKind.value === 'prop' ? 'prop' : 'main'
+  pendingUploadViewType.value = viewType || defaultType
   fileInput.value?.click()
 }
 
@@ -106,7 +145,7 @@ async function handleUpload(event: Event) {
   if (!file) return
   busy.value = true
   try {
-    await store.uploadCharacterReference(props.character.id, file)
+    await store.uploadCharacterReference(props.character.id, file, pendingUploadViewType.value)
   } catch {
     // Store error surface
   } finally {
@@ -127,7 +166,8 @@ async function handleDeleteReference(referenceId: string) {
 }
 
 async function handleDeleteCharacter() {
-  if (!confirm(`Are you sure you want to remove "${props.character.name}" from the cast?`)) return
+  const noun = elementKind.value === 'scene' ? 'scene' : elementKind.value === 'prop' ? 'prop' : 'character'
+  if (!confirm(`Are you sure you want to remove "${props.character.name}" from ${noun}s?`)) return
   busy.value = true
   try {
     await store.deleteCharacter(props.character.id)
@@ -163,7 +203,10 @@ function onBackdropClick(e: MouseEvent) {
     <section class="project-modal cast-manager-modal" role="dialog" aria-modal="true" :aria-labelledby="'cast-manager-' + character.id">
       <header>
         <div>
-          <span class="section-label">Cast Character</span>
+          <div class="cast-header-meta">
+            <span class="section-label">{{ elementKindLabel }}</span>
+            <span class="element-mention-pill" :class="`kind-${elementKind}`" title="Type this @mention in any shot prompt to attach this reference">{{ elementTag }}</span>
+          </div>
           <h2 :id="'cast-manager-' + character.id">{{ character.name }}</h2>
         </div>
         <button type="button" class="mini-icon" aria-label="Close" @click="emit('close')">
@@ -172,16 +215,135 @@ function onBackdropClick(e: MouseEvent) {
       </header>
 
       <div class="cast-manager-content">
-        <p class="cast-manager-sub">
-          Manage face references and canonical voice continuity for <strong>{{ character.name }}</strong>. Shots tagged with this character inherit these references and voice traits across episodes.
+        <p v-if="elementKind === 'character'" class="cast-manager-sub">
+          Build <strong>① Character Main View</strong> and <strong>② Character 3D View (Turnaround Sheet)</strong> for <strong>{{ character.name }}</strong>. Reference-to-Video (R2V) uses the 3D turnaround sheet so the character stays consistent from front, side, and back angles.
+        </p>
+        <p v-else-if="elementKind === 'scene'" class="cast-manager-sub">
+          Manage the canonical set &amp; environment reference for <strong>{{ character.name }}</strong>. Mention <code>{{ elementTag }}</code> in a shot prompt or attach it in R2V mode to lock room layout and lighting.
+        </p>
+        <p v-else class="cast-manager-sub">
+          Manage the isolated studio prop reference for <strong>{{ character.name }}</strong>. Mention <code>{{ elementTag }}</code> in a shot prompt to keep this object's design and materials consistent.
         </p>
 
-        <!-- Face Prompt / Appearance Notes Editor -->
+        <!-- 2-STEP CHARACTER MAIN VIEW + 3D TURNAROUND VIEW -->
+        <div v-if="elementKind === 'character'" class="character-two-step-grid">
+          <!-- Step 1: Character Main View -->
+          <div class="step-view-card">
+            <div class="step-view-header">
+              <span class="step-badge">①</span>
+              <div>
+                <strong>Character Main View</strong>
+                <small>Front-facing identity &amp; outfit lock</small>
+              </div>
+            </div>
+            <div class="step-view-stage aspect-portrait">
+              <img
+                v-if="primaryMainRef"
+                :src="primaryMainRef.url"
+                :alt="`${character.name} Main View`"
+              />
+              <div v-else class="step-view-empty">
+                <span>No Main View yet</span>
+                <small>Generate or upload a front portrait first</small>
+              </div>
+            </div>
+            <div class="step-view-actions">
+              <button
+                type="button"
+                class="primary-button mini-btn"
+                :disabled="busy || isGenerating || !imageGenerationAvailable"
+                @click="handleGenerate()"
+              >
+                <Sparkles :size="13" />
+                <span>{{ isGenerating ? 'Generating…' : primaryMainRef ? 'Regenerate Main' : 'Generate Main' }}</span>
+              </button>
+              <button
+                type="button"
+                class="secondary-button mini-btn"
+                :disabled="busy"
+                @click="triggerUpload('main')"
+              >
+                <Upload :size="13" />
+                <span>Upload</span>
+              </button>
+              <button
+                v-if="primaryMainRef"
+                type="button"
+                class="ref-delete-btn"
+                title="Delete Main View"
+                :disabled="busy"
+                @click="handleDeleteReference(primaryMainRef.id)"
+              >
+                <Trash2 :size="13" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Step 2: Character 3D View (16:9 Turnaround Sheet) -->
+          <div class="step-view-card step-3d-card">
+            <div class="step-view-header">
+              <span class="step-badge step-badge-3d">②</span>
+              <div>
+                <strong>Character 3D View</strong>
+                <small>Close-up + Front / Side / Back turnaround sheet (R2V)</small>
+              </div>
+              <span v-if="primary3dRef" class="r2v-ready-pill">3D Ready</span>
+            </div>
+            <div class="step-view-stage aspect-landscape">
+              <img
+                v-if="primary3dRef"
+                :src="primary3dRef.url"
+                :alt="`${character.name} 3D View Turnaround`"
+              />
+              <div v-else class="step-view-empty">
+                <Box :size="22" />
+                <span>No 3D Turnaround Sheet yet</span>
+                <small>Generates close-up + front, side &amp; back full-body views on white studio backdrop using Step ①</small>
+              </div>
+            </div>
+            <div class="step-view-actions">
+              <button
+                type="button"
+                class="primary-button mini-btn btn-3d-accent"
+                :disabled="busy || isGenerating || !imageGenerationAvailable"
+                @click="handleGenerate('3d_view')"
+              >
+                <Box :size="13" />
+                <span>{{ isGenerating ? 'Generating…' : primary3dRef ? 'Regenerate 3D View' : 'Generate 3D View' }}</span>
+              </button>
+              <button
+                type="button"
+                class="secondary-button mini-btn"
+                :disabled="busy"
+                @click="triggerUpload('3d_view')"
+              >
+                <Upload :size="13" />
+                <span>Upload 3D Sheet</span>
+              </button>
+              <button
+                v-if="primary3dRef"
+                type="button"
+                class="ref-delete-btn"
+                title="Delete 3D View"
+                :disabled="busy"
+                @click="handleDeleteReference(primary3dRef.id)"
+              >
+                <Trash2 :size="13" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Prompt / Description Editor -->
         <div class="cast-prompt-section">
           <div class="cast-prompt-header">
             <label :for="'cast-prompt-' + character.id">
-              <strong>Face Appearance & Generation Prompt</strong>
-              <small>Edit this prompt to adjust facial features, hair, skin tone, or age before generating.</small>
+              <strong v-if="elementKind === 'character'">Character Appearance &amp; Wardrobe Prompt</strong>
+              <strong v-else-if="elementKind === 'scene'">Scene Architecture, Layout &amp; Lighting Prompt</strong>
+              <strong v-else>Prop Design, Material &amp; Scale Prompt</strong>
+              <small v-if="elementKind === 'character'">Describe facial features, hair, skin tone, age, and signature full-body outfit for both Main and 3D views.</small>
+              <small v-else-if="elementKind === 'scene'">Describe room layout, key furniture, architectural style, and lighting atmosphere.</small>
+              <small v-else>Describe the object's shape, materials, colors, wear, and proportions.</small>
             </label>
             <button
               v-if="notesChanged || notesSaved"
@@ -200,13 +362,19 @@ function onBackdropClick(e: MouseEvent) {
             class="cast-prompt-textarea"
             rows="3"
             maxlength="2000"
-            placeholder="Describe facial features, skin tone, eye color, hair style, age, and distinguishing traits..."
+            :placeholder="
+              elementKind === 'scene'
+                ? 'Describe the set environment, architecture, furniture, and lighting...'
+                : elementKind === 'prop'
+                  ? 'Describe the prop object, materials, texture, and colors on a white background...'
+                  : 'Describe facial features, skin tone, eye color, hair style, age, and full-body outfit...'
+            "
             @blur="saveNotes"
           ></textarea>
         </div>
 
-        <!-- Canonical Voice Prompt (Google Flow / Veo) Editor -->
-        <div class="cast-prompt-section">
+        <!-- Canonical Voice Prompt (only for Characters) -->
+        <div v-if="elementKind === 'character'" class="cast-prompt-section">
           <div class="cast-prompt-header">
             <label :for="'cast-voice-' + character.id">
               <strong>Canonical Voice Prompt (Google Flow / Veo)</strong>
@@ -229,18 +397,19 @@ function onBackdropClick(e: MouseEvent) {
             class="cast-prompt-textarea"
             rows="2"
             maxlength="1000"
-            placeholder="e.g., Steady, resonant 29-year-old Filipino baritone, subtle Filipino-English cadence, composed, controlled, unhurried delivery"
+            placeholder="e.g., Steady, resonant 29-year-old baritone, composed, controlled, unhurried delivery"
             @blur="saveVoiceDescription"
           ></textarea>
         </div>
 
+        <!-- All References Gallery -->
         <div class="cast-manager-section-header">
-          <strong>Face References ({{ character.references.length }})</strong>
-          <small v-if="character.references.length > 1">Delete duplicate or unwanted face references below.</small>
+          <strong>All Saved Reference Images ({{ character.references.length }})</strong>
+          <small v-if="character.references.length > 1">Manage or delete reference takes below.</small>
         </div>
 
         <div v-if="!character.references.length" class="cast-no-refs">
-          <p>No face references yet. Generate one with AI or upload a photo.</p>
+          <p>No reference images yet. Generate one with AI or upload a photo.</p>
         </div>
 
         <div v-else class="cast-refs-grid">
@@ -249,11 +418,13 @@ function onBackdropClick(e: MouseEvent) {
             :key="refItem.id"
             class="cast-ref-card"
           >
-            <div class="cast-ref-thumb">
-              <img :src="refItem.url" :alt="`${character.name} face ${idx + 1}`" />
+            <div class="cast-ref-thumb" :class="{ 'thumb-landscape': refItem.view_type === '3d_view' || elementKind !== 'character' }">
+              <img :src="refItem.url" :alt="`${character.name} reference ${idx + 1}`" />
             </div>
             <div class="cast-ref-footer">
-              <span class="ref-tag">Ref {{ idx + 1 }}</span>
+              <span class="ref-tag">
+                {{ refItem.view_type === '3d_view' ? '3D View' : refItem.view_type === 'scene' ? 'Scene' : refItem.view_type === 'prop' ? 'Prop' : `Main ${idx + 1}` }}
+              </span>
               <button
                 type="button"
                 class="ref-delete-btn"
@@ -273,16 +444,36 @@ function onBackdropClick(e: MouseEvent) {
             type="button"
             class="primary-button"
             :disabled="busy || isGenerating || !imageGenerationAvailable"
-            @click="handleGenerate"
+            @click="handleGenerate()"
           >
             <Sparkles :size="15" />
-            <span>{{ isGenerating ? 'Generating…' : 'Generate face with AI' }}</span>
+            <span>
+              {{
+                isGenerating
+                  ? 'Generating…'
+                  : elementKind === 'scene'
+                    ? 'Generate Scene with AI'
+                    : elementKind === 'prop'
+                      ? 'Generate Prop with AI'
+                      : 'Generate Main View'
+              }}
+            </span>
+          </button>
+          <button
+            v-if="elementKind === 'character'"
+            type="button"
+            class="secondary-button"
+            :disabled="busy || isGenerating || !imageGenerationAvailable"
+            @click="handleGenerate('3d_view')"
+          >
+            <Box :size="15" />
+            <span>{{ isGenerating ? 'Generating…' : 'Generate 3D Turnaround' }}</span>
           </button>
           <button
             type="button"
             class="secondary-button"
             :disabled="busy"
-            @click="triggerUpload"
+            @click="triggerUpload()"
           >
             <Upload :size="15" />
             <span>Upload photo</span>
@@ -294,7 +485,7 @@ function onBackdropClick(e: MouseEvent) {
             @click="handleDeleteCharacter"
           >
             <Trash2 :size="14" />
-            <span>Delete character</span>
+            <span>Delete {{ elementKind }}</span>
           </button>
         </div>
       </div>
@@ -318,8 +509,169 @@ function onBackdropClick(e: MouseEvent) {
 
 <style scoped>
 .cast-manager-modal {
-  max-width: 580px;
-  width: 92vw;
+  max-width: 720px;
+  width: 94vw;
+}
+
+.cast-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.element-mention-pill {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(168, 85, 247, 0.18);
+  color: #d8b4fe;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+.element-mention-pill.kind-scene {
+  background: rgba(34, 197, 94, 0.16);
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.element-mention-pill.kind-prop {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.character-two-step-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 640px) {
+  .character-two-step-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.step-view-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line-subtle);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.step-3d-card {
+  border-color: rgba(168, 85, 247, 0.28);
+  background: rgba(168, 85, 247, 0.04);
+}
+
+.step-view-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-view-header div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.step-view-header strong {
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.step-view-header small {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.step-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.step-badge-3d {
+  background: rgba(168, 85, 247, 0.25);
+  color: #e9d5ff;
+}
+
+.r2v-ready-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.step-view-stage {
+  width: 100%;
+  height: 170px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-view-stage img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111;
+}
+
+.step-view-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 14px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.step-view-empty small {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  max-width: 280px;
+}
+
+.step-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.btn-3d-accent {
+  background: linear-gradient(135deg, #9333ea, #6366f1);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #fff;
 }
 
 .cast-manager-content {
@@ -327,6 +679,9 @@ function onBackdropClick(e: MouseEvent) {
   flex-direction: column;
   gap: 14px;
   margin: 8px 0;
+  max-height: 75vh;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .cast-manager-sub {
@@ -420,7 +775,7 @@ function onBackdropClick(e: MouseEvent) {
 }
 
 .cast-no-refs {
-  padding: 24px;
+  padding: 20px;
   text-align: center;
   background: rgba(255, 255, 255, 0.02);
   border: 1px dashed var(--line-subtle);
@@ -433,7 +788,7 @@ function onBackdropClick(e: MouseEvent) {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 12px;
-  max-height: 48vh;
+  max-height: 32vh;
   overflow-y: auto;
   padding: 2px;
 }
@@ -458,6 +813,10 @@ function onBackdropClick(e: MouseEvent) {
   aspect-ratio: 1 / 1;
   background: #000;
   overflow: hidden;
+}
+
+.cast-ref-thumb.thumb-landscape {
+  aspect-ratio: 16 / 9;
 }
 
 .cast-ref-thumb img {

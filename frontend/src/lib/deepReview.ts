@@ -9,6 +9,7 @@ export interface ReviewPatch {
 }
 export interface ReviewEvidence {
   version_id: string
+  character_id?: string
   episode_id?: string | null
   shot_id?: string
   quote: string

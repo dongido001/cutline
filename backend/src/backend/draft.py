@@ -5,8 +5,13 @@ from __future__ import annotations
 from .image_references import default_visual_reference, freeze_visual_reference, load_visual_reference, queued_reference
 from .media import prepare_visual_reference_prompt
 
+import logging
+import threading
 from copy import deepcopy
-from typing import Any
+from dataclasses import replace
+from queue import Queue
+from types import SimpleNamespace
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -31,7 +36,7 @@ from .queue import video_huey
 from .schemas import TimelineDocument
 from .settings import settings
 from .takes import record_take
-from .timeline import ensure_timeline, promote_available_clips
+from .timeline import append_missing_shots, ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
 from .timing import estimate_dialogue_duration_ms
 from .video import generate_shot_clip, video_provider_status, clip_source_image
@@ -51,6 +56,8 @@ def _latest_version(db: Session, project_id: str, episode_id: str | None = None)
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.clip),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.media_variants),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.takes),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.continuity_frames),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.image_references),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.scene),
         )
         .order_by(ScriptVersion.version_number.desc())
@@ -65,6 +72,8 @@ def _latest_version(db: Session, project_id: str, episode_id: str | None = None)
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.clip),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.media_variants),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.takes),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.continuity_frames),
+            selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.image_references),
             selectinload(ScriptVersion.scenes).selectinload(Scene.shots).selectinload(Shot.scene),
         )
         .order_by(ScriptVersion.version_number.desc())
@@ -136,13 +145,25 @@ def _shot_clip(shot: Shot, aspect: str) -> ShotClip | ShotMediaVariant | None:
             for item in shot.media_variants
             if item.media_type == "clip" and item.aspect_ratio == aspect
         ),
-        shot.clip,
+        None,
     )
 
 
-def project_readiness(project: Project, db: Session, episode_id: str | None = None) -> dict[str, Any]:
+def project_readiness(
+    project: Project,
+    db: Session,
+    episode_id: str | None = None,
+    variant: str | None = None,
+) -> dict[str, Any]:
     shots = _latest_shots(db, project.id, episode_id=episode_id)
-    aspect = project.aspect_ratio
+    if variant == "both":
+        aspects = ["16:9", "9:16"]
+    elif variant == "shorts":
+        aspects = ["9:16"]
+    elif variant == "landscape":
+        aspects = ["16:9"]
+    else:
+        aspects = [project.aspect_ratio]
     video_id, video_label, video_configured, video_available, _, video_detail = video_provider_status()
     vv_configured, vv_available, vv_detail = vibevoice_status()
     attention: list[dict[str, str]] = []
@@ -158,7 +179,7 @@ def project_readiness(project: Project, db: Session, episode_id: str | None = No
         attention.append({"code": "vibevoice", "message": vv_detail})
 
     for shot in shots:
-        if not _shot_image(shot, aspect):
+        if any(not _shot_image(shot, aspect) for aspect in aspects):
             missing_images.append(shot.id)
             if not (shot.image_prompt or "").strip():
                 attention.append(
@@ -168,7 +189,7 @@ def project_readiness(project: Project, db: Session, episode_id: str | None = No
                         "shot_id": shot.id,
                     }
                 )
-        if not _shot_clip(shot, aspect):
+        if any(not _shot_clip(shot, aspect) for aspect in aspects):
             missing_clips.append(shot.id)
         if shot.dialogue and not shot.dialogue_audio_filename:
             missing_audio.append(shot.id)
@@ -178,8 +199,12 @@ def project_readiness(project: Project, db: Session, episode_id: str | None = No
     if version:
         for index, scene in enumerate(version.scenes):
             scene_shots = list(scene.shots)
-            images_ready = sum(1 for shot in scene_shots if _shot_image(shot, aspect))
-            clips_ready = sum(1 for shot in scene_shots if _shot_clip(shot, aspect))
+            images_ready = sum(
+                1 for shot in scene_shots if all(_shot_image(shot, aspect) for aspect in aspects)
+            )
+            clips_ready = sum(
+                1 for shot in scene_shots if all(_shot_clip(shot, aspect) for aspect in aspects)
+            )
             audio_needed = sum(1 for shot in scene_shots if shot.dialogue)
             audio_ready = sum(
                 1
@@ -246,11 +271,19 @@ def _failed_steps(job: Job) -> set[str]:
     return failed
 
 
-def _generate_missing_images(db: Session, project: Project, job: Job, shots: list[Shot]) -> list[str]:
+def _generate_missing_images(
+    db: Session,
+    project: Project,
+    job: Job,
+    shots: list[Shot],
+    aspect: str | None = None,
+    on_image_ready: Callable[[str, str], None] | None = None,
+) -> list[str]:
     from .media import delete_media_file, generate_storyboard_image
 
     attention: list[str] = []
-    aspect = project.aspect_ratio
+    aspect = aspect or project.aspect_ratio
+    use_legacy = aspect == project.aspect_ratio
     scene_map = _scene_index_map(shots)
     pending = [shot for shot in shots if not _shot_image(shot, aspect)]
     total = max(len(pending), 1)
@@ -258,6 +291,8 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
     for shot in shots:
         raise_if_cancelled(db, job.id)
         if _shot_image(shot, aspect):
+            if on_image_ready:
+                on_image_ready(shot.id, aspect)
             continue
         prompt = (shot.image_prompt or "").strip()
         if not prompt:
@@ -281,17 +316,33 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                 default_visual_reference(shot, aspect)
             )
             visual_reference = load_visual_reference(image_reference)
-            references = load_cast_references(
-                db, project.id, shot.character_ids or [],
-                reference_ids=[
-                    reference_id
-                    for character in snapshot.get("characters", [])
-                    for reference_id in character.get("reference_ids", [])
-                ],
+            is_aspect_conversion = bool(image_reference and image_reference.get("mode") == "aspect_conversion")
+            references = (
+                []
+                if is_aspect_conversion and visual_reference
+                else load_cast_references(
+                    db, project.id, shot.character_ids or [],
+                    reference_ids=[
+                        reference_id
+                        for character in snapshot.get("characters", [])
+                        for reference_id in character.get("reference_ids", [])
+                    ],
+                )
+            )
+            fallback_conv_url = shot.conversation_url or next(
+                (
+                    (take.settings or {}).get("conversation_url")
+                    for take in reversed(shot.takes or [])
+                    if take.media_type == "image" and (take.settings or {}).get("conversation_url")
+                ),
+                None,
             )
             if visual_reference:
+                if is_aspect_conversion and fallback_conv_url:
+                    visual_reference = replace(visual_reference, reference_type="edit_target_fallback")
                 references.append(visual_reference)
             def report_image_progress(update: dict) -> None:
+                raise_if_cancelled(db, job.id)
                 if update.get("provider"):
                     job.provider = str(update["provider"])
                 if update.get("phase"):
@@ -308,30 +359,35 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                 aspect,
                 progress=report_image_progress,
                 references=references,
+                conversation_url=fallback_conv_url if is_aspect_conversion else None,
             )
+            try:
+                raise_if_cancelled(db, job.id)
+            except JobCancelled:
+                db.rollback()
+                delete_media_file(filename)
+                raise
             if image_reference:
-                prompt = prepare_visual_reference_prompt(prompt)
-            previous = shot.image.filename if shot.image else None
+                prompt = prepare_visual_reference_prompt(prompt, references=references)
+            image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == aspect), None)
+            previous = (shot.image.filename if shot.image else None) if use_legacy else (image_variant.filename if image_variant else None)
             invalidate_final_cut(project, db)
-            if shot.image:
+            if use_legacy and shot.image:
                 shot.image.filename = filename
                 shot.image.mime_type = mime_type
                 shot.image.source = "generated"
                 shot.image.provider = provider
                 shot.image.prompt = prompt
                 shot.image.created_at = now()
-            else:
-                db.add(
-                    ShotImage(
-                        shot_id=shot.id,
-                        filename=filename,
-                        mime_type=mime_type,
-                        source="generated",
-                        provider=provider,
-                        prompt=prompt,
-                    )
+            elif use_legacy:
+                shot.image = ShotImage(
+                    shot_id=shot.id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    source="generated",
+                    provider=provider,
+                    prompt=prompt,
                 )
-            image_variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == aspect), None)
             if image_variant:
                 image_variant.filename = filename
                 image_variant.mime_type = mime_type
@@ -339,6 +395,19 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
                 image_variant.provider = provider
                 image_variant.prompt = prompt
                 image_variant.created_at = now()
+            elif not use_legacy:
+                shot.media_variants.append(
+                    ShotMediaVariant(
+                        shot_id=shot.id,
+                        media_type="image",
+                        aspect_ratio=aspect,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="generated",
+                        provider=provider,
+                        prompt=prompt,
+                    )
+                )
             record_take(
                 db,
                 shot,
@@ -355,6 +424,10 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
             db.commit()
             if previous and previous != filename:
                 delete_media_file(previous, db=db)
+            if on_image_ready:
+                on_image_ready(shot.id, aspect)
+        except JobCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             attention.append(f"{shot.title or shot.id}: image failed ({exc})")
             db.rollback()
@@ -365,9 +438,20 @@ def _generate_missing_images(db: Session, project: Project, job: Job, shots: lis
     return attention
 
 
-def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list[Shot]) -> list[str]:
+def _generate_missing_clips(
+    db: Session,
+    project: Project,
+    job: Job,
+    shots: list[Shot],
+    aspect: str | None = None,
+) -> list[str]:
+    from .media import delete_media_file
+    from .tasks import _resolve_video_cast_references, compose_video_prompt
+
     attention: list[str] = []
-    aspect = project.aspect_ratio
+    aspect = aspect or project.aspect_ratio
+    other_aspect = "9:16" if aspect == "16:9" else "16:9"
+    use_legacy = aspect == project.aspect_ratio
     scene_map = _scene_index_map(shots)
     _, _, configured, available, _, detail = video_provider_status()
     if not configured or not available:
@@ -386,6 +470,32 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 if frame.aspect_ratio == aspect
             ),
             None,
+        )
+        image_ref = next(
+            (
+                ref
+                for ref in shot.image_references
+                if ref.aspect_ratio == aspect
+            ),
+            None,
+        )
+        cross_aspect_continuity = (
+            next(
+                (
+                    frame
+                    for frame in shot.continuity_frames
+                    if frame.aspect_ratio == other_aspect
+                ),
+                None,
+            )
+            or next(
+                (
+                    ref
+                    for ref in shot.image_references
+                    if ref.aspect_ratio == other_aspect
+                ),
+                None,
+            )
         )
         source = clip_source_image(shot, aspect)
         if not source:
@@ -408,8 +518,13 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
             snapshot = candidate if candidate and candidate.get("aspect_ratio") == aspect else None
         snapshot = snapshot or current_shot_snapshot(shot, aspect)
         base_prompt = (shot.video_prompt or shot.image_prompt or "").strip()
-        prompt = video_continuity_prompt(snapshot, base_prompt, aspect, shot=shot)
-        if continuity_frame:
+        if aspect == "9:16":
+            base_prompt += "\n\nVertical 9:16 composition for Shorts. Keep the main subject inside the central safe area."
+        prompt = compose_video_prompt(
+            video_continuity_prompt(snapshot, base_prompt, aspect, shot=shot),
+            shot.sound,
+        )
+        if continuity_frame or image_ref or cross_aspect_continuity:
             prompt = "\n\n".join(
                 part
                 for part in (
@@ -418,6 +533,26 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 )
                 if part
             )
+        prior_clip_takes = [take for take in shot.takes if take.media_type == "clip"]
+        include_cast_references = any(
+            bool((take.settings or {}).get("include_cast_references"))
+            for take in prior_clip_takes
+        )
+        cast_ref_paths = []
+        cast_ref_names: list[str] = []
+        if include_cast_references:
+            cast_ref_paths, cast_ref_names = _resolve_video_cast_references(
+                db, project, shot, continuity_frame or cross_aspect_continuity, image_ref
+            )
+            if cast_ref_names:
+                prompt = "\n\n".join(
+                    part
+                    for part in (
+                        prompt,
+                        f"Reference images: Use the first image as the opening scene frame, and use the additional character reference portrait(s) for the exact facial identity, hair, and wardrobe of: {', '.join(cast_ref_names)}.",
+                    )
+                    if part
+                )
         duration_ms = _clip_duration_for_shot(shot)
         if duration_ms != shot.duration_ms:
             shot.duration_ms = duration_ms
@@ -435,6 +570,8 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                     render_kwargs["flow_project_id"] = project.flow_project_id
                 if "on_flow_project_id" in sig.parameters:
                     render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
+                if cast_ref_paths and "reference_image_paths" in sig.parameters:
+                    render_kwargs["reference_image_paths"] = cast_ref_paths
             except (TypeError, ValueError):
                 pass
             filename, mime_type, provider = generate_shot_clip(
@@ -452,26 +589,25 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 db.rollback()
                 delete_media_file(filename)
                 raise
+            clip_variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == aspect), None)
+            previous = (shot.clip.filename if shot.clip else None) if use_legacy else (clip_variant.filename if clip_variant else None)
             invalidate_final_cut(project, db)
-            if shot.clip:
+            if use_legacy and shot.clip:
                 shot.clip.filename = filename
                 shot.clip.mime_type = mime_type
                 shot.clip.source = "generated"
                 shot.clip.provider = provider
                 shot.clip.prompt = prompt
                 shot.clip.created_at = now()
-            else:
-                db.add(
-                    ShotClip(
-                        shot_id=shot.id,
-                        filename=filename,
-                        mime_type=mime_type,
-                        source="generated",
-                        provider=provider,
-                        prompt=prompt,
-                    )
+            elif use_legacy:
+                shot.clip = ShotClip(
+                    shot_id=shot.id,
+                    filename=filename,
+                    mime_type=mime_type,
+                    source="generated",
+                    provider=provider,
+                    prompt=prompt,
                 )
-            clip_variant = next((item for item in shot.media_variants if item.media_type == "clip" and item.aspect_ratio == aspect), None)
             if clip_variant:
                 clip_variant.filename = filename
                 clip_variant.mime_type = mime_type
@@ -479,6 +615,30 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 clip_variant.provider = provider
                 clip_variant.prompt = prompt
                 clip_variant.created_at = now()
+            elif not use_legacy:
+                shot.media_variants.append(
+                    ShotMediaVariant(
+                        shot_id=shot.id,
+                        media_type="clip",
+                        aspect_ratio=aspect,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source="generated",
+                        provider=provider,
+                        prompt=prompt,
+                    )
+                )
+            take_settings: dict[str, Any] = {}
+            if continuity_frame:
+                take_settings["continuity_frame"] = {
+                    "source_shot_id": continuity_frame.source_shot_id,
+                    "source_shot_title": continuity_frame.source_shot_title,
+                    "source_time_ms": continuity_frame.source_time_ms,
+                }
+            if include_cast_references:
+                take_settings["include_cast_references"] = True
+                if cast_ref_names:
+                    take_settings["cast_reference_characters"] = cast_ref_names
             record_take(
                 db,
                 shot,
@@ -489,18 +649,14 @@ def _generate_missing_clips(db: Session, project: Project, job: Job, shots: list
                 source="generated",
                 provider=provider,
                 prompt=prompt,
-                settings={
-                    "continuity_frame": {
-                        "source_shot_id": continuity_frame.source_shot_id,
-                        "source_shot_title": continuity_frame.source_shot_title,
-                        "source_time_ms": continuity_frame.source_time_ms,
-                    }
-                } if continuity_frame else None,
+                settings=take_settings or None,
             )
             shot.status = "clip_ready"
-            if project.timeline and not promote_available_clips(project, db):
+            if project.timeline and not promote_available_clips(project, db, episode_id=job.episode_id):
                 project.timeline.revision += 1
             db.commit()
+            if previous and previous != filename:
+                delete_media_file(previous, db=db)
         except JobCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -558,8 +714,10 @@ def _assemble_preview(db: Session, project: Project, job: Job, variant: str) -> 
     attention: list[str] = []
     try:
         raise_if_cancelled(db, job.id)
-        timeline = ensure_timeline(project, db)
-        promote_available_clips(project, db)
+        episode_id = job.episode_id
+        timeline = ensure_timeline(project, db, episode_id=episode_id)
+        promote_available_clips(project, db, episode_id=episode_id)
+        append_missing_shots(project, db, episode_id=episode_id)
         if variant == "shorts":
             document_data = timeline.shorts_document or deepcopy(timeline.document)
             if not timeline.shorts_document:
@@ -579,12 +737,13 @@ def _assemble_preview(db: Session, project: Project, job: Job, variant: str) -> 
             db.commit()
 
         result = assemble_timeline(project, document, variant, db, update_progress)
-        export = db.scalar(
-            select(ProjectVariantExport).where(
-                ProjectVariantExport.project_id == project.id,
-                ProjectVariantExport.variant == variant,
-            )
+        export_query = select(ProjectVariantExport).where(
+            ProjectVariantExport.project_id == project.id,
+            ProjectVariantExport.variant == variant,
         )
+        if episode_id:
+            export_query = export_query.where(ProjectVariantExport.episode_id == episode_id)
+        export = db.scalar(export_query)
         previous = export.filename if export else None
         if export:
             export.filename = result.filename
@@ -594,11 +753,13 @@ def _assemble_preview(db: Session, project: Project, job: Job, variant: str) -> 
             export.clip_count = result.clip_count
             export.fallback_count = result.fallback_count
             export.timeline_revision = timeline.revision
+            export.episode_id = episode_id
             export.created_at = now()
         else:
             db.add(
                 ProjectVariantExport(
                     project_id=project.id,
+                    episode_id=episode_id,
                     variant=variant,
                     filename=result.filename,
                     duration_ms=result.duration_ms,
@@ -637,15 +798,121 @@ def run_create_draft(project_id: str, job_id: str, variant: str = "landscape", r
             job.message = "Checking draft readiness"
             db.commit()
 
+            if variant == "both":
+                primary_aspect = project.aspect_ratio if project.aspect_ratio in {"16:9", "9:16"} else "16:9"
+                secondary_aspect = "9:16" if primary_aspect == "16:9" else "16:9"
+                aspects = [primary_aspect, secondary_aspect]
+                variants = ["landscape", "shorts"] if primary_aspect == "16:9" else ["shorts", "landscape"]
+            else:
+                aspects = ["9:16" if variant == "shorts" else "16:9"]
+                variants = [variant]
             failed = _failed_steps(job) if retry_failed_only else set()
-            shots = _latest_shots(db, project_id, episode_id=job.episode_id)
             attention: list[str] = []
 
+            _, _, video_configured, video_available, _, _ = video_provider_status()
+            pipeline_clips = bool(
+                video_configured
+                and video_available
+                and (not retry_failed_only or not failed or "clips" in failed)
+            )
+            # (shot_id, aspect) pairs whose clip was already attempted in the overlapped pass.
+            attempted_clips: set[tuple[str, str]] = set()
+            overlapped_clip_attention: list[str] = []
+
+            def run_images() -> list[str]:
+                """Generate images; clips for finished images are generated concurrently."""
+                ready: Queue[tuple[str, str] | None] = Queue()
+                stop = threading.Event()
+                consumer: threading.Thread | None = None
+                queued: set[tuple[str, str]] = set()
+
+                def on_image_ready(shot_id: str, asp: str) -> None:
+                    key = (shot_id, asp)
+                    if key not in queued:
+                        queued.add(key)
+                        ready.put(key)
+
+                def clip_consumer() -> None:
+                    shadow_job = SimpleNamespace(id=job.id, episode_id=job.episode_id, message="", progress=0.0)
+                    with SessionLocal() as tdb:
+                        while not stop.is_set():
+                            item = ready.get()
+                            if item is None:
+                                return
+                            shot_id, asp = item
+                            try:
+                                tproject = tdb.get(Project, project_id)
+                                tshots = [
+                                    s for s in _latest_shots(tdb, project_id, episode_id=shadow_job.episode_id)
+                                    if s.id == shot_id
+                                ]
+                                if not tproject or not tshots:
+                                    continue
+                                attempted_clips.add(item)
+                                overlapped_clip_attention.extend(
+                                    _generate_missing_clips(tdb, tproject, shadow_job, tshots, aspect=asp)
+                                )
+                            except JobCancelled:
+                                stop.set()
+                                return
+                            except Exception as exc:  # noqa: BLE001
+                                tdb.rollback()
+                                overlapped_clip_attention.append(f"{shot_id}: clip failed ({exc})")
+
+                if pipeline_clips:
+                    consumer = threading.Thread(target=clip_consumer, name="draft-clip-consumer", daemon=True)
+                    consumer.start()
+                items: list[str] = []
+                try:
+                    for asp in aspects:
+                        items.extend(
+                            _generate_missing_images(
+                                db,
+                                project,
+                                job,
+                                _latest_shots(db, project_id, episode_id=job.episode_id),
+                                aspect=asp,
+                                on_image_ready=on_image_ready if pipeline_clips else None,
+                            )
+                        )
+                except BaseException:
+                    stop.set()
+                    ready.put(None)
+                    raise
+                if consumer is not None:
+                    job.message = "Finishing clips"
+                    db.commit()
+                    ready.put(None)
+                    while consumer.is_alive():
+                        consumer.join(timeout=2)
+                        raise_if_cancelled(db, job_id)
+                    db.expire_all()
+                return items
+
+            def run_clips() -> list[str]:
+                """Sweep for clips the overlapped pass did not attempt (plus report its failures)."""
+                items: list[str] = list(overlapped_clip_attention)
+                for asp in aspects:
+                    remaining = [
+                        shot
+                        for shot in _latest_shots(db, project_id, episode_id=job.episode_id)
+                        if (shot.id, asp) not in attempted_clips
+                    ]
+                    items.extend(_generate_missing_clips(db, project, job, remaining, aspect=asp))
+                return items
+
+
+            def run_assemble() -> list[str]:
+                items: list[str] = []
+                for var in variants:
+                    items.extend(_assemble_preview(db, project, job, var))
+                return items
+
             steps = [
-                ("images", lambda: _generate_missing_images(db, project, job, shots)),
-                ("clips", lambda: _generate_missing_clips(db, project, job, shots)),
-                ("audio", lambda: _generate_missing_audio(db, project, job, shots)),
-                ("assemble", lambda: _assemble_preview(db, project, job, variant)),
+                ("images", run_images),
+                ("clips", run_clips),
+                ("audio", lambda: _generate_missing_audio(db, project, job, _latest_shots(db, project_id, episode_id=job.episode_id))),
+                ("assemble", run_assemble),
             ]
             for name, runner in steps:
                 if retry_failed_only and failed and name not in failed:

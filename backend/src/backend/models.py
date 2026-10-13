@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, UniqueConstraint, and_
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .token_cipher import decrypt_secret, encrypt_secret
@@ -51,10 +51,16 @@ class Project(Base):
     )
     jobs: Mapped[list["Job"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     final_cut: Mapped["ProjectFinalCut | None"] = relationship(
-        back_populates="project", cascade="all, delete-orphan", uselist=False
+        back_populates="project",
+        cascade="all, delete-orphan",
+        uselist=False,
+        primaryjoin="and_(Project.id==ProjectFinalCut.project_id, ProjectFinalCut.episode_id.is_(None), ProjectFinalCut.compilation_id.is_(None))",
     )
     timeline: Mapped["ProjectTimeline | None"] = relationship(
-        back_populates="project", cascade="all, delete-orphan", uselist=False
+        back_populates="project",
+        cascade="all, delete-orphan",
+        uselist=False,
+        primaryjoin="and_(Project.id==ProjectTimeline.project_id, ProjectTimeline.episode_id.is_(None), ProjectTimeline.compilation_id.is_(None))",
     )
     timeline_assets: Mapped[list["TimelineAsset"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -72,6 +78,12 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="Episode.episode_number",
+    )
+    compilations: Mapped[list["Compilation"]] = relationship(
+        "Compilation",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="Compilation.created_at",
     )
     publish_records: Mapped[list["PublishRecord"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="PublishRecord.created_at.desc()"
@@ -114,6 +126,40 @@ class Episode(Base):
     variant_exports: Mapped[list["ProjectVariantExport"]] = relationship(
         "ProjectVariantExport",
         foreign_keys="[ProjectVariantExport.episode_id]",
+        cascade="all, delete-orphan",
+    )
+
+
+class Compilation(Base):
+    __tablename__ = "compilations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    episode_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+    project: Mapped["Project"] = relationship("Project", back_populates="compilations")
+    timeline: Mapped["ProjectTimeline | None"] = relationship(
+        "ProjectTimeline",
+        foreign_keys="[ProjectTimeline.compilation_id]",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    final_cut: Mapped["ProjectFinalCut | None"] = relationship(
+        "ProjectFinalCut",
+        foreign_keys="[ProjectFinalCut.compilation_id]",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    variant_exports: Mapped[list["ProjectVariantExport"]] = relationship(
+        "ProjectVariantExport",
+        foreign_keys="[ProjectVariantExport.compilation_id]",
         cascade="all, delete-orphan",
     )
 
@@ -242,6 +288,28 @@ class ShotImage(Base):
     def url(self) -> str:
         return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
 
+    @property
+    def color_boost_strength(self) -> float:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        entry = state["history"][state["index"]]
+        return float(entry.get("strength", 0.0))
+
+    @property
+    def can_undo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) > 0
+
+    @property
+    def can_redo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) < len(state["history"]) - 1
+
 
 class ShotClip(Base):
     __tablename__ = "shot_clips"
@@ -262,6 +330,28 @@ class ShotClip(Base):
     @property
     def url(self) -> str:
         return f"/media/{self.filename}"
+
+    @property
+    def color_boost_strength(self) -> float:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        entry = state["history"][state["index"]]
+        return float(entry.get("strength", 0.0))
+
+    @property
+    def can_undo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) > 0
+
+    @property
+    def can_redo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) < len(state["history"]) - 1
 
 
 class ShotContinuityFrame(Base):
@@ -285,6 +375,28 @@ class ShotContinuityFrame(Base):
     @property
     def url(self) -> str:
         return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
+
+    @property
+    def color_boost_strength(self) -> float:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        entry = state["history"][state["index"]]
+        return float(entry.get("strength", 0.0))
+
+    @property
+    def can_undo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) > 0
+
+    @property
+    def can_redo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) < len(state["history"]) - 1
 
 
 class ShotImageReference(Base):
@@ -313,6 +425,28 @@ class ShotImageReference(Base):
     def url(self) -> str:
         return f"/media/{self.filename}"
 
+    @property
+    def color_boost_strength(self) -> float:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        entry = state["history"][state["index"]]
+        return float(entry.get("strength", 0.0))
+
+    @property
+    def can_undo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) > 0
+
+    @property
+    def can_redo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) < len(state["history"]) - 1
+
 
 class ShotMediaVariant(Base):
     __tablename__ = "shot_media_variants"
@@ -334,6 +468,28 @@ class ShotMediaVariant(Base):
     @property
     def url(self) -> str:
         return f"/media/{self.filename}?v={int(self.created_at.timestamp())}"
+
+    @property
+    def color_boost_strength(self) -> float:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        entry = state["history"][state["index"]]
+        return float(entry.get("strength", 0.0))
+
+    @property
+    def can_undo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) > 0
+
+    @property
+    def can_redo_color(self) -> bool:
+        from .media import get_reference_color_state
+
+        state = get_reference_color_state(self.id, self.filename)
+        return int(state["index"]) < len(state["history"]) - 1
 
 
 class ShotTake(Base):
@@ -371,6 +527,9 @@ class ProjectFinalCut(Base):
     episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    compilation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compilations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     filename: Mapped[str] = mapped_column(String(240))
     mime_type: Mapped[str] = mapped_column(String(80), default="video/mp4")
     duration_ms: Mapped[int] = mapped_column(Integer)
@@ -382,6 +541,7 @@ class ProjectFinalCut(Base):
 
     project: Mapped[Project] = relationship(back_populates="final_cut", foreign_keys="[ProjectFinalCut.project_id]")
     episode: Mapped["Episode | None"] = relationship(back_populates="final_cut", foreign_keys="[ProjectFinalCut.episode_id]")
+    compilation: Mapped["Compilation | None"] = relationship(back_populates="final_cut", foreign_keys="[ProjectFinalCut.compilation_id]")
 
     @property
     def url(self) -> str:
@@ -398,6 +558,9 @@ class ProjectTimeline(Base):
     episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
     )
+    compilation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compilations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     revision: Mapped[int] = mapped_column(Integer, default=1)
     document: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     shorts_document: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -405,6 +568,7 @@ class ProjectTimeline(Base):
 
     project: Mapped[Project] = relationship(back_populates="timeline", foreign_keys="[ProjectTimeline.project_id]")
     episode: Mapped["Episode | None"] = relationship(back_populates="timeline", foreign_keys="[ProjectTimeline.episode_id]")
+    compilation: Mapped["Compilation | None"] = relationship(back_populates="timeline", foreign_keys="[ProjectTimeline.compilation_id]")
 
 
 class TimelineAsset(Base):
@@ -427,13 +591,24 @@ class TimelineAsset(Base):
 class ProjectVariantExport(Base):
     __tablename__ = "project_variant_exports"
     __table_args__ = (
-        UniqueConstraint("project_id", "episode_id", "variant", name="uq_project_variant_exports"),
+        # Include compilation_id so multiple compilation exports of the same
+        # variant don't collide when episode_id is NULL.
+        UniqueConstraint(
+            "project_id",
+            "episode_id",
+            "compilation_id",
+            "variant",
+            name="uq_project_variant_exports",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    compilation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compilations.id", ondelete="CASCADE"), index=True, nullable=True
     )
     variant: Mapped[str] = mapped_column(String(16))
     filename: Mapped[str] = mapped_column(String(240))
@@ -448,6 +623,7 @@ class ProjectVariantExport(Base):
 
     project: Mapped[Project] = relationship(back_populates="variant_exports", foreign_keys="[ProjectVariantExport.project_id]")
     episode: Mapped["Episode | None"] = relationship(back_populates="variant_exports", foreign_keys="[ProjectVariantExport.episode_id]")
+    compilation: Mapped["Compilation | None"] = relationship(back_populates="variant_exports", foreign_keys="[ProjectVariantExport.compilation_id]")
 
     @property
     def url(self) -> str:
@@ -487,6 +663,7 @@ class Character(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(24), default="character")
     notes: Mapped[str] = mapped_column(Text, default="")
     voice_description: Mapped[str] = mapped_column(Text, default="")
     voice_provider: Mapped[str] = mapped_column(String(40), default="vibevoice")
@@ -509,6 +686,7 @@ class CharacterReference(Base):
     )
     filename: Mapped[str] = mapped_column(String(240))
     mime_type: Mapped[str] = mapped_column(String(80))
+    view_type: Mapped[str] = mapped_column(String(24), default="main")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
     character: Mapped[Character] = relationship(back_populates="references")
@@ -567,6 +745,9 @@ class Job(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     episode_id: Mapped[str | None] = mapped_column(
         ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    compilation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compilations.id", ondelete="CASCADE"), index=True, nullable=True
     )
     kind: Mapped[str] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(24), default="queued")

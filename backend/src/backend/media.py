@@ -30,6 +30,7 @@ class FaceReferenceImage:
     data: bytes
     reference_id: str = ""
     character_id: str = ""
+    view_type: str = "main"
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,24 @@ class VisualReferenceImage:
 IMAGE_REFERENCE_PROVIDERS = {"chatgpt_web", "gemini_web"}
 
 
-def prepare_visual_reference_prompt(prompt: str) -> str:
+def prepare_visual_reference_prompt(
+    prompt: str,
+    references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
+) -> str:
+    is_aspect_conversion = any(
+        isinstance(ref, VisualReferenceImage) and ref.reference_type in {"edit_target", "edit_target_fallback"}
+        for ref in (references or [])
+    )
+    if is_aspect_conversion:
+        if "Aspect ratio conversion:" in prompt:
+            return prompt
+        return (
+            f"{prompt}\n\nAspect ratio conversion: Reframe and expand/outpaint the shot frame generated above (or attached reference frame) "
+            "to fill the full target aspect ratio canvas edge-to-edge without black bars, letterbox, or pillarbox borders. "
+            "Preserve the exact characters, faces, expressions, poses, wardrobe, props, background environment, and lighting."
+        )
+    if "Visual continuity reference:" in prompt:
+        return prompt
     return (
         f"{prompt}\n\nVisual continuity reference: use the attached shot reference for relevant "
         "identity, wardrobe, location, lighting, and visual continuity. "
@@ -54,7 +72,10 @@ def prepare_visual_reference_prompt(prompt: str) -> str:
 
 
 _ASPECT_INSTRUCTION = re.compile(
-    r"(?i)\b(?:vertical|portrait|horizontal|landscape)?\s*(?:9\s*:\s*16|16\s*:\s*9|\d{3,5}\s*[x×]\s*\d{3,5})\s*(?:format|aspect(?:\s+ratio)?)?\b[,.;]?"
+    r"(?i)\b(?:vertical|portrait|horizontal|landscape|widescreen)?\s*"
+    r"(?:9\s*:\s*16|16\s*:\s*9|\d{3,5}\s*[x×]\s*\d{3,5})\s*"
+    r"(?:vertical|portrait|horizontal|landscape|widescreen)?\s*"
+    r"(?:composition\s+for\s+shorts|for\s+shorts|composition|framing|format|aspect(?:\s+ratio)?)?\b[,.;]?"
 )
 _ADULT_TERMS = re.compile(r"(?i)\b(?:adult|woman|women|man|men|mother|father|mama|wife|husband)\b")
 _MINOR_TERMS = re.compile(r"(?i)\b(?:baby|babies|child|children|kid|kids|teen|teenager|boy|girl|minor|schoolchild)\b")
@@ -100,20 +121,41 @@ def prepare_image_prompt(prompt: str, aspect_ratio: str) -> str:
 
 
 def prepare_face_reference_prompt(prompt: str, references: Sequence[FaceReferenceImage | VisualReferenceImage]) -> str:
-    references = [ref for ref in references if isinstance(ref, FaceReferenceImage)]
-    if not references:
+    face_refs = [ref for ref in references if isinstance(ref, FaceReferenceImage)]
+    if not face_refs:
         return prompt
-    names: list[str] = []
-    for ref in references:
-        if ref.character_name not in names:
-            names.append(ref.character_name)
-    named = ", ".join(names)
-    return (
-        f"Identity references are attached for: {named}. "
-        "Preserve each named character's exact face and likeness from their reference image(s). "
-        "Do not invent a different face.\n\n"
-        f"{prompt}"
-    )
+
+    chars_with_3d: list[str] = []
+    other_chars: list[str] = []
+    for ref in face_refs:
+        v_type = getattr(ref, "view_type", "main")
+        if v_type == "3d_view":
+            if ref.character_name not in chars_with_3d:
+                chars_with_3d.append(ref.character_name)
+        else:
+            if ref.character_name not in other_chars:
+                other_chars.append(ref.character_name)
+
+    other_chars = [name for name in other_chars if name not in chars_with_3d]
+
+    parts: list[str] = []
+    if chars_with_3d:
+        named_3d = ", ".join(chars_with_3d)
+        parts.append(
+            f"Character 3D turnaround reference sheet(s) (multi-angle turnaround showing face, hairstyle, body build, and canonical wardrobe) are attached for: {named_3d}. "
+            "Preserve each character's exact face, hairstyle, clothing/wardrobe, body build, and proportions as depicted in their 3D turnaround sheet. "
+            "Do not alter their wardrobe, colors, or facial structure."
+        )
+    if other_chars:
+        named_other = ", ".join(other_chars)
+        parts.append(
+            f"Identity references are attached for: {named_other}. "
+            "Preserve each named character's exact face and likeness from their reference image(s). "
+            "Do not invent a different face."
+        )
+
+    instruction = " ".join(parts)
+    return f"{instruction}\n\n{prompt}"
 
 
 def render_storyboard_placeholder(
@@ -232,7 +274,11 @@ def _reference_payload(references: Sequence[FaceReferenceImage | VisualReference
         if isinstance(ref, VisualReferenceImage):
             item["reference_type"] = ref.reference_type
         else:
-            item["reference_type"] = "face_identity"
+            item["reference_type"] = (
+                "character_3d"
+                if getattr(ref, "view_type", "main") == "3d_view"
+                else "face_identity"
+            )
         payload.append(item)
     return payload
 
@@ -433,11 +479,11 @@ def generate_storyboard_image(
     is_followup_edit: bool = False,
 ) -> tuple[str, str, str]:
     references = list(references or [])
-    prompt = prepare_image_prompt(prompt, aspect_ratio)
-    prompt = prepare_face_reference_prompt(prompt, references)
+    base_prompt = prepare_image_prompt(prompt, aspect_ratio)
+    prompt = prepare_face_reference_prompt(base_prompt, references)
     has_visual_reference = any(isinstance(ref, VisualReferenceImage) for ref in references)
     if has_visual_reference and not is_followup_edit:
-        prompt = prepare_visual_reference_prompt(prompt)
+        prompt = prepare_visual_reference_prompt(prompt, references=references)
     providers = settings.image_provider_order
     if not providers:
         if has_visual_reference and not is_followup_edit:
@@ -508,25 +554,28 @@ def generate_storyboard_image(
             failures.append(failure)
             if progress:
                 progress({"provider": provider, "phase": "failed", "error": failure})
-    if references and not has_visual_reference:
+    if references and not is_followup_edit:
         for provider in providers:
             status = statuses.get(provider, {})
             if not status.get("available"):
                 continue
             label = status.get("label", provider)
             logger.warning(
-                "All reference-based attempts failed; retrying %s without binary attachments using prompt likeness.",
+                "All reference-based attempts failed; retrying %s without binary attachments (conversation_url=%s).",
                 label,
+                bool(conversation_url),
             )
             if progress:
-                progress({"provider": provider, "phase": "submitting", "message": f"{label}: Retrying with prompt-described likeness..."})
+                progress({"provider": provider, "phase": "submitting", "message": f"{label}: Retrying without file attachments..."})
             try:
+                retry_kwargs = {"conversation_url": conversation_url} if conversation_url else {}
                 image, _model, metadata = _request_provider_image(
                     provider,
-                    prompt,
+                    base_prompt,
                     aspect_ratio,
                     progress,
                     references=[],
+                    **retry_kwargs,
                 )
                 if progress:
                     progress({"provider": provider, "phase": "saving", **metadata})
@@ -540,15 +589,277 @@ def generate_storyboard_image(
     raise RuntimeError("Image generation failed. " + "; ".join(failures) + ". Refresh bridge sessions or upload an image manually.")
 
 
+def generate_storyboard_chatgpt_dual(
+    prompt: str,
+    scene_title: str,
+    framing: str,
+    progress: Callable[[dict], None] | None = None,
+    references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
+    conversation_url: str | None = None,
+) -> tuple[tuple[str, str], tuple[str, str], str]:
+    references = list(references or [])
+    cleaned = _ASPECT_INSTRUCTION.sub("", prompt)
+    cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
+    cleaned = re.sub(r"[,;]\s*[,;]", ",", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.;")
+    age_clarity = ""
+    if _ADULT_TERMS.search(cleaned) and not _MINOR_TERMS.search(cleaned):
+        age_clarity = " All people described as women or men are adults age 18 or older."
+    dual_prompt = (
+        "Create two images, first 16:9 and 9:16:\n"
+        "- 16:9 widescreen landscape composition.\n"
+        "- 9:16 vertical smartphone composition.\n"
+        "Keep the character's face, clothing, expression, and environment strictly identical in both panels.\n"
+        f"Scene: {cleaned}{age_clarity}"
+    )
+    if references:
+        dual_prompt = prepare_face_reference_prompt(dual_prompt, references)
+
+    provider = "chatgpt_web"
+    statuses = {item["id"]: item for item in image_provider_statuses()}
+    status = statuses.get(provider, {})
+    if not status.get("available"):
+        raise RuntimeError("ChatGPT Web provider is offline or missing image capability")
+
+    base_url = settings.chatgpt_web_base_url
+    model = settings.chatgpt_web_model
+    headers = {"Authorization": f"Bearer {settings.chatgpt_web_api_key}"}
+    request_id = str(uuid.uuid4())
+    request_headers = {**headers, "X-Request-ID": request_id}
+    payload: dict = {
+        "model": model,
+        "prompt": dual_prompt,
+        "size": "1024x1024",
+        "n": 2,
+        "response_format": "b64_json",
+    }
+    if references:
+        payload["reference_images"] = _reference_payload(references)
+    if conversation_url:
+        payload["conversation_url"] = conversation_url
+
+    if progress:
+        progress({
+            "provider": provider,
+            "phase": "submitting",
+            "message": "Submitting dual 16:9 + 9:16 prompt to ChatGPT Web",
+        })
+
+    provider_timeout = max(settings.image_provider_timeout_seconds, 360)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            httpx.post,
+            f"{base_url.rstrip('/')}/images/generations",
+            headers=request_headers,
+            json=payload,
+            timeout=httpx.Timeout(provider_timeout, connect=3),
+        )
+        last_phase = None
+        while not future.done():
+            try:
+                status_response = httpx.get(
+                    f"{base_url.rstrip('/')}/images/generations/status/{request_id}",
+                    headers=headers,
+                    timeout=2,
+                )
+                operation = status_response.json() if status_response.is_success else {}
+                if operation.get("phase") != last_phase and progress:
+                    progress({"provider": provider, **operation})
+                last_phase = operation.get("phase", last_phase)
+            except (httpx.HTTPError, ValueError):
+                pass
+            time.sleep(0.75)
+        response = future.result()
+
+    response.raise_for_status()
+    resp_json = response.json()
+    metadata = resp_json.get("provider_metadata") or {}
+    data_items = resp_json.get("data") or []
+    if not data_items:
+        raise RuntimeError("ChatGPT Web did not return any image data")
+
+    images_bytes: list[bytes] = []
+    for item in data_items:
+        if item.get("b64_json"):
+            images_bytes.append(base64.b64decode(item["b64_json"], validate=True))
+
+    if not images_bytes:
+        raise RuntimeError("ChatGPT Web returned invalid image payloads")
+
+    if len(images_bytes) == 1:
+        bytes1 = images_bytes[0]
+        bytes2 = images_bytes[0]
+    else:
+        bytes1 = images_bytes[0]
+        bytes2 = images_bytes[1]
+
+    from io import BytesIO
+    from PIL import Image
+
+    def _aspect(b: bytes) -> float:
+        try:
+            with Image.open(BytesIO(b)) as im:
+                return float(im.width) / max(1.0, float(im.height))
+        except Exception:
+            return 1.0
+
+    ratio1 = _aspect(bytes1)
+    ratio2 = _aspect(bytes2)
+    if ratio1 >= ratio2:
+        landscape_bytes, portrait_bytes = bytes1, bytes2
+    else:
+        landscape_bytes, portrait_bytes = bytes2, bytes1
+
+    ext1, mime1 = _image_format(landscape_bytes)
+    ext2, mime2 = _image_format(portrait_bytes)
+    fn_16_9 = f"generated-{uuid.uuid4()}{ext1}"
+    fn_9_16 = f"generated-{uuid.uuid4()}{ext2}"
+    (settings.media_dir / fn_16_9).write_bytes(landscape_bytes)
+    (settings.media_dir / fn_9_16).write_bytes(portrait_bytes)
+
+    if progress:
+        progress({"provider": provider, "phase": "saving", **metadata})
+
+    return (fn_16_9, mime1), (fn_9_16, mime2), provider
+
+
+_COLOR_RETOUCH_PHRASE = re.compile(
+    r"^\s*(?:please\s+)?(?:retouch|repaint|recolor|revive|restore|enhance|boost)"
+    r"(?:\s+(?:the\s+)?(?:color|colors|colour|colours|vibrancy|saturation|image|frame|this(?:\s+image|\s+frame)?))*\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+COLOR_RETOUCH_STRICT_PROMPT = (
+    "Retouch and repaint the colors of this exact image to restore rich, vibrant, natural color saturation, "
+    "deep contrast, and crisp lighting. Do NOT modify, add, remove, or reposition any character, face, "
+    "expression, hairstyle, clothing, prop, or background detail — keep the entire composition and subjects 100% identical."
+)
+
+
+def expand_color_retouch_prompt(prompt: str) -> str:
+    stripped = (prompt or "").strip()
+    if _COLOR_RETOUCH_PHRASE.match(stripped):
+        return COLOR_RETOUCH_STRICT_PROMPT
+    return stripped
+
+
+def enhance_image_vibrancy(data: bytes, strength: float = 1.0) -> tuple[bytes, str]:
+    """Revive or adjust frame color with pixel-exact contrast, color vibrancy, and clarity."""
+    from io import BytesIO
+    from PIL import Image, ImageEnhance, ImageOps
+
+    s = max(-1.0, min(3.0, float(strength)))
+    with Image.open(BytesIO(data)) as im:
+        has_alpha = im.mode in ("RGBA", "LA")
+        alpha = im.getchannel("A") if has_alpha else None
+        rgb = im.convert("RGB")
+
+        if abs(s) >= 1e-4:
+            if s > 0:
+                leveled = ImageOps.autocontrast(rgb, cutoff=0.5)
+                rgb = Image.blend(rgb, leveled, min(1.0, 0.55 * s))
+            rgb = ImageEnhance.Contrast(rgb).enhance(max(0.3, 1.0 + 0.14 * s))
+            rgb = ImageEnhance.Color(rgb).enhance(max(0.1, 1.0 + 0.32 * s))
+            rgb = ImageEnhance.Sharpness(rgb).enhance(max(0.5, 1.0 + 0.20 * s))
+
+        if alpha is not None:
+            rgb = rgb.convert("RGBA")
+            rgb.putalpha(alpha)
+
+        out = BytesIO()
+        rgb.save(out, format="PNG")
+        return out.getvalue(), "image/png"
+
+
+def _ref_color_state_path(target_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(target_id or ""))
+    return settings.media_dir / f".ref-color-state-{safe_id}.json"
+
+
+def get_reference_color_state(target_id: str, current_filename: str) -> dict:
+    import json
+
+    default_state = {
+        "original_filename": current_filename,
+        "history": [{"filename": current_filename, "strength": 0.0}],
+        "index": 0,
+    }
+    if not target_id or not current_filename:
+        return default_state
+    state_path = _ref_color_state_path(target_id)
+    if not state_path.is_file():
+        return default_state
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        history = raw.get("history")
+        index = int(raw.get("index", 0))
+        orig = str(raw.get("original_filename") or "")
+        if (
+            not isinstance(history, list)
+            or not history
+            or not orig
+            or not (0 <= index < len(history))
+        ):
+            return default_state
+        # If current_filename was externally replaced (e.g. new frame selected or AI repaint), reset state
+        known_filenames = {str(item.get("filename") or "") for item in history if isinstance(item, dict)}
+        if current_filename not in known_filenames:
+            return default_state
+        if str(history[index].get("filename") or "") != current_filename:
+            for idx, item in enumerate(history):
+                if isinstance(item, dict) and item.get("filename") == current_filename:
+                    index = idx
+                    break
+        return {
+            "original_filename": orig,
+            "history": history,
+            "index": index,
+        }
+    except Exception:
+        return default_state
+
+
+def save_reference_color_state(target_id: str, state: dict) -> None:
+    import json
+
+    if not target_id:
+        return
+    state_path = _ref_color_state_path(target_id)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def clear_reference_color_state(target_id: str, keep_filename: str | None = None) -> None:
+    if not target_id:
+        return
+    state_path = _ref_color_state_path(target_id)
+    if state_path.is_file():
+        try:
+            import json
+
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            for item in raw.get("history") or []:
+                fn = item.get("filename") if isinstance(item, dict) else None
+                if fn and fn != keep_filename and (
+                    fn.startswith("image-reference-retouched-") or fn.startswith("continuity-retouched-")
+                ):
+                    delete_media_file(fn)
+        except Exception:
+            pass
+        state_path.unlink(missing_ok=True)
+
+
 def delete_media_file(filename: str | None, db: object = None) -> None:
     if not filename or Path(filename).is_absolute() or ".." in Path(filename).parts:
         return
     if db is not None:
         try:
             from sqlalchemy import select
-            from .models import ShotTake
-            # Never delete files that are referenced in take history
+            from .models import ShotMediaVariant, ShotTake
+            # Never delete files that are referenced in take history or other variants
             if db.scalar(select(ShotTake.id).where(ShotTake.filename == filename).limit(1)) is not None:
+                return
+            if db.scalar(select(ShotMediaVariant.id).where(ShotMediaVariant.filename == filename).limit(1)) is not None:
                 return
         except Exception:
             pass

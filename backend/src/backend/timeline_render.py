@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import uuid
@@ -9,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .final_cut import FinalCutResult, _run, probe_duration_ms
+from .final_cut import FinalCutResult, _run, export_encode_args, probe_duration_ms
 from .models import Project, Shot, ShotMediaVariant, TimelineAsset
 from .schemas import (
     TimelineDocument,
@@ -18,6 +19,7 @@ from .schemas import (
     TimelineTextOverlay,
     TimelineVariantGeometry,
 )
+from .luts import build_lut_ffmpeg_filter
 from .settings import settings
 
 
@@ -38,6 +40,7 @@ class ResolvedMedia:
     aspect_ratio: str
     native: bool
     dialogue_audio: Path | None = None
+    color_boost_strength: float = 0.0
 
 
 def _legacy_media(shot: Shot, kind: str):
@@ -71,12 +74,30 @@ def resolve_shot_media(
         fallback_variants = [item for item in shot.media_variants if item.media_type == fallback_type]
         matching = next((item for item in fallback_variants if item.aspect_ratio == desired_aspect), None)
         if matching:
-            return ResolvedMedia(settings.media_dir / matching.filename, fallback_type == "clip", desired_aspect, True)
+            return ResolvedMedia(
+                settings.media_dir / matching.filename,
+                fallback_type == "clip",
+                desired_aspect,
+                True,
+                color_boost_strength=float(getattr(matching, "color_boost_strength", 0.0) or 0.0),
+            )
         if fallback_legacy:
-            return ResolvedMedia(settings.media_dir / fallback_legacy.filename, fallback_type == "clip", project_aspect, project_aspect == desired_aspect)
+            return ResolvedMedia(
+                settings.media_dir / fallback_legacy.filename,
+                fallback_type == "clip",
+                project_aspect,
+                project_aspect == desired_aspect,
+                color_boost_strength=float(getattr(fallback_legacy, "color_boost_strength", 0.0) or 0.0),
+            )
         if fallback_variants:
             item = fallback_variants[0]
-            return ResolvedMedia(settings.media_dir / item.filename, fallback_type == "clip", item.aspect_ratio, item.aspect_ratio == desired_aspect)
+            return ResolvedMedia(
+                settings.media_dir / item.filename,
+                fallback_type == "clip",
+                item.aspect_ratio,
+                item.aspect_ratio == desired_aspect,
+                color_boost_strength=float(getattr(item, "color_boost_strength", 0.0) or 0.0),
+            )
         return None
     media, aspect = candidates[0]
     return ResolvedMedia(
@@ -84,6 +105,7 @@ def resolve_shot_media(
         is_clip=media_type == "clip",
         aspect_ratio=aspect,
         native=aspect == desired_aspect,
+        color_boost_strength=float(getattr(media, "color_boost_strength", 0.0) or 0.0),
     )
 
 
@@ -97,8 +119,9 @@ def resolve_source(
     if source.kind == "asset":
         asset = db.get(TimelineAsset, source.ref_id)
         if not asset or asset.project_id != project.id:
-            raise RuntimeError("A timeline image asset is missing")
-        return ResolvedMedia(settings.media_dir / asset.filename, False, desired_aspect, True)
+            raise RuntimeError("A timeline media asset is missing")
+        is_clip = (asset.mime_type or "").lower().startswith("video/")
+        return ResolvedMedia(settings.media_dir / asset.filename, is_clip, desired_aspect, True)
     shot = db.get(Shot, source.ref_id)
     if not shot:
         raise RuntimeError("A timeline shot is missing")
@@ -116,6 +139,7 @@ def resolve_source(
         aspect_ratio=media.aspect_ratio,
         native=media.native,
         dialogue_audio=dialogue,
+        color_boost_strength=media.color_boost_strength,
     )
 
 
@@ -123,12 +147,55 @@ def _geometry(item, variant: str) -> TimelineVariantGeometry:
     return item.variant.get(variant, TimelineVariantGeometry())
 
 
+def _video_overlay_geometry(item, variant: str) -> TimelineVariantGeometry:
+    if variant in item.variant:
+        return item.variant[variant]
+    return TimelineVariantGeometry(position="full-frame", fit="cover")
+
+
+def _color_boost_ffmpeg_filter(strength: float) -> str:
+    if abs(float(strength or 0.0)) < 1e-4:
+        return ""
+    s = max(-1.0, min(3.0, float(strength)))
+    contrast = max(0.3, 1.0 + 0.14 * s)
+    saturation = max(0.1, 1.0 + 0.32 * s)
+    brightness = max(-0.15, min(0.15, 0.015 * s))
+    flt = f",eq=contrast={contrast:.4f}:saturation={saturation:.4f}:brightness={brightness:.4f}"
+    if s > 0:
+        flt += f",unsharp=5:5:{min(1.5, 0.35 * s):.3f}:5:5:0.0"
+    return flt
+
+
+def _edge_crop_fractions(geometry: TimelineVariantGeometry) -> tuple[float, float, float, float]:
+    c_top = max(0.0, min(0.85, float(getattr(geometry, "crop_top", 0.0) or 0.0)))
+    c_bottom = max(0.0, min(0.85, float(getattr(geometry, "crop_bottom", 0.0) or 0.0)))
+    c_left = max(0.0, min(0.85, float(getattr(geometry, "crop_left", 0.0) or 0.0)))
+    c_right = max(0.0, min(0.85, float(getattr(geometry, "crop_right", 0.0) or 0.0)))
+    if c_top + c_bottom > 0.9:
+        scale_v = 0.9 / (c_top + c_bottom)
+        c_top *= scale_v
+        c_bottom *= scale_v
+    if c_left + c_right > 0.9:
+        scale_h = 0.9 / (c_left + c_right)
+        c_left *= scale_h
+        c_right *= scale_h
+    return c_top, c_bottom, c_left, c_right
+
+
 def _video_filter(width: int, height: int, geometry: TimelineVariantGeometry) -> str:
     if geometry.fit == "contain":
-        return (
+        base = (
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
         )
+        if geometry.zoom > 1.001:
+            scaled_w = max(width, round(width * geometry.zoom))
+            scaled_h = max(height, round(height * geometry.zoom))
+            return (
+                f"{base},scale={scaled_w}:{scaled_h},"
+                f"crop={width}:{height}:(iw-ow)*{geometry.focal_x}:(ih-oh)*{geometry.focal_y}"
+            )
+        return base
     scaled_w = max(width, round(width * geometry.zoom))
     scaled_h = max(height, round(height * geometry.zoom))
     return (
@@ -162,11 +229,34 @@ def _normalize_primary(
 
     geometry = _geometry(item, variant)
     if media and not media.native and variant not in item.variant:
-        geometry = geometry.model_copy(update={"fit": "contain", "zoom": 1})
+        geometry = geometry.model_copy(update={"fit": "cover", "zoom": 1})
     trim_start = item.source_in_ms / 1000 if media.is_clip else 0
     trim = f"trim=start={trim_start}:duration={duration}," if media.is_clip else f"trim=duration={duration},"
+    boost_chain = _color_boost_ffmpeg_filter(media.color_boost_strength) if media.is_clip else ""
+    lut_chain = build_lut_ffmpeg_filter(
+        getattr(geometry, "lut", "none"),
+        float(getattr(geometry, "lut_strength", 1.0) or 1.0),
+    )
+    c_top, c_bottom, c_left, c_right = _edge_crop_fractions(geometry)
+    dx = round(width * max(-0.9, min(0.9, float(getattr(geometry, "offset_x", 0.0) or 0.0))))
+    dy = round(height * max(-0.9, min(0.9, float(getattr(geometry, "offset_y", 0.0) or 0.0))))
+    edge_crop_chain = ""
+    if c_top > 1e-4 or c_bottom > 1e-4 or c_left > 1e-4 or c_right > 1e-4 or dx != 0 or dy != 0:
+        src_x0 = round(width * c_left)
+        src_y0 = round(height * c_top)
+        src_x1 = max(src_x0 + 16, round(width * (1.0 - c_right)))
+        src_y1 = max(src_y0 + 16, round(height * (1.0 - c_bottom)))
+        dst_x0 = max(0, min(width - 16, src_x0 + dx))
+        dst_y0 = max(0, min(height - 16, src_y0 + dy))
+        dst_x1 = max(dst_x0 + 16, min(width, src_x1 + dx))
+        dst_y1 = max(dst_y0 + 16, min(height, src_y1 + dy))
+        vis_w = dst_x1 - dst_x0
+        vis_h = dst_y1 - dst_y0
+        vis_src_x = max(0, min(width - vis_w, dst_x0 - dx))
+        vis_src_y = max(0, min(height - vis_h, dst_y0 - dy))
+        edge_crop_chain = f",crop={vis_w}:{vis_h}:{vis_src_x}:{vis_src_y},pad={width}:{height}:{dst_x0}:{dst_y0}:color=black"
     video = (
-        f"[0:v]{trim}setpts=PTS-STARTPTS,{_video_filter(width, height, geometry)},"
+        f"[0:v]{trim}setpts=PTS-STARTPTS,{_video_filter(width, height, geometry)}{boost_chain}{lut_chain}{edge_crop_chain},"
         f"setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={duration},"
         f"trim=duration={duration}[v]"
     )
@@ -194,8 +284,7 @@ def _normalize_primary(
             "-filter_complex", video + audio,
             "-map", "[v]", *audio_map,
             "-t", str(duration),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
+            *export_encode_args(),
             str(destination),
         ]
     )
@@ -274,11 +363,139 @@ def _render_text(
     canvas.save(path)
 
 
+def _probe_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout:
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if streams:
+                w = int(streams[0].get("width") or 0)
+                h = int(streams[0].get("height") or 0)
+                if w > 0 and h > 0:
+                    return w, h
+    except Exception:
+        pass
+    try:
+        with Image.open(path) as img:
+            return img.width, img.height
+    except Exception:
+        pass
+    return 1920, 1080
+
+
 def _overlay_position(position: str, width: int, height: int, overlay_width: int) -> tuple[str, str]:
-    margin = max(20, width // 32)
-    x = str(margin) if position.endswith("left") else f"W-w-{margin}" if position.endswith("right") else "(W-w)/2"
-    y = str(margin) if position.startswith("top") else f"H-h-{margin}" if position.startswith("bottom") else "(H-h)/2"
+    margin_x = round(width * 0.08)
+    margin_y = round(height * 0.08)
+    x = str(margin_x) if position.endswith("left") else f"W-w-{margin_x}" if position.endswith("right") else "(W-w)/2"
+    y = str(margin_y) if position.startswith("top") else f"H-h-{margin_y}" if position.startswith("bottom") else "(H-h)/2"
     return x, y
+
+
+def _compute_overlay_layout(
+    geometry: TimelineVariantGeometry,
+    media_path: Path,
+    width: int,
+    height: int,
+    is_video_layer: bool = True,
+) -> tuple[str, str, str]:
+    c_top, c_bottom, c_left, c_right = _edge_crop_fractions(geometry)
+    has_edge_crop = c_top > 1e-4 or c_bottom > 1e-4 or c_left > 1e-4 or c_right > 1e-4
+    position = getattr(geometry, "position", "full-frame" if is_video_layer else "center")
+
+    off_x = round(width * max(-1.0, min(1.0, float(getattr(geometry, "offset_x", 0.0) or 0.0))))
+    off_y = round(height * max(-1.0, min(1.0, float(getattr(geometry, "offset_y", 0.0) or 0.0))))
+
+    if position == "full-frame":
+        scale_chain = _video_filter(width, height, geometry)
+        if has_edge_crop:
+            crop_x = round(width * c_left)
+            crop_y = round(height * c_top)
+            crop_w = max(16, (round(width * (1.0 - c_left - c_right)) // 2) * 2)
+            crop_h = max(16, (round(height * (1.0 - c_top - c_bottom)) // 2) * 2)
+            scale_chain = f"{scale_chain},crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+            final_x = crop_x + off_x
+            final_y = crop_y + off_y
+        else:
+            final_x = off_x
+            final_y = off_y
+        return scale_chain, str(final_x), str(final_y)
+
+    src_w, src_h = _probe_dimensions(media_path)
+    aspect = max(0.1, src_w / max(1, src_h))
+
+    scale_factor = max(0.2, min(5.0, float(getattr(geometry, "scale", 1.0) or 1.0)))
+    base_width_ratio = 0.45 if is_video_layer else 0.30
+    max_w = max(32, round(width * base_width_ratio * scale_factor))
+    max_h = max(32, round(height * 0.60 * scale_factor))
+
+    if max_w / aspect <= max_h:
+        el_w = max_w
+        el_h = max(16, round(el_w / aspect))
+    else:
+        el_h = max_h
+        el_w = max(16, round(el_h * aspect))
+    el_w = max(16, (el_w // 2) * 2)
+    el_h = max(16, (el_h // 2) * 2)
+
+    margin_x = round(width * 0.08)
+    margin_y = round(height * 0.08)
+
+    if position == "top":
+        el_x = (width - el_w) // 2
+        el_y = margin_y
+    elif position == "bottom":
+        el_x = (width - el_w) // 2
+        el_y = height - margin_y - el_h
+    elif position == "top-left":
+        el_x = margin_x
+        el_y = margin_y
+    elif position == "top-right":
+        el_x = width - margin_x - el_w
+        el_y = margin_y
+    elif position == "bottom-left":
+        el_x = margin_x
+        el_y = height - margin_y - el_h
+    elif position == "bottom-right":
+        el_x = width - margin_x - el_w
+        el_y = height - margin_y - el_h
+    else:
+        el_x = (width - el_w) // 2
+        el_y = (height - el_h) // 2
+
+    scale_chain = f"scale={el_w}:{el_h}"
+    if geometry.zoom > 1.001:
+        scale_chain = (
+            f"crop=iw/{geometry.zoom:.4f}:ih/{geometry.zoom:.4f}:"
+            f"(iw-ow)*{geometry.focal_x:.4f}:(ih-oh)*{geometry.focal_y:.4f},"
+            f"scale={el_w}:{el_h}"
+        )
+
+    delta_x = 0
+    delta_y = 0
+    if has_edge_crop:
+        crop_x = round(el_w * c_left)
+        crop_y = round(el_h * c_top)
+        crop_w = max(16, (round(el_w * (1.0 - c_left - c_right)) // 2) * 2)
+        crop_h = max(16, (round(el_h * (1.0 - c_top - c_bottom)) // 2) * 2)
+        scale_chain = f"{scale_chain},crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+        delta_x = crop_x
+        delta_y = crop_y
+
+    final_x = el_x + delta_x + off_x
+    final_y = el_y + delta_y + off_y
+    return scale_chain, str(final_x), str(final_y)
 
 
 def resolve_audio_source(
@@ -322,12 +539,29 @@ def _composite_overlays(
     desired_aspect = VARIANTS[variant][0]
     total_seconds = probe_duration_ms(base) / 1000
     command = ["ffmpeg", "-y", "-i", str(base)]
-    specs: list[tuple[str, object, Path, TimelineVariantGeometry]] = []
+    specs: list[tuple[str, object, Path, TimelineVariantGeometry, float]] = []
+    audio_specs: list[tuple[int, object, Path]] = []
+
+    for overlay in getattr(document, "video_overlays", []) or []:
+        geometry = _video_overlay_geometry(overlay, variant)
+        media = resolve_source(overlay.source, project, db, desired_aspect, geometry)
+        if not media.native and variant not in overlay.variant:
+            geometry = geometry.model_copy(update={"fit": "cover", "zoom": 1})
+        if media.is_clip:
+            command.extend(["-i", str(media.path)])
+            input_idx = 1 + len(specs)
+            specs.append(("video", overlay, media.path, geometry, media.color_boost_strength))
+            if (not getattr(overlay, "mute_audio", False)) and getattr(overlay, "volume", 1.0) > 0 and _has_audio(media.path):
+                audio_specs.append((input_idx, overlay, media.path))
+        else:
+            command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
+            specs.append(("image", overlay, media.path, geometry, 0.0))
+
     for overlay in document.image_overlays:
         geometry = _geometry(overlay, variant)
         media = resolve_source(overlay.source, project, db, desired_aspect, geometry)
         command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
-        specs.append(("image", overlay, media.path, geometry))
+        specs.append(("image", overlay, media.path, geometry, 0.0))
     for index, overlay in enumerate(document.text_overlays):
         geometry = _geometry(overlay, variant)
         rendered = workspace / f"text-{index:04d}.png"
@@ -336,9 +570,8 @@ def _composite_overlays(
             overlay.background, geometry.position, overlay.presentation == "full-frame",
         )
         command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(rendered)])
-        specs.append(("text", overlay, rendered, geometry))
+        specs.append(("text", overlay, rendered, geometry, 0.0))
 
-    audio_specs: list[tuple[int, object, Path]] = []
     next_input_index = 1 + len(specs)
     for overlay in getattr(document, "audio_overlays", []) or []:
         if getattr(overlay, "mute_audio", False) or getattr(overlay, "volume", 1.0) <= 0:
@@ -356,20 +589,55 @@ def _composite_overlays(
 
     filters = ["[0:v]setpts=PTS-STARTPTS[v0]"]
     current = "v0"
-    for index, (kind, overlay, _path, geometry) in enumerate(specs, start=1):
+    for index, (kind, overlay, _path, geometry, boost_strength) in enumerate(specs, start=1):
         prepared = f"o{index}"
+        start = overlay.start_ms / 1000
+        end = (overlay.start_ms + overlay.duration_ms) / 1000
+        dur = max(0.1, overlay.duration_ms / 1000)
+        if kind == "video":
+            trim_start = max(0.0, getattr(overlay, "source_in_ms", 0) / 1000)
+            opacity = getattr(overlay, "opacity", 1.0)
+            scale_chain, x, y = _compute_overlay_layout(geometry, _path, width, height, is_video_layer=True)
+            boost_chain = _color_boost_ffmpeg_filter(boost_strength)
+            lut_chain = build_lut_ffmpeg_filter(
+                getattr(geometry, "lut", "none"),
+                float(getattr(geometry, "lut_strength", 1.0) or 1.0),
+            )
+            alpha_chain = f",format=rgba,colorchannelmixer=aa={opacity}" if opacity < 0.999 else ",format=rgba"
+            filters.append(
+                f"[{index}:v]trim=start={trim_start}:duration={dur},setpts=PTS-STARTPTS,"
+                f"{scale_chain}{boost_chain}{lut_chain},setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={dur},"
+                f"trim=duration={dur},setpts=PTS-STARTPTS+{start}/TB{alpha_chain}[{prepared}]"
+            )
+            next_label = f"v{index}"
+            filters.append(
+                f"[{current}][{prepared}]overlay={x}:{y}:eof_action=pass:enable='between(t,{start},{end})'[{next_label}]"
+            )
+            current = next_label
+            continue
         if kind == "image":
-            target_width = max(32, round(width * 0.3 * geometry.scale))
-            filters.append(f"[{index}:v]scale={target_width}:-2,format=rgba,colorchannelmixer=aa={overlay.opacity}[{prepared}]")
-            x, y = _overlay_position(geometry.position, width, height, target_width)
+            opacity = getattr(overlay, "opacity", 1.0)
+            scale_chain, x, y = _compute_overlay_layout(geometry, _path, width, height, is_video_layer=False)
+            lut_chain = build_lut_ffmpeg_filter(
+                getattr(geometry, "lut", "none"),
+                float(getattr(geometry, "lut_strength", 1.0) or 1.0),
+            )
+            alpha_chain = f",format=rgba,colorchannelmixer=aa={opacity}" if opacity < 0.999 else ",format=rgba"
+            filters.append(
+                f"[{index}:v]{scale_chain}{lut_chain},setsar=1,fps=30{alpha_chain}[{prepared}]"
+            )
+            next_label = f"v{index}"
+            filters.append(
+                f"[{current}][{prepared}]overlay={x}:{y}:enable='between(t,{start},{end})'[{next_label}]"
+            )
+            current = next_label
+            continue
         else:
             filters.append(f"[{index}:v]scale={width}:{height},format=rgba[{prepared}]")
             x, y = "0", "0"
-        next_label = f"v{index}"
-        start = overlay.start_ms / 1000
-        end = (overlay.start_ms + overlay.duration_ms) / 1000
-        filters.append(f"[{current}][{prepared}]overlay={x}:{y}:enable='between(t,{start},{end})'[{next_label}]")
-        current = next_label
+            next_label = f"v{index}"
+            filters.append(f"[{current}][{prepared}]overlay={x}:{y}:enable='between(t,{start},{end})'[{next_label}]")
+            current = next_label
 
     if audio_specs:
         for aud_idx, (input_index, overlay, _audio_path) in enumerate(audio_specs, start=1):
@@ -394,8 +662,8 @@ def _composite_overlays(
         [
             "-filter_complex", ";".join(filters), "-map", f"[{current}]", *audio_map,
             "-t", str(total_seconds),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(destination),
+            *export_encode_args(include_audio_rate=False),
+            str(destination),
         ]
     )
     _run(command)

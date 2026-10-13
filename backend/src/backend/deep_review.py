@@ -22,6 +22,7 @@ from .deep_review_context import (
     validate_report,
 )
 from .deep_review_provider import editorial_response
+from .job_limits import ensure_project_job_capacity
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
 from .models import (
     DeepReviewRun,
@@ -356,6 +357,7 @@ def start_deep_review(
                 detail="A deep review is already running for these script inputs.",
             )
     provider_name = _resolve_deep_review_provider_name(version.project.text_provider)
+    ensure_project_job_capacity(db, version.project_id, "deep_review")
     job = Job(
         project_id=version.project_id,
         episode_id=version.episode_id,
@@ -485,6 +487,7 @@ def start_deep_review_draft(
                 status_code=409,
                 detail="A revision draft is already in progress.",
             )
+    ensure_project_job_capacity(db, version.project_id, "deep_review_draft")
     job = Job(
         project_id=version.project_id,
         episode_id=version.episode_id,
@@ -605,6 +608,10 @@ def _remap_timeline_doc(
         return doc
     remapped = deepcopy(doc)
     for item in remapped.get("primary") or []:
+        source = item.get("source") if isinstance(item, dict) else None
+        if isinstance(source, dict) and source.get("ref_id") in shot_id_map:
+            source["ref_id"] = shot_id_map[source["ref_id"]]
+    for item in remapped.get("video_overlays") or []:
         source = item.get("source") if isinstance(item, dict) else None
         if isinstance(source, dict) and source.get("ref_id") in shot_id_map:
             source["ref_id"] = shot_id_map[source["ref_id"]]

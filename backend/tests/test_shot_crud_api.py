@@ -81,3 +81,37 @@ def test_create_and_delete_shot(tmp_path, monkeypatch) -> None:
         assert [s.order_index for s in shots_after_del] == [0, 1, 2]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_read_shot_endpoint(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'read_shot.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+
+    project = Project(title="Read Shot Test", status="shot_plan")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="SCENE 1")
+    shot = Shot(scene=scene, order_index=0, title="Shot 1", action="Action 1", image_prompt="Prompt 1")
+    session.add(project)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+
+    try:
+        res = client.get(f"/api/shots/{shot.id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["id"] == shot.id
+        assert data["title"] == "Shot 1"
+        assert "takes" in data
+        assert isinstance(data["takes"], list)
+
+        res_404 = client.get("/api/shots/non-existent-shot-id")
+        assert res_404.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+

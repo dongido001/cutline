@@ -5,7 +5,7 @@ import { Activity, Bot, Clapperboard, Command, Film, MessageSquareText, Moon, Re
 import { UiBadge, UiButton, UiCard, UiDialog, UiIconButton, UiInput, UiTooltip } from '@/components/ui'
 import { useStudioStore } from '@/stores/studio'
 import { initTheme, setTheme, type ThemeMode } from '@/lib/theme'
-import { api } from '@/lib/api'
+import { api, DEFAULT_FLOW_PRESETS } from '@/lib/api'
 
 const router = useRouter()
 const store = useStudioStore()
@@ -75,6 +75,7 @@ async function refreshProviders() {
 }
 
 const resettingFlow = ref(false)
+const switchingFlowModel = ref(false)
 const flowSyncMessage = ref('')
 
 async function resetFlowSession() {
@@ -88,6 +89,20 @@ async function resetFlowSession() {
     flowSyncMessage.value = err?.message || 'Failed to sync Flow account'
   } finally {
     resettingFlow.value = false
+  }
+}
+
+async function selectFlowModel(presetId: string) {
+  if (!presetId || switchingFlowModel.value) return
+  switchingFlowModel.value = true
+  flowSyncMessage.value = ''
+  try {
+    store.videoProvider = await api.setFlowVideoModel(presetId)
+    flowSyncMessage.value = `Switched video model to ${store.videoProvider.model}`
+  } catch (err: any) {
+    flowSyncMessage.value = err?.message || 'Failed to switch video model'
+  } finally {
+    switchingFlowModel.value = false
   }
 }
 
@@ -199,6 +214,20 @@ onUnmounted(() => {
         </UiButton>
       </div>
       <UiCard v-if="store.videoProvider" class="video-provider-setting provider-setting-card"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ flowSyncMessage || store.videoProvider.detail }}</small></div><UiBadge :tone="store.videoProvider.available ? 'success' : store.videoProvider.configured ? 'danger' : 'neutral'">{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+      <div v-if="store.videoProvider" class="flow-model-presets">
+        <button
+          v-for="preset in (store.videoProvider.presets?.length ? store.videoProvider.presets : DEFAULT_FLOW_PRESETS)"
+          :key="preset.id"
+          type="button"
+          class="flow-model-preset-btn"
+          :class="{ active: (store.videoProvider.active_preset || 'veo_lite') === preset.id }"
+          :disabled="switchingFlowModel"
+          @click="selectFlowModel(preset.id)"
+        >
+          <strong>{{ preset.label }}</strong>
+          <small>{{ preset.credit_note }}</small>
+        </button>
+      </div>
       <p v-else class="settings-empty">Video provider status is unavailable.</p>
     </UiDialog>
   </div>
@@ -259,4 +288,47 @@ onUnmounted(() => {
     opacity: 0.85;
   }
 }
+
+.flow-model-presets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.flow-model-preset-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--workspace-border, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.flow-model-preset-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.flow-model-preset-btn.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.55);
+}
+
+.flow-model-preset-btn strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.flow-model-preset-btn small {
+  font-size: 11px;
+  opacity: 0.72;
+}
 </style>
+

@@ -211,3 +211,112 @@ def test_match_character_ids_recognizes_ensemble_and_troop_aliases() -> None:
     )
 
     assert matched == ["1", "2"]
+
+
+def test_parse_explicit_cast_line() -> None:
+    from backend.screenplay_parser import parse_explicit_cast_names
+
+    assert parse_explicit_cast_names("Daniel, Chuka") == ["Daniel", "Chuka"]
+    assert parse_explicit_cast_names("Maya and Gabe") == ["Maya", "Gabe"]
+    assert parse_explicit_cast_names("Rosa & Mateo") == ["Rosa", "Mateo"]
+    assert parse_explicit_cast_names("None") == []
+    assert parse_explicit_cast_names("none.") == []
+    assert parse_explicit_cast_names("N/A") == []
+
+
+def test_sync_project_cast_respects_explicit_cast_with_fallback() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from backend.database import Base
+
+    script_with_cast = """TEST CAST SHOW
+
+Genre: Drama
+Duration: 18 seconds
+Format: 3 shots x 6 seconds
+Aspect ratio: 9:16
+
+Character consistency
+
+DANIEL — 34-year-old Nigerian man.
+AMARA — 27-year-old Nigerian woman.
+CHUKA — 36-year-old Nigerian man.
+
+Location: Lagos, Nigeria.
+
+SHOT 1 - EXPLICIT CAST
+Scene: MANSION
+Time: 00:00-00:06
+Framing: Medium
+Cast: Daniel
+
+Action:
+Daniel talks about Amara and Chuka.
+
+DANIEL:
+"Amara is not here."
+
+Sound: Room tone.
+Image prompt: Daniel alone.
+Video prompt: Daniel speaks.
+
+SHOT 2 - NO ONE PRESENT
+Scene: EMPTY ROAD
+Time: 00:06-00:12
+Framing: Wide
+Cast: None
+
+Action:
+The road Daniel and Amara usually walk along is deserted.
+
+Sound: Wind.
+Image prompt: Empty road.
+Video prompt: Wind blowing.
+
+SHOT 3 - FALLBACK AUTOMATIC
+Scene: MARKET
+Time: 00:12-00:18
+Framing: Close-up
+
+Action:
+Amara looks around.
+
+AMARA:
+"Hello?"
+
+Sound: Market buzz.
+Image prompt: Amara looking.
+Video prompt: Amara looks.
+"""
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    try:
+        project = Project(title="Cast test", status="review")
+        version = ScriptVersion(project=project, source_text=script_with_cast, status="review")
+        scene = Scene(script_version=version, order_index=0, title="MANSION")
+        shot1 = Shot(scene=scene, order_index=0, title="EXPLICIT CAST", action="Daniel talks about Amara and Chuka.")
+        shot2 = Shot(scene=scene, order_index=1, title="NO ONE PRESENT", action="The road Daniel and Amara usually walk along is deserted.")
+        shot3 = Shot(scene=scene, order_index=2, title="FALLBACK AUTOMATIC", action="Amara looks around.", dialogue=[{"character": "AMARA", "text": "Hello?"}])
+        session.add(project)
+        session.commit()
+
+        characters = sync_project_cast(project, session, source_text=script_with_cast, tag_shots=True)
+        session.commit()
+        session.refresh(shot1)
+        session.refresh(shot2)
+        session.refresh(shot3)
+
+        by_name = {c.name: c.id for c in characters}
+
+        # Shot 1 has Cast: Daniel -> only Daniel is tagged (Amara and Chuka ignored despite mentions in action)
+        assert shot1.character_ids == [by_name["DANIEL"]]
+
+        # Shot 2 has Cast: None -> no characters tagged despite mentions in action
+        assert shot2.character_ids == []
+
+        # Shot 3 has no Cast line -> falls back to automatic detection (Amara tagged from action/dialogue)
+        assert shot3.character_ids == [by_name["AMARA"]]
+    finally:
+        session.close()

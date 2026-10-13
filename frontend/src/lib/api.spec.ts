@@ -21,6 +21,10 @@ describe('image generation API', () => {
         refresh_continuity: true,
         image_reference_id: 'reference-2',
         use_default_image_reference: false,
+        both_aspects: false,
+        generate_video: false,
+        include_cast_references: false,
+        chatgpt_dual: false,
       }),
     })
   })
@@ -42,6 +46,35 @@ describe('image generation API', () => {
         refresh_continuity: false,
         image_reference_id: null,
         use_default_image_reference: false,
+        both_aspects: false,
+        generate_video: false,
+        include_cast_references: false,
+        chatgpt_dual: false,
+      }),
+    })
+  })
+
+  it('sends chatgpt_dual flag when chatgptDual is requested', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'job-3' }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.generateShotImage('shot-3', '16:9', [], false, null, false, { chatgptDual: true })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/shots/shot-3/image/generate?aspect_ratio=16%3A9', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        character_ids: [],
+        refresh_continuity: false,
+        image_reference_id: null,
+        use_default_image_reference: false,
+        both_aspects: false,
+        generate_video: false,
+        include_cast_references: false,
+        chatgpt_dual: true,
       }),
     })
   })

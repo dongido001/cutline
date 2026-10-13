@@ -224,3 +224,33 @@ def test_phone_call_offscreen_caller_voice_and_lipsync_lock():
     assert effective_prompt.count("The chairman overrode your hold. He wants the Santos purchase offer delivered today.") == 1
 
 
+def test_vocative_phone_address_does_not_create_offscreen_caller(tmp_path, monkeypatch) -> None:
+    from backend.models import Character, Project, Scene, ScriptVersion, Shot
+    from backend.continuity import current_shot_snapshot, video_continuity_prompt
+
+    project = Project(title="Vocative phone test", aspect_ratio="16:9")
+    gabe = Character(id="char-gabe", project=project, name="GABE", voice_description="Steady baritone")
+    rosa = Character(id="char-rosa", project=project, name="ROSA", voice_description="Gentle Filipina")
+    isabel = Character(id="char-isabel", project=project, name="ISABEL", voice_description="Clear phone voice")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="THE DECISION", location="Roadside", time_of_day="Late afternoon")
+    shot = Shot(
+        scene=scene,
+        order_index=0,
+        title="SEND A CAR",
+        framing="Medium Gabe-Rosa two-shot",
+        action="Gabe holds phone to ear. Rosa watches silently.",
+        dialogue=[{"character": "GABE", "text": "Isabel, send a car to San Aurelio. I'm coming to see my father."}],
+        sound="Gabe's dialogue, coastal ambience.",
+        video_prompt='Gabe says, "Isabel, send a car to San Aurelio. I\'m coming to see my father." Rosa watches silently.',
+        character_ids=[gabe.id, rosa.id],
+    )
+
+    snapshot = current_shot_snapshot(shot, "16:9")
+    continuity_prompt = video_continuity_prompt(snapshot, shot.video_prompt, "16:9", shot=shot)
+
+    assert "ISABEL (off-screen phone caller" not in continuity_prompt
+    assert "Lip-sync lock: ISABEL" not in continuity_prompt
+    assert "Silent character lock: ROSA's lips and jaw MUST remain completely closed and motionless at all times — do NOT lip-sync ROSA to any speech or audio." in continuity_prompt
+
+

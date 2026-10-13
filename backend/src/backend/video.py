@@ -83,21 +83,158 @@ def comfyui_status() -> tuple[bool, bool, str]:
     return configured, available, detail
 
 
+FLOWKIT_MODEL_PRESETS: list[dict[str, str]] = [
+    {
+        "id": "veo_lite",
+        "label": "Veo 3.1 Lite · Standard",
+        "short_label": "Veo Lite · Standard (Low credits)",
+        "model_family": "veo",
+        "flow_model_key": "veo_3_1_i2v_lite",
+        "credit_note": "Works on Free/Pro accounts · lowest credit cost",
+    },
+    {
+        "id": "omni_flash",
+        "label": "Gemini Omni 1.1 Flash",
+        "short_label": "Omni 1.1 Flash (4–10s)",
+        "model_family": "omni_flash",
+        "flow_model_key": "abra_i2v_*",
+        "credit_note": "Works on Free/Pro accounts · ~10–20 credits/clip",
+    },
+    {
+        "id": "veo_lite_relaxed",
+        "label": "Veo 3.1 Lite · Relaxed (0 credits · Ultra only)",
+        "short_label": "Veo Lite · 0 Credits (Ultra sub only)",
+        "model_family": "veo",
+        "flow_model_key": "veo_3_1_i2v_lite_low_priority",
+        "credit_note": "Requires paid Google AI Ultra subscription",
+    },
+    {
+        "id": "veo_fast",
+        "label": "Veo 3.1 Fast · Ultra",
+        "short_label": "Veo Fast · Ultra",
+        "model_family": "veo",
+        "flow_model_key": "veo_3_1_i2v_s_fast_ultra",
+        "credit_note": "Fastest Veo queue · uses credits",
+    },
+]
+
+
+def _flowkit_host() -> str:
+    base_url = settings.flowkit_base_url.rstrip("/")
+    if base_url.endswith("/api/flow"):
+        return base_url[: -len("/api/flow")]
+    return base_url
+
+
+def get_active_flowkit_preset() -> dict[str, str]:
+    preset_by_id = {item["id"]: item for item in FLOWKIT_MODEL_PRESETS}
+    state_file = settings.data_dir / "flowkit_model.json"
+    if state_file.is_file():
+        try:
+            saved = json.loads(state_file.read_text())
+            preset_id = str(saved.get("preset") or "").strip()
+            if preset_id in preset_by_id:
+                return dict(preset_by_id[preset_id])
+        except Exception:
+            pass
+    family = (settings.flowkit_model_family or "veo").strip().lower()
+    if family == "omni_flash":
+        return dict(preset_by_id["omni_flash"])
+    return dict(preset_by_id["veo_lite"])
+
+
+def _sync_flowkit_veo_model_key(flow_model_key: str) -> None:
+    host = _flowkit_host()
+    if not host or "flowkit.test" in host:
+        return
+    tier_block = {
+        "frame_2_video": {
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": flow_model_key,
+            "VIDEO_ASPECT_RATIO_PORTRAIT": flow_model_key,
+        },
+        "start_end_frame_2_video": {
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": flow_model_key,
+            "VIDEO_ASPECT_RATIO_PORTRAIT": flow_model_key,
+        },
+    }
+    try:
+        httpx.patch(
+            f"{host}/api/models",
+            json={
+                "video_models": {
+                    "PAYGATE_TIER_TWO": tier_block,
+                    "PAYGATE_TIER_ONE": tier_block,
+                }
+            },
+            timeout=3.0,
+        )
+    except Exception:
+        pass
+
+
+def set_flowkit_model_preset(preset_id: str) -> dict[str, str]:
+    normalized = (preset_id or "").strip().lower()
+    if normalized == "veo":
+        normalized = "veo_lite"
+    preset_by_id = {item["id"]: item for item in FLOWKIT_MODEL_PRESETS}
+    if normalized not in preset_by_id:
+        raise ValueError(f"Unsupported FlowKit model preset: {preset_id}")
+    preset = dict(preset_by_id[normalized])
+    settings.flowkit_model_family = preset["model_family"]
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "flowkit_model.json").write_text(
+            json.dumps(
+                {
+                    "preset": preset["id"],
+                    "model_family": preset["model_family"],
+                    "flow_model_key": preset["flow_model_key"],
+                },
+                indent=2,
+            )
+        )
+    except Exception:
+        pass
+    from .settings import BACKEND_ROOT
+
+    env_path = BACKEND_ROOT / ".env"
+    if env_path.is_file():
+        try:
+            lines = env_path.read_text().splitlines()
+            updated_lines: list[str] = []
+            found = False
+            for line in lines:
+                if line.strip().startswith("MOVIE_FLOWKIT_MODEL_FAMILY="):
+                    updated_lines.append(f"MOVIE_FLOWKIT_MODEL_FAMILY={preset['model_family']}")
+                    found = True
+                else:
+                    updated_lines.append(line)
+            if not found:
+                updated_lines.append(f"MOVIE_FLOWKIT_MODEL_FAMILY={preset['model_family']}")
+            env_path.write_text("\n".join(updated_lines) + "\n")
+        except Exception:
+            pass
+    if preset["model_family"] == "veo":
+        _sync_flowkit_veo_model_key(preset["flow_model_key"])
+    return preset
+
+
 def flowkit_status() -> tuple[bool, bool, str]:
     base_url = settings.flowkit_base_url.rstrip("/")
     configured = bool(base_url)
     if not configured:
         return False, False, "FlowKit URL is not configured"
+    preset = get_active_flowkit_preset()
     try:
         response = httpx.get(f"{base_url}/status", timeout=2)
         response.raise_for_status()
     except Exception as exc:
         return True, False, f"FlowKit unavailable: {exc}"
-    return True, True, "Ready for Google Flow video generation through FlowKit"
+    return True, True, f"{preset['label']} · {preset['credit_note']}"
 
 
 def generate_flowkit_clip(
-    image_path: Path,
+    image_path: Path | None,
     prompt: str,
     duration_ms: int,
     aspect_ratio: str,
@@ -105,9 +242,21 @@ def generate_flowkit_clip(
     flow_project_id: str | None = None,
     on_flow_project_id: Any = None,
     reference_image_paths: list[Path] | None = None,
+    video_mode: str = "i2v",
 ) -> tuple[str, str, str]:
     if not scene_id:
         raise RuntimeError("FlowKit video generation requires a scene_id")
+
+    is_r2v = (video_mode or "i2v").strip().lower() == "r2v" or image_path is None
+    valid_refs = [p for p in (reference_image_paths or []) if p and p.is_file()]
+    if image_path is not None and image_path.is_file():
+        primary_path = image_path
+        extra_paths = [p for p in valid_refs if p != primary_path][: (6 if is_r2v else 2)]
+    elif valid_refs:
+        primary_path = valid_refs[0]
+        extra_paths = valid_refs[1:7]
+    else:
+        raise RuntimeError("At least one reference image or opening frame is required for video generation")
 
     base_url = settings.flowkit_base_url.rstrip("/")
     flow_aspect_ratio = (
@@ -115,13 +264,21 @@ def generate_flowkit_clip(
         if aspect_ratio == "9:16"
         else "VIDEO_ASPECT_RATIO_LANDSCAPE"
     )
+    active_preset = get_active_flowkit_preset()
+    active_model_family = (
+        "omni_flash"
+        if is_r2v
+        else (active_preset.get("model_family") or settings.flowkit_model_family or "veo").strip().lower()
+    )
+    if active_model_family == "veo":
+        _sync_flowkit_veo_model_key(active_preset.get("flow_model_key") or "veo_3_1_i2v_lite")
     requested_duration_s = max(1, round(duration_ms / 1000))
-    if (settings.flowkit_model_family or "veo").strip().lower() == "omni_flash":
+    if active_model_family == "omni_flash":
         duration_s = min((4, 6, 8, 10), key=lambda value: (abs(value - requested_duration_s), value))
     else:
         duration_s = requested_duration_s
-    mime_type = mimetypes.guess_type(image_path.name)[0] or "image/png"
-    image_base64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    mime_type = mimetypes.guess_type(primary_path.name)[0] or "image/png"
+    image_base64 = base64.b64encode(primary_path.read_bytes()).decode("ascii")
     initial_project_id = (flow_project_id or "").strip() or settings.flowkit_project_id
 
     with httpx.Client(timeout=settings.flowkit_timeout_seconds) as client:
@@ -130,7 +287,7 @@ def generate_flowkit_clip(
             json={
                 "image_base64": image_base64,
                 "mime_type": mime_type,
-                "file_name": image_path.name,
+                "file_name": primary_path.name,
                 "project_id": initial_project_id,
             },
         )
@@ -145,7 +302,7 @@ def generate_flowkit_clip(
                 json={
                     "image_base64": image_base64,
                     "mime_type": mime_type,
-                    "file_name": image_path.name,
+                    "file_name": primary_path.name,
                     "project_id": "",
                 },
             )
@@ -157,9 +314,7 @@ def generate_flowkit_clip(
             raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded}")
 
         extra_media_ids: list[str] = []
-        for ref_path in (reference_image_paths or [])[:2]:
-            if not ref_path or not ref_path.is_file():
-                continue
+        for ref_path in extra_paths:
             ref_mime = mimetypes.guess_type(ref_path.name)[0] or "image/png"
             ref_b64 = base64.b64encode(ref_path.read_bytes()).decode("ascii")
             ref_payload = {
@@ -185,6 +340,8 @@ def generate_flowkit_clip(
                 extra_media_ids.append(str(ref_media_id))
 
         attempt_extra_sets: list[list[str]] = [extra_media_ids]
+        if len(extra_media_ids) > 2:
+            attempt_extra_sets.append(extra_media_ids[:2])
         if len(extra_media_ids) > 1:
             attempt_extra_sets.append(extra_media_ids[:1])
         if extra_media_ids:
@@ -193,16 +350,22 @@ def generate_flowkit_clip(
         deadline = time.monotonic() + settings.flowkit_timeout_seconds
         for attempt_idx, current_extra_ids in enumerate(attempt_extra_sets):
             has_fallback = attempt_idx + 1 < len(attempt_extra_sets)
-            if current_extra_ids:
+            if is_r2v or current_extra_ids:
+                r2v_family = "omni_flash" if is_r2v else active_model_family
+                r2v_dur = (
+                    min((4, 6, 8, 10), key=lambda value: (abs(value - requested_duration_s), value))
+                    if r2v_family == "omni_flash"
+                    else duration_s
+                )
                 payload = {
                     "reference_media_ids": [media_id, *current_extra_ids],
                     "prompt": prompt,
                     "project_id": project_id,
                     "scene_id": scene_id,
-                    "duration_s": duration_s,
+                    "duration_s": r2v_dur,
                     "resolution": "720p",
                     "aspect_ratio": flow_aspect_ratio,
-                    "model_family": settings.flowkit_model_family,
+                    "model_family": r2v_family,
                 }
                 submit = client.post(f"{base_url}/generate-video-refs", json=payload)
             else:
@@ -214,22 +377,82 @@ def generate_flowkit_clip(
                     "duration_s": duration_s,
                     "resolution": "720p",
                     "aspect_ratio": flow_aspect_ratio,
-                    "model_family": settings.flowkit_model_family,
+                    "model_family": active_model_family,
                 }
                 submit = client.post(f"{base_url}/generate-video", json=payload)
             try:
                 submit.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 err_text = submit.text
-                if "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
+                if "PUBLIC_ERROR_MODEL_ACCESS_DENIED" in err_text:
+                    # 0-credit Relaxed mode (veo_3_1_i2v_lite_low_priority) requires Google AI Ultra.
+                    # Try standard Veo Lite first, then 4s Omni Flash in case the account has a few credits left.
+                    recovered = False
+                    for fallback_family, fallback_key, fallback_dur in (
+                        ("veo", "veo_3_1_i2v_lite", requested_duration_s),
+                        ("omni_flash", "", 4),
+                    ):
+                        if fallback_key:
+                            _sync_flowkit_veo_model_key(fallback_key)
+                        retry_payload = {
+                            "start_image_media_id": media_id,
+                            "prompt": prompt,
+                            "project_id": project_id,
+                            "scene_id": scene_id,
+                            "duration_s": fallback_dur,
+                            "resolution": "720p",
+                            "aspect_ratio": flow_aspect_ratio,
+                            "model_family": fallback_family,
+                        }
+                        retry_res = client.post(f"{base_url}/generate-video", json=retry_payload)
+                        if retry_res.is_success:
+                            submit = retry_res
+                            recovered = True
+                            break
+                        err_text = retry_res.text
+                    if not recovered:
+                        if "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
+                            raise RuntimeError(
+                                "Out of Google Flow credits on this account, and 0-credit Relaxed mode requires a paid Google AI Ultra subscription. Switch to another Google account at flow.google.com and click 'Sync Flow'."
+                            ) from exc
+                        raise RuntimeError(
+                            "This Google account does not have access to 0-credit Relaxed mode (requires Google AI Ultra subscription). Switch to 'Omni 1.1 Flash' or switch to a Google account with available credits and click 'Sync Flow'."
+                        ) from exc
+                elif "PUBLIC_ERROR_USER_QUOTA_REACHED" in err_text:
+                    if active_model_family != "veo":
+                        active_model_family = "veo"
+                        _sync_flowkit_veo_model_key("veo_3_1_i2v_lite_low_priority")
+                        fallback_payload = {
+                            "start_image_media_id": media_id,
+                            "prompt": prompt,
+                            "project_id": project_id,
+                            "scene_id": scene_id,
+                            "duration_s": requested_duration_s,
+                            "resolution": "720p",
+                            "aspect_ratio": flow_aspect_ratio,
+                            "model_family": "veo",
+                        }
+                        submit = client.post(f"{base_url}/generate-video", json=fallback_payload)
+                        try:
+                            submit.raise_for_status()
+                        except httpx.HTTPStatusError as fallback_exc:
+                            raise RuntimeError(
+                                "Out of Google Flow credits on this account (and 0-credit Relaxed mode requires a Google AI Ultra subscription). Switch to another Google account at flow.google.com and click 'Sync Flow'."
+                            ) from fallback_exc
+                    else:
+                        raise RuntimeError(
+                            "Out of Google Flow credits on this account. Switch to another Google account at flow.google.com and click 'Sync Flow', or wait for your credits to reset."
+                        ) from exc
+                elif "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in err_text or "unusual activity" in err_text.lower():
                     raise RuntimeError(
-                        "Google Flow video quota reached for this account. Please wait for the daily quota to reset, switch accounts on flow.google.com, or switch provider to Runway."
+                        "Google Flow blocked the video request (PUBLIC_ERROR_UNUSUAL_ACTIVITY — stale reCAPTCHA token or anti-abuse cooldown on the active Flow browser tab). Refresh your flow.google.com tab in Chrome, wait ~30–60s, or click 'Sync Flow' and retry."
                     ) from exc
-                if has_fallback:
+                elif has_fallback:
                     continue
-                raise RuntimeError(
-                    f"FlowKit video generation failed ({submit.status_code}): {err_text}"
-                ) from exc
+                else:
+                    raise RuntimeError(
+                        f"FlowKit video generation failed ({submit.status_code}): {err_text}"
+                    ) from exc
             submitted = submit.json()
 
             polling = submitted.get("flowkitPolling") or {}
@@ -370,7 +593,7 @@ def clip_source_image(shot, aspect_ratio: str):
 
 
 def generate_shot_clip(
-    image_path: Path,
+    image_path: Path | None,
     prompt: str,
     duration_ms: int,
     aspect_ratio: str,
@@ -378,10 +601,50 @@ def generate_shot_clip(
     flow_project_id: str | None = None,
     on_flow_project_id: Any = None,
     reference_image_paths: list[Path] | None = None,
+    video_mode: str = "i2v",
+) -> tuple[str, str, str]:
+    dispatch_kwargs: dict[str, Any] = {
+        "scene_id": scene_id,
+        "flow_project_id": flow_project_id,
+        "on_flow_project_id": on_flow_project_id,
+        "reference_image_paths": reference_image_paths,
+    }
+    if video_mode and video_mode != "i2v":
+        dispatch_kwargs["video_mode"] = video_mode
+    result = _dispatch_clip(
+        image_path,
+        prompt,
+        duration_ms,
+        aspect_ratio,
+        **dispatch_kwargs,
+    )
+    filename, mime_type, _provider = result
+    if mime_type == "video/mp4":
+        from .clip_postprocess import postprocess_clip
+
+        postprocess_clip(settings.media_dir / filename)
+    return result
+
+
+def _dispatch_clip(
+    image_path: Path | None,
+    prompt: str,
+    duration_ms: int,
+    aspect_ratio: str,
+    scene_id: str | None = None,
+    flow_project_id: str | None = None,
+    on_flow_project_id: Any = None,
+    reference_image_paths: list[Path] | None = None,
+    video_mode: str = "i2v",
 ) -> tuple[str, str, str]:
     provider = (settings.video_provider or "runway").strip().lower()
     if provider == "flowkit":
-        if flow_project_id is None and on_flow_project_id is None and not reference_image_paths:
+        if (
+            flow_project_id is None
+            and on_flow_project_id is None
+            and not reference_image_paths
+            and video_mode == "i2v"
+        ):
             return generate_flowkit_clip(
                 image_path,
                 prompt,
@@ -396,6 +659,8 @@ def generate_shot_clip(
         }
         if reference_image_paths:
             extra_kwargs["reference_image_paths"] = reference_image_paths
+        if video_mode and video_mode != "i2v":
+            extra_kwargs["video_mode"] = video_mode
         return generate_flowkit_clip(
             image_path,
             prompt,
@@ -403,9 +668,13 @@ def generate_shot_clip(
             aspect_ratio,
             **extra_kwargs,
         )
+    fallback_image = image_path or (reference_image_paths[0] if reference_image_paths else None)
+    if fallback_image is None:
+        raise RuntimeError("An opening frame or reference image is required")
     if provider == "runway":
-        return generate_runway_clip(image_path, prompt, duration_ms, aspect_ratio)
-    return generate_comfyui_clip(image_path, prompt, duration_ms, aspect_ratio)
+        return generate_runway_clip(fallback_image, prompt, duration_ms, aspect_ratio)
+    return generate_comfyui_clip(fallback_image, prompt, duration_ms, aspect_ratio)
+
 
 
 
