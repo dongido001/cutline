@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 import httpx
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -154,7 +155,14 @@ def final_asset(
     project: Project,
     variant: str,
     episode_id: str | None = None,
+    compilation_id: str | None = None,
 ) -> PublishAsset | None:
+    if compilation_id:
+        export = next(
+            (item for item in project.variant_exports if item.variant == variant and getattr(item, "compilation_id", None) == compilation_id),
+            None,
+        )
+        return _export_asset(project, variant, export, "compilation")
     # Never publish compilation boxes as an episode/project final cut.
     candidates = [
         item
@@ -171,6 +179,10 @@ def final_asset(
         export = next((item for item in candidates if item.episode_id is None), None)
         if not export:
             export = next(iter(candidates), None)
+    return _export_asset(project, variant, export, "final cut")
+
+
+def _export_asset(project: Project, variant: str, export: Any, kind: str) -> PublishAsset | None:
     if not export:
         return None
     path = settings.media_dir / export.filename
@@ -179,7 +191,7 @@ def final_asset(
     return PublishAsset(
         id=f"final:{variant}",
         scope="final",
-        label=f"{project.title} · {'Shorts' if variant == 'shorts' else 'Landscape'} final cut",
+        label=f"{project.title} · {'Shorts' if variant == 'shorts' else 'Landscape'} {kind}",
         filename=export.filename,
         path=path,
         duration_ms=export.duration_ms,
@@ -236,17 +248,19 @@ def build_publish_plan(
     variant: str,
     db: Session | None = None,
     episode_id: str | None = None,
+    compilation_id: str | None = None,
 ) -> dict[str, Any]:
     if variant not in {"landscape", "shorts"}:
         raise RuntimeError("variant must be landscape or shorts")
-    final = final_asset(project, variant, episode_id=episode_id)
-    shots = shot_assets(project, variant)
+    final = final_asset(project, variant, episode_id=episode_id, compilation_id=compilation_id)
+    # A compilation publishes only its rendered cut; scenes and shots belong to the episodes.
+    shots = [] if compilation_id else shot_assets(project, variant)
     return {
         "variant": variant,
         "aspect_ratio": publish_variant_to_aspect(variant),
         "providers": provider_statuses(db),
         "final": [_asset_dict(final)] if final else [],
-        "scenes": scene_asset_plan(project, variant),
+        "scenes": [] if compilation_id else scene_asset_plan(project, variant),
         "shots": [_asset_dict(item) for item in shots],
     }
 
@@ -321,9 +335,12 @@ def collect_publish_assets(project: Project, payload: dict[str, Any], db: Sessio
     scope = payload["scope"]
     variant = payload["variant"]
     episode_id = payload.get("episode_id")
+    compilation_id = payload.get("compilation_id")
     selected = _selected_ids(payload)
+    if compilation_id and scope != "final":
+        raise RuntimeError("Compilations publish as one final cut")
     if scope == "final":
-        asset = final_asset(project, variant, episode_id=episode_id)
+        asset = final_asset(project, variant, episode_id=episode_id, compilation_id=compilation_id)
         assets = [asset] if asset else []
     elif scope == "shots":
         assets = shot_assets(project, variant)
@@ -345,12 +362,14 @@ def _segment_title(base: str, asset: PublishAsset, index: int, total: int) -> st
 
 def _dry_run_upload(platform: str, asset: PublishAsset, metadata: dict[str, Any]) -> dict[str, Any]:
     slug = uuid.uuid5(uuid.NAMESPACE_URL, f"cutline:{platform}:{asset.filename}:{metadata.get('title')}")
+    thumbnail = metadata.get("thumbnail_path")
     return {
         "platform": platform,
         "status": "completed",
         "external_id": str(slug),
         "external_url": f"https://{platform}.example.local/cutline/{slug}",
-        "message": f"Dry-run published {asset.label} to {PLATFORM_LABELS[platform]}",
+        "message": f"Dry-run published {asset.label} to {PLATFORM_LABELS[platform]}" + (" with cover" if thumbnail else ""),
+        **({"thumbnail": Path(thumbnail).name} if thumbnail else {}),
     }
 
 
@@ -463,15 +482,48 @@ def _youtube_upload(asset: PublishAsset, metadata: dict[str, Any], db: Session |
         upload = client.put(location, headers={"Content-Type": "video/mp4"}, content=asset.path.read_bytes())
         upload.raise_for_status()
         payload = upload.json()
-    video_id = payload.get("id")
+        video_id = payload.get("id")
+        thumbnail_warning = None
+        if video_id and metadata.get("thumbnail_path"):
+            thumbnail_warning = _youtube_set_thumbnail(client, access_token, video_id, Path(metadata["thumbnail_path"]))
+    message = "Published to YouTube"
+    if metadata.get("thumbnail_path"):
+        message += f" (cover not applied: {thumbnail_warning})" if thumbnail_warning else " with cover"
     return {
         "platform": "youtube",
         "status": "completed",
         "external_id": video_id,
         "external_url": f"https://youtu.be/{video_id}" if video_id else None,
-        "message": "Published to YouTube",
+        "message": message,
         "response": payload,
+        **({"thumbnail_warning": thumbnail_warning} if thumbnail_warning else {}),
     }
+
+
+def _youtube_set_thumbnail(client: httpx.Client, access_token: str, video_id: str, path: Path) -> str | None:
+    """Apply a custom thumbnail; returns a warning instead of failing the publish (the video is already up)."""
+    if not path.is_file():
+        return "cover file is missing"
+    try:
+        response = client.post(
+            "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+            params={"videoId": video_id, "uploadType": "media"},
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "image/jpeg"},
+            content=path.read_bytes(),
+        )
+    except httpx.HTTPError as exc:
+        return f"thumbnail upload failed ({exc.__class__.__name__})"
+    if response.is_success:
+        return None
+    try:
+        error = response.json().get("error", {})
+        reason = (error.get("errors") or [{}])[0].get("reason", "")
+        detail = error.get("message") or response.text[:200]
+    except ValueError:
+        reason, detail = "", response.text[:200]
+    if reason == "forbidden" or response.status_code == 403:
+        return f"YouTube refused custom thumbnails; the channel may need phone verification ({detail})"
+    return f"YouTube thumbnail error {response.status_code}: {detail}"
 
 
 def _facebook_upload(asset: PublishAsset, metadata: dict[str, Any], db: Session | None = None) -> dict[str, Any]:
@@ -500,11 +552,15 @@ def _facebook_upload(asset: PublishAsset, metadata: dict[str, Any], db: Session 
     privacy = metadata.get("privacy")
     if privacy:
         data["privacy"] = {"value": {"self": "SELF", "friends": "ALL_FRIENDS", "public": "EVERYONE"}.get(str(privacy), "SELF")}
-    with asset.path.open("rb") as handle:
+    thumbnail = Path(metadata["thumbnail_path"]) if metadata.get("thumbnail_path") else None
+    with ExitStack() as stack:
+        files: dict[str, Any] = {"source": (asset.filename, stack.enter_context(asset.path.open("rb")), "video/mp4")}
+        if thumbnail and thumbnail.is_file():
+            files["thumb"] = (thumbnail.name, stack.enter_context(thumbnail.open("rb")), "image/jpeg")
         response = httpx.post(
             f"https://graph-video.facebook.com/v20.0/{fb_page_id}/videos",
             data=data,
-            files={"source": (asset.filename, handle, "video/mp4")},
+            files=files,
             timeout=httpx.Timeout(900, connect=15),
         )
     response.raise_for_status()
@@ -568,6 +624,8 @@ def publish_assets(assets: Iterable[PublishAsset], payload: dict[str, Any], prog
                 "made_for_kids": bool(payload.get("made_for_kids", False)),
                 "platform_options": (payload.get("platform_options") or {}).get(platform, {}),
             }
+            if payload.get("cover_filename"):
+                metadata["thumbnail_path"] = str(settings.media_dir / payload["cover_filename"])
             if progress:
                 progress(step, total_steps, f"Publishing {asset.label} to {PLATFORM_LABELS[platform]}")
             try:

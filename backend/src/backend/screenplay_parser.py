@@ -7,11 +7,15 @@ from .timing import estimate_dialogue_duration_ms, resolve_shot_duration_ms
 
 
 SHOT_HEADING = re.compile(
-    r"^SHOT\s+(?P<number>\d+)\s*[\u2014\u2013-]\s*(?P<title>.+?)\s*$",
+    r"^(?:#{1,6}\s*)?SHOT\s+(?P<number>\d+)\s*[\u2014\u2013-]\s*(?P<title>.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 FIELD_HEADING = re.compile(
-    r"^(?P<field>Scene|Location|Set|Props|Time of day|Time|Framing|Cast|Characters|Action|Dialogue|(?:Final )?Sound|Image prompt|Video prompt):\s*(?P<value>.*)$",
+    r"^(?:#{1,6}\s*)?(?P<field>Scene|Location|Set|Wardrobe|Lighting|Props|Time of day|Time|Framing|Cast|Characters|Action|Dialogue|(?:Final )?Sound|Image prompt|Video prompt):\s*(?P<value>.*)$",
+    re.IGNORECASE,
+)
+INLINE_FIELD_SPLIT = re.compile(
+    r"(?:^|\s+)(?:#{1,6}\s*)?(?P<field>Scene|Location|Set|Wardrobe|Lighting|Props|Time of day|Time|Framing|Cast|Characters|Action|Dialogue|(?:Final )?Sound|Image prompt|Video prompt):\s*",
     re.IGNORECASE,
 )
 
@@ -261,11 +265,17 @@ def parse_character_consistency(script: str) -> list[dict[str, str]]:
         if role:
             notes = f"({role}) {notes}".strip()
         voice_description = infer_voice_description(name, notes, age=age)
+        visual_notes = re.sub(
+            r"(?:speaking\s+)?voice(?:\s+profile)?\s*:\s*[^\n]+",
+            "",
+            notes,
+            flags=re.IGNORECASE,
+        ).strip(" .,-–—")
         seen.add(name)
         found.append(
             {
                 "name": name,
-                "notes": notes,
+                "notes": visual_notes or notes,
                 "voice_description": voice_description,
             }
         )
@@ -285,6 +295,8 @@ def _is_character_cue(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
+    if re.match(r"^([A-Z][A-Z0-9_ .\-]{0,40}):\s*[\"\'\u201c\u2018].+?[\"\'\u201d\u2019]\s*$", stripped):
+        return True
     if stripped.startswith(OPEN_QUOTES) or (
         not stripped.endswith(":") and stripped.endswith(CLOSE_QUOTES)
     ):
@@ -375,6 +387,17 @@ def _split_dialogue_and_interleaved_action(
                 flush()
             continue
         if _is_none_marker(stripped):
+            continue
+        inline_cue = re.match(
+            r"^([A-Z][A-Z0-9_ .\-]{0,40}):\s*[\"\'\u201c\u2018](.+?)[\"\'\u201d\u2019]\s*$",
+            stripped,
+        )
+        if inline_cue:
+            flush()
+            spk = inline_cue.group(1).strip()
+            txt = _clean_dialogue_text(inline_cue.group(2))
+            if spk and txt and not _is_none_marker(txt):
+                dialogue.append({"character": spk, "text": txt})
             continue
         if _is_character_cue(stripped):
             flush()
@@ -473,7 +496,7 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
     location = location_match.group(1).strip() if location_match else "Unspecified"
 
     set_match = re.search(
-        r"^(?:Set(?: notes)?|Set / location):\s*(.+?)(?=\n\s*(?:Lighting|Wardrobe|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        r"^(?:Set(?: notes)?|Set / location):\s*(.+?)(?=\n\s*(?:Lighting|Wardrobe|Props|Character consistency|(?:#{1,6}\s*)?SHOT\s+\d+|SCENE|$))",
         script,
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
@@ -482,21 +505,21 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         default_set_notes = location
 
     lighting_match = re.search(
-        r"^(?:Lighting(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Wardrobe|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        r"^(?:Lighting(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Wardrobe|Props|Character consistency|(?:#{1,6}\s*)?SHOT\s+\d+|SCENE|$))",
         script,
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
     default_lighting_notes = lighting_match.group(1).strip() if lighting_match else ""
 
     wardrobe_match = re.search(
-        r"^(?:Wardrobe(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Props|Character consistency|SHOT\s+\d+|SCENE|$))",
+        r"^(?:Wardrobe(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Props|Character consistency|(?:#{1,6}\s*)?SHOT\s+\d+|SCENE|$))",
         script,
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
     default_wardrobe_notes = wardrobe_match.group(1).strip() if wardrobe_match else ""
 
     props_match = re.search(
-        r"^(?:Props(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Wardrobe|Character consistency|SHOT\s+\d+|SCENE|$))",
+        r"^(?:Props(?: notes)?):\s*(.+?)(?=\n\s*(?:Set|Lighting|Wardrobe|Character consistency|(?:#{1,6}\s*)?SHOT\s+\d+|SCENE|$))",
         script,
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )
@@ -541,21 +564,26 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         current_field: str | None = None
         for raw_line in block.splitlines():
             line = raw_line.strip()
-            heading = FIELD_HEADING.match(line)
-            if heading:
-                current_field = heading.group("field").lower().replace(" ", "_")
-                if current_field == "final_sound":
-                    current_field = "sound"
-                fields.setdefault(current_field, [])
-                if heading.group("value").strip():
-                    fields[current_field].append(heading.group("value").strip())
+            field_matches = list(INLINE_FIELD_SPLIT.finditer(line))
+            if field_matches and field_matches[0].start() == 0:
+                for i, fm in enumerate(field_matches):
+                    f_start = fm.end()
+                    f_end = field_matches[i + 1].start() if i + 1 < len(field_matches) else len(line)
+                    field_name = fm.group("field").lower().replace(" ", "_")
+                    if field_name == "final_sound":
+                        field_name = "sound"
+                    val = line[f_start:f_end].strip()
+                    fields.setdefault(field_name, [])
+                    if val:
+                        fields[field_name].append(val)
+                    current_field = field_name
             elif re.match(
                 r"^(?:[=\-*_]{4,}|END\s+OF\s+(?:EPISODE|SCRIPT|ACT|PART|SCENE)\b.*|THE\s+END\.?)$",
                 line,
                 re.IGNORECASE,
             ):
                 current_field = None
-            elif current_field is not None:
+            elif current_field is not None and line:
                 fields[current_field].append(line)
 
         time_value = _field_text(fields, "time")
@@ -572,6 +600,10 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
         title = match.group("title").strip()
         scene_title = _field_text(fields, "scene") or film_title
         shot_location = _field_text(fields, "location") or location
+        shot_wardrobe = _field_text(fields, "wardrobe")
+        shot_lighting = _field_text(fields, "lighting")
+        shot_set = _field_text(fields, "set")
+        shot_props = _field_text(fields, "props")
         duration_ms, used_dialogue_estimate = resolve_shot_duration_ms(
             start_ms=start_ms,
             end_ms=end_ms,
@@ -632,6 +664,10 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
                 "dialogue": dialogue,
                 "shots": [shot],
                 "_group_title": scene_title,
+                "set_notes": shot_set or default_set_notes,
+                "lighting_notes": shot_lighting or default_lighting_notes,
+                "wardrobe_notes": shot_wardrobe or default_wardrobe_notes,
+                "props_notes": shot_props or default_props_notes,
             }
         )
 
@@ -695,6 +731,29 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
             _suggestion(0, "timeline", "Timeline does not match declared duration", "The final shot must end at the screenplay's declared duration.", previous_end, declared_duration_ms)
         )
 
+    # Imported lazily: script_checks depends on helpers defined in this module.
+    from .script_checks import script_quality_suggestions
+
+    parsed_characters = parse_character_consistency(script)
+    suggestions.extend(
+        script_quality_suggestions(
+            scenes,
+            parsed_characters,
+            [
+                " ".join(
+                    [
+                        scene["shots"][0].get("title") or "",
+                        scene["shots"][0].get("action") or "",
+                        scene["shots"][0].get("image_prompt") or "",
+                        scene["shots"][0].get("video_prompt") or "",
+                        " ".join(line.get("text", "") for line in scene["shots"][0].get("dialogue") or []),
+                    ]
+                )
+                for scene in scenes
+            ],
+        )
+    )
+
     grouped_scenes: list[dict[str, Any]] = []
     shot_targets: dict[int, tuple[int, int]] = {}
     for source_index, source_scene in enumerate(scenes):
@@ -719,13 +778,31 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
                     "end_ms": source_scene["end_ms"],
                     "action": source_scene["action"],
                     "dialogue": list(source_scene["dialogue"]),
-                    "set_notes": default_set_notes,
-                    "lighting_notes": default_lighting_notes,
-                    "wardrobe_notes": default_wardrobe_notes,
-                    "props_notes": default_props_notes,
+                    "set_notes": source_scene.get("set_notes") or default_set_notes,
+                    "lighting_notes": source_scene.get("lighting_notes") or default_lighting_notes,
+                    "wardrobe_notes": source_scene.get("wardrobe_notes") or default_wardrobe_notes,
+                    "props_notes": source_scene.get("props_notes") or default_props_notes,
                     "shots": [],
                 }
             )
+        else:
+            group = grouped_scenes[-1]
+            if source_scene.get("wardrobe_notes") and source_scene["wardrobe_notes"] != default_wardrobe_notes:
+                group["wardrobe_notes"] = (
+                    f"{group['wardrobe_notes']}\n{source_scene['wardrobe_notes']}".strip()
+                    if group.get("wardrobe_notes")
+                    else source_scene["wardrobe_notes"]
+                )
+            if source_scene.get("lighting_notes") and source_scene["lighting_notes"] != default_lighting_notes:
+                group["lighting_notes"] = source_scene["lighting_notes"]
+            if source_scene.get("set_notes") and source_scene["set_notes"] != default_set_notes:
+                group["set_notes"] = source_scene["set_notes"]
+            if source_scene.get("props_notes") and source_scene["props_notes"] != default_props_notes:
+                group["props_notes"] = (
+                    f"{group['props_notes']}; {source_scene['props_notes']}".strip("; ")
+                    if group.get("props_notes")
+                    else source_scene["props_notes"]
+                )
         group = grouped_scenes[-1]
         shot_index = len(group["shots"])
         shot = source_scene["shots"][0]
@@ -751,6 +828,6 @@ def parse_structured_screenplay(script: str) -> dict[str, Any] | None:
     return {
         "scenes": grouped_scenes,
         "suggestions": suggestions,
-        "characters": parse_character_consistency(script),
+        "characters": parsed_characters,
         "parser": "structured-shot-v2",
     }

@@ -8,6 +8,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   Clapperboard,
   Clock3,
@@ -60,6 +61,7 @@ import CompilationManagerModal from '@/components/CompilationManagerModal.vue'
 
 interface DisplaySuggestion {
   id: string | number
+  category: string
   severity: string
   title: string
   reason: string
@@ -142,67 +144,123 @@ const generateBothAspects = ref(false)
 const previewVideo = ref<HTMLVideoElement | null>(null)
 const storyboardVideo = ref<HTMLVideoElement | null>(null)
 const continuationForm = reactive({ script: '', target_duration_seconds: 30 })
-const SCRIPT_GENERATION_PROMPT = `Create a production-ready AI short-film screenplay.
+const SCRIPT_GENERATION_PROMPT = `Create a production-ready AI short-film screenplay for Cutline.
 
-Requirements:
+Creative brief:
 - Duration: [TOTAL SECONDS] seconds
 - Aspect ratio: [16:9 or 9:16]
 - Genre: [GENRE]
-- Use shots lasting between 2 and 10 seconds.
-- Number every shot consecutively.
-- Timings must be continuous, with no gaps or overlaps.
-- The final shot must end at the declared total duration.
-- Every shot must include framing, cast, visible action, sound, an image prompt, and a video prompt.
-- Explicitly declare "Cast: [Character names separated by commas]" or "Cast: None" for each shot.
-- Give consecutive shots the same compact Scene label when they share a production sequence.
-- Put spoken dialogue under the action using a clean uppercase character cue (e.g. GABE:).
-- Write "Dialogue: None." when nobody speaks.
-- Define Characters, Locations, and Props in the preamble so reference assets are locked across shots.
-- Use uppercase @mentions (e.g. @CHARACTER_NAME, @PROP_NAME, @LOCATION_NAME) in Image prompt, Video prompt, and Action so references lock to them.
-- Image prompts must describe one clear starting frame using @mentions for characters, props, and location.
-- Video prompts must describe camera motion, character movement, expressions, and continuity using @mentions.
-- Return only the screenplay. Do not add explanations or Markdown fences.
+- Visual style: [STYLE]
+- Audience and platform: [AUDIENCE / PLATFORM]
+- Language and accent: [LANGUAGE / ACCENT]
+- Use the story context already supplied. Resolve missing creative choices before writing the final screenplay; do not leave placeholders in the finished script.
 
-Follow this exact structure:
+Story and flow:
+- Build a clear setup, goal or central question, obstacle, escalation, turning point, and payoff appropriate to the genre.
+- Every shot must advance action, reveal information, develop emotion, or provide a meaningful reaction. Avoid repeated exposition and filler.
+- Make dialogue respond naturally to the previous line or action. Allow breathing room for reactions and pauses.
+- Vary framing deliberately while preserving geography, eyelines, screen direction, and cause and effect.
+- Give the opening deliberate visual and sound design and the ending a satisfying payoff.
+
+Import and timing rules:
+- Deliver one episode only. Number every shot consecutively using the exact heading pattern SHOT 1 - Descriptive title.
+- Use shots lasting 2–10 seconds. Vary their lengths to fit the action and performance.
+- Every shot needs an explicit Time: MM:SS-MM:SS range using whole seconds. Start at 00:00, leave no gaps or overlaps, and end exactly at the declared duration.
+- Use Format: [number] shots. The count must match the actual shot blocks.
+- Every shot must include Scene, Location, Time of day, Time, Framing, Cast, Action, Dialogue, Sound, Image prompt, and Video prompt.
+- Use plain field labels, not tables, bullets before labels, or bold formatting.
+- Metadata does not configure the project: the aspect ratio must also be selected in Cutline.
+
+Dialogue and sound:
+- Put authoritative spoken text under Dialogue, with a consistent uppercase character cue and quoted speech. Keep acting directions outside the quoted words.
+- Write Dialogue: None. when nobody speaks; also state No spoken dialogue in that shot's Video prompt.
+- Prefer one speaker per generated shot when practical. Split complicated exchanges into motivated coverage.
+- Cutline estimates English speech at roughly 2.5 words per second plus 0.4 seconds padding, capped at 10 seconds. This is a rough check; manually check long lines and allow time for performance and action.
+- As a writing guideline, allow approximately 8–12 spoken words in a 6-second shot or 12–16 in an 8-second shot when acting needs room. Adjust for delivery and language; do not fill every second with words.
+- If Video prompt repeats dialogue, copy the Dialogue wording exactly and identify its speaker. Do not introduce extra lines in Video prompt or Sound.
+- Sound describes ambience, effects and music direction. Do not duplicate quoted dialogue there.
+- Mark off-screen cues explicitly, for example GABE (O.S.) or GABE (ON PHONE). Describe the source of the voice and the visible listener's silent behavior; keep the speaker in Character consistency.
+- Voice descriptions guide delivery but do not assign a TTS voice or guarantee lip sync. Speech and generated sound depend on the configured provider. Avoid planning duplicate dialogue from both video generation and a separate voice track.
+- Maintain consistent ambience and music direction across connected shots. Continuous music beds, exact sound bridges and separately editable audio tracks require assembly in Cutline; the script does not create them automatically.
+
+Cast, references and props:
+- Declare Cast: [visible character names separated by commas] or Cast: None for every shot. Use plain canonical names without @ in Cast and dialogue cues.
+- Keep character names identical across the character bible, Cast and dialogue. Verify off-screen speaker/cast routing after import.
+- Put each character on one contiguous line under Character consistency:. Put physical identity and age first, wardrobe second, then an explicit Voice: description with accent, register, texture and delivery.
+- Define Location, Set, Lighting, Wardrobe and Props in the preamble. These are continuity instructions; reference assets must still exist and be assigned in Cutline.
+- Optional uppercase @mentions in Action and prompts identify recurring assets; they do not automatically lock references. Keep tags consistent with asset names.
+- For tagged recurring props, use explicit definitions such as @GOLD_PEN is a brushed-gold fountain pen with a black cap. Tagged definitions are filtered to shots mentioning that tag; mention it in each relevant shot. Plain-language prop descriptions are also supported.
+- Mention props in Action and prompts only when they are visible or involved in that shot. Do not add unrelated scene props to the foreground action.
+
+Scene and wardrobe continuity:
+- Give every physical space its own stable Location name, such as COMPOUND_COURTYARD, COMPOUND_PARLOUR or COMPOUND_KITCHEN. Reuse that exact Location across different scenes in the same space; do not use one compound-wide Location for all its rooms.
+- Consecutive shots with identical Scene and Location values are grouped into one production scene. Cutline matches Location to a reusable set reference; each set must have a generated or uploaded reference image.
+- Keep permanent architecture and furniture in the reusable set description. Put time-of-day lighting, temporary dressing and blocking in the scene notes; they must respect the canonical set layout.
+- Set, Lighting, Wardrobe and Props are shared scene notes. Keep these values stable within a group; different shot-level values can overwrite or accumulate across the group.
+- Use a distinct Scene label for a different day, time jump, changed wardrobe, or substantial set/lighting change. Specify the new context with the relevant Set:, Lighting:, Wardrobe: and Props: fields before Action, and repeat essential changes in the prompts.
+- Keep canonical wardrobe through each continuous time span. Do not list several alternative outfits in a single scene's wardrobe instructions.
+- Track screen positions, eyelines, entrances/exits, which hand holds an object, ownership, and object states such as open/closed or full/empty.
+- Describe moment-to-moment prop movement in Action and prompts, not as contradictory changes to shared prop definitions.
+- Each next opening frame must follow the previous ending logically, allowing a motivated change of camera angle. Previous-clip frames can be selected manually in Cutline when the composition is compatible.
+
+Image and video direction:
+- Image prompt describes one still frame at the START of the shot: visible cast, starting poses, relevant prop positions and states, composition, environment, lighting, style and aspect ratio.
+- Video prompt describes what happens AFTER that opening frame: one principal action, manageable supporting movement, performance, camera behavior and a clear end state.
+- Do not show an action completed in the opening image and then ask the video to perform it again. The starting image, Action, Framing and Video prompt must agree.
+- Use one continuous camera setup per clip. Split new angles, locations, time jumps and complex action phases into separate shots.
+- Wide shots emphasize geography and large readable actions; medium shots emphasize interactions/body language; close-ups emphasize a face or a clearly identified object. Match detail to what the framing can show.
+- Prefer concrete positive physical directions, such as neutral expression or hands resting on the counter. Use negative constraints sparingly when essential; No spoken dialogue remains useful for silent shots.
+- Use clip-relative instructions such as during the first two seconds or at the end of the clip. Keep episode timestamps in Time only.
+- Repeat essential identity and style anchors concisely. Avoid contradictory instructions and overloaded prompts.
+- Cutline anchors video to its supplied opening image and adds an instruction against on-screen text, subtitles, UI and location tags. Do not rely on generated readable lettering. Titles, captions, messages and end cards require text overlays during editing; arbitrary script fields do not create these automatically.
+- Actual clip duration, speech, identity and motion still need review and take selection. Do not assume a requested shot length is an exact provider output.
+
+Output:
+- Return only the final screenplay, with no explanations, alternatives or Markdown fences.
+- Before returning it, silently verify shot count, duration arithmetic, continuous timing, speech fit, consistent names, scene grouping, prop states, and opening-frame/action agreement.
+- Follow this exact structure, replacing all placeholders with concrete content:
 
 [FILM TITLE]
 
 Genre: [genre]
 Duration: [number] seconds
-Format: [number] shots x [number] seconds
+Format: [number] shots
 Aspect ratio: [ratio]
+Location: [primary location]
+Set: [architecture, furnishings, background and spatial layout]
+Lighting: [source, direction, quality and color]
+Wardrobe: [one current outfit per character]
+Props: [recurring prop definitions]
 
-Character consistency
-
-[CHARACTER_NAME] — [Describe physical appearance, age, distinctive features, wardrobe, and speaking voice profile.]
-
-Location: [Describe the primary location and visual continuity.]
-Set: [Describe architectural set details, furnishings, and lighting atmosphere.]
-Props: [Semicolon-separated list of recurring hero props with visual descriptions, e.g. Gold fountain pen; Folded settlement document]
+Character consistency:
+[CHARACTER_NAME] — [Physical identity and age.] [Default wardrobe.] Voice: [accent, register, texture and delivery].
 
 SHOT 1 - [SHOT TITLE]
 
 Scene: [COMPACT SCENE LABEL]
 Location: [SHOT LOCATION]
+Time of day: [Morning / Afternoon / Evening / Night]
 Time: 00:00-00:06
-Framing: [framing]
-Cast: [Character names separated by commas, or "None"]
+Framing: [shot size, angle and relevant screen positions]
+Cast: [plain character names separated by commas, or None]
 
 Action:
-[Visible action during this shot. Reference @CHARACTER_NAME and @PROP_NAME when interacting.]
+[Concrete visible action and meaningful change.]
 
+Dialogue:
 [CHARACTER_NAME]:
-"[Dialogue]"
+"[Exact spoken words.]"
 
-Sound: [Ambient sound, speech, music, and sound effects.]
+Sound:
+[Ambience, effects and music direction.]
 
 Image prompt:
-[Describe the starting frame featuring @CHARACTER_NAME, @PROP_NAME, and @LOCATION_NAME with composition, style, lighting, and aspect ratio.]
+[One opening frame: visible cast, starting poses, relevant props and their starting states, composition, environment, lighting, visual style and aspect ratio.]
 
 Video prompt:
-[Describe camera motion, movement of @CHARACTER_NAME interacting with @PROP_NAME in @LOCATION_NAME, facial expressions, and continuity.]
+[Action from that opening frame, performance, camera behavior, exact dialogue if applicable, silent listeners and clear end state.]
 
-Continue with SHOT 2 and the same fields until the declared duration is reached.`
+Continue with consecutive SHOT headings and the same fields until the declared duration is reached. The sample six-second range is illustrative; choose each shot's timing to fit the story. For a silent shot replace the entire Dialogue block with Dialogue: None. For a genuinely empty shot use Cast: None. Add changed scene-context fields before Action only when needed, using a distinct Scene label for the new context.`
 const shotDraft = reactive({ framing: 'Medium', duration_ms: 5000, image_prompt: '', video_prompt: '', title_card_text: '' })
 
 const form = reactive<ProjectInput>({
@@ -230,6 +288,7 @@ const suggestions = computed<DisplaySuggestion[]>(() => {
   if (!source) return []
   return source.map((item: Suggestion) => ({
     id: item.id,
+    category: item.category,
     severity: item.severity,
     title: item.title,
     reason: item.reason,
@@ -238,6 +297,17 @@ const suggestions = computed<DisplaySuggestion[]>(() => {
   }))
 })
 const pendingCount = computed(() => suggestions.value.filter((item) => item.status === 'pending').length)
+const advisoryCategories = new Set(['continuity', 'craft'])
+const isAdvisory = (item: DisplaySuggestion) => advisoryCategories.has(item.category)
+const scriptReadiness = computed(() => {
+  const open = suggestions.value.filter((item) => item.status === 'pending')
+  const blocking = open.filter((item) => item.severity === 'blocking').length
+  const warnings = open.length - blocking
+  const score = Math.max(0, 100 - blocking * 25 - warnings * 5)
+  const label = blocking ? 'Blocked' : warnings ? 'Needs polish' : 'Ready'
+  const tone = blocking ? 'blocked' : warnings ? 'polish' : 'ready'
+  return { score, label, tone, blocking, warnings }
+})
 const projectTitle = computed(() => store.currentProject?.title ?? 'New project')
 const projectDuration = computed(() => {
   const end = Math.max(...scenes.value.map((scene) => scene.end_ms ?? 0), 0)
@@ -417,27 +487,61 @@ const otherAspectClip = computed(() => resolveActiveShotMedia(selectedShot.value
 const otherAspectMedia = computed(() => otherAspectImage.value || otherAspectClip.value)
 const canExpandFromOtherAspect = computed(() => !selectedAspectImage.value && !selectedAspectClip.value && !selectedAspectReference.value && Boolean(otherAspectMedia.value))
 const selectedShotScene = computed(() => scenes.value.find((scene) => scene.shots.some((shot) => shot.id === selectedShot.value?.id)))
+function cleanConversationUrl(url: string | null | undefined): string | null {
+  if (!url) return null
+  return url.replace(/gemini\.google\.com\/app\/c_([a-zA-Z0-9]+)/i, 'gemini.google.com/app/$1')
+}
+
 const selectedShotConversationUrl = computed(() => {
   const shot = selectedShot.value
   if (!shot) return null
 
-  if (shot.conversation_url) return shot.conversation_url
+  if (shot.conversation_url) return cleanConversationUrl(shot.conversation_url)
 
   const matchingTakes = shot.takes?.filter((take) => take.media_type === "image" && take.aspect_ratio === mediaAspect.value) || []
   const activeTake = matchingTakes.find((take) => take.id === shot.selected_image_take_id)
     || matchingTakes[matchingTakes.length - 1]
     || shot.takes?.find((take) => take.id === shot.selected_image_take_id)
   const takeUrl = activeTake?.conversation_url || (activeTake?.settings as Record<string, unknown> | undefined)?.conversation_url as string | undefined
-  if (takeUrl) return takeUrl
+  if (takeUrl) return cleanConversationUrl(takeUrl)
 
   const inFlightJob = store.imageJobs[shot.id]
-  if (inFlightJob?.conversation_url) return inFlightJob.conversation_url
+  if (inFlightJob?.conversation_url) return cleanConversationUrl(inFlightJob.conversation_url)
 
   const clipJob = store.clipJobs[shot.id]
-  if (clipJob?.conversation_url) return clipJob.conversation_url
+  if (clipJob?.conversation_url) return cleanConversationUrl(clipJob.conversation_url)
 
   return null
 })
+const deleteChatUrl = ref<string | null>(null)
+const deletingChat = ref(false)
+const deleteChatError = ref('')
+const canDeleteChat = computed(() => Boolean(selectedShotConversationUrl.value))
+const deleteChatProvider = computed(() => {
+  const url = deleteChatUrl.value || ''
+  if (/gemini\.google\.com/i.test(url)) return 'Gemini'
+  if (/chatgpt\.com/i.test(url)) return 'ChatGPT'
+  return 'your AI provider'
+})
+function beginDeleteChat() {
+  deleteChatError.value = ''
+  deleteChatUrl.value = selectedShotConversationUrl.value
+}
+async function confirmDeleteChat() {
+  const projectId = store.currentProject?.id
+  if (!projectId || !deleteChatUrl.value || deletingChat.value) return
+  deletingChat.value = true
+  deleteChatError.value = ''
+  try {
+    await api.deleteConversation(projectId, deleteChatUrl.value)
+    deleteChatUrl.value = null
+    await store.loadProject(projectId, { episodeId: store.currentEpisodeId || undefined })
+  } catch (error) {
+    deleteChatError.value = error instanceof Error ? error.message : 'Could not delete chat.'
+  } finally {
+    deletingChat.value = false
+  }
+}
 const selectedAudioTake = computed(() => selectedShot.value?.takes?.find((take) => take.id === selectedShot.value?.selected_audio_take_id) ?? null)
 const selectedAudioUrl = computed(() => selectedAudioTake.value?.url ?? (selectedShot.value?.dialogue_audio_filename ? `/media/${encodeURIComponent(selectedShot.value.dialogue_audio_filename)}` : null))
 const previewShot = computed(() => allShots.value[previewShotIndex.value])
@@ -503,12 +607,39 @@ const propElements = computed(() =>
 const visibleLibraryElements = computed(() =>
   castCharacters.value.filter((item) => (item.kind || 'character') === activeElementTab.value),
 )
+function locationKey(location: string): string {
+  return location.trim()
+    .replace(/^(?:INT\.?\/EXT\.?|INT\.?|EXT\.?)\s+/i, '')
+    .replace(/\s*[-–—]\s*(?:DAY|NIGHT|MORNING|AFTERNOON|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME(?:\s+TIME)?).*$/i, '')
+    .toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim()
+}
+function sceneSet(scene: Scene): Character | undefined {
+  const matches = sceneElements.value.filter(element => locationKey(element.name) === locationKey(scene.location))
+  return matches.find(element => element.references.length) ?? matches[0]
+}
+async function assignSceneSet(scene: Scene, event: Event) {
+  const name = (event.target as HTMLSelectElement).value
+  const element = sceneElements.value.find(item => item.name === name)
+  if (!element || isContinuitySaving(scene.id)) return
+  continuitySavingIds.value = [...continuitySavingIds.value, scene.id]
+  try {
+    await store.updateScene(scene.id, {
+      location: element.name,
+      ...(locationKey(scene.location) !== locationKey(element.name) ? { set_notes: '' } : {}),
+    })
+  } catch {
+    // Store surfaces the error.
+  } finally {
+    continuitySavingIds.value = continuitySavingIds.value.filter(id => id !== scene.id)
+  }
+}
 function elementTag(element: Character): string {
-  return (element.name || 'ELEMENT')
+  const clean = (element.name || 'ELEMENT')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
+  return clean.length > 40 ? clean.slice(0, 40) : clean
 }
 function elementHas3DView(element: Character): boolean {
   return element.references.some((ref) => ref.view_type === '3d_view')
@@ -521,6 +652,41 @@ function elementPrimaryReference(element: Character) {
 const selectedCast = computed(() =>
   castCharacters.value.filter((character) => selectedCharacterIds.value.includes(character.id)),
 )
+const castChipsExpanded = ref(false)
+const DEFAULT_VISIBLE_CHIP_COUNT = 8
+
+const sortedCastCharacters = computed(() => {
+  const selectedSet = new Set(selectedCharacterIds.value)
+  return [...castCharacters.value].sort((a, b) => {
+    const aSel = selectedSet.has(a.id) ? 1 : 0
+    const bSel = selectedSet.has(b.id) ? 1 : 0
+    if (aSel !== bSel) return bSel - aSel
+
+    const kindOrder: Record<string, number> = { character: 0, scene: 1, prop: 2 }
+    const aKind = kindOrder[a.kind || 'character'] ?? 3
+    const bKind = kindOrder[b.kind || 'character'] ?? 3
+    if (aKind !== bKind) return aKind - bKind
+
+    return a.name.localeCompare(b.name)
+  })
+})
+
+const visibleCastCharacters = computed(() => {
+  if (castChipsExpanded.value) return sortedCastCharacters.value
+  const selectedCount = sortedCastCharacters.value.filter((c) =>
+    selectedCharacterIds.value.includes(c.id)
+  ).length
+  const limit = Math.max(DEFAULT_VISIBLE_CHIP_COUNT, selectedCount)
+  return sortedCastCharacters.value.slice(0, limit)
+})
+
+const hasHiddenCastChips = computed(() => {
+  return sortedCastCharacters.value.length > visibleCastCharacters.value.length
+})
+
+const hiddenCastChipCount = computed(() => {
+  return sortedCastCharacters.value.length - visibleCastCharacters.value.length
+})
 const detectedPromptMentionElements = computed(() => {
   const text = `${shotDraft.video_prompt || ''} ${shotDraft.image_prompt || ''}`.toUpperCase()
   if (!text.includes('@')) return []
@@ -532,14 +698,7 @@ const detectedPromptMentionElements = computed(() => {
 })
 const autoMatchedSceneElement = computed(() => {
   if (!includeSceneRefInR2V.value || !selectedShotScene.value) return null
-  const loc = (selectedShotScene.value.location || selectedShotScene.value.title || '').trim().toLowerCase()
-  if (!loc) return null
-  return (
-    sceneElements.value.find((sc) => {
-      const name = sc.name.trim().toLowerCase()
-      return name && (name === loc || loc.includes(name) || name.includes(loc))
-    }) ?? null
-  )
+  return sceneSet(selectedShotScene.value) ?? null
 })
 const r2vAttachedElements = computed(() => {
   const seen = new Set<string>()
@@ -706,7 +865,7 @@ function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
   if (!shot) return []
   const valid = new Set(castCharacters.value.map((character) => character.id))
   if (shot.id in userModifiedCharacterIds) {
-    return userModifiedCharacterIds[shot.id].filter((id) => valid.has(id))
+    return (userModifiedCharacterIds[shot.id] ?? []).filter((id) => valid.has(id))
   }
   const persisted = (shot.character_ids || []).filter((id) => valid.has(id))
   if (persisted.length) return persisted
@@ -729,7 +888,7 @@ function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
 function syncSelectedCharactersForShot(shot: Shot | null | undefined) {
   if (!shot) return
   if (shot.id in userModifiedCharacterIds) {
-    selectedCharacterIds.value = userModifiedCharacterIds[shot.id]
+    selectedCharacterIds.value = userModifiedCharacterIds[shot.id] ?? []
     return
   }
   const defaults = defaultCharacterIdsForShot(shot)
@@ -774,7 +933,13 @@ watch(() => route.params.projectId, async (projectId) => {
   if (typeof projectId !== 'string' || store.currentProject?.id === projectId) return
   try {
     const queryEpisode = typeof route.query.episode === 'string' ? route.query.episode : undefined
+    const queryCompilation = typeof route.query.compilation === 'string' ? route.query.compilation : undefined
     await store.loadProject(projectId, { resumeJobs: true, episodeId: queryEpisode })
+    if (queryCompilation && activeStage.value === 'final-cut' && store.compilations.some((c) => c.id === queryCompilation)) {
+      store.selectCompilation(queryCompilation)
+    } else {
+      store.selectCompilation(null)
+    }
   } catch {
     await router.replace('/')
   }
@@ -794,6 +959,11 @@ function buildSyncedQuery(overrides: Record<string, string | undefined> = {}) {
     next.aspect = mediaAspect.value
     if (next.variant !== undefined || activeStage.value === 'final-cut') {
       next.variant = mediaAspect.value === '9:16' ? 'shorts' : 'landscape'
+    }
+    if (activeStage.value === 'final-cut' && store.activeCompilationId) {
+      next.compilation = store.activeCompilationId
+    } else {
+      delete next.compilation
     }
   }
   for (const [key, val] of Object.entries(overrides)) {
@@ -823,6 +993,36 @@ watch(() => route.query.episode, async (newQueryEp) => {
     if (targetEpId !== store.currentEpisodeId) {
       await store.selectEpisode(targetEpId)
     }
+  }
+})
+watch(() => store.activeCompilationId, (newCompId) => {
+  if (store.currentProject && activeStage.value === 'final-cut') {
+    if (newCompId && route.query.compilation !== newCompId) {
+      void router.replace({
+        query: buildSyncedQuery({ compilation: newCompId }),
+      })
+    } else if (!newCompId && route.query.compilation) {
+      void router.replace({
+        query: buildSyncedQuery({ compilation: undefined }),
+      })
+    }
+  }
+})
+watch(() => route.query.compilation, (newQueryComp) => {
+  if (typeof newQueryComp === 'string' && newQueryComp && activeStage.value === 'final-cut' && store.currentProject) {
+    if (newQueryComp !== store.activeCompilationId) {
+      const exists = store.compilations.some((c) => c.id === newQueryComp)
+      if (exists) {
+        store.selectCompilation(newQueryComp)
+      }
+    }
+  } else if (!newQueryComp && store.activeCompilationId && activeStage.value === 'final-cut') {
+    store.selectCompilation(null)
+  }
+})
+watch(activeStage, (newStage) => {
+  if (newStage !== 'final-cut' && store.activeCompilationId) {
+    store.selectCompilation(null)
   }
 })
 watch(() => store.currentProject?.id, (newId, oldId) => {
@@ -877,7 +1077,7 @@ watch(
   ([shotId]) => {
     if (!shotId) return
     if (shotId in userCastRefOverrides) {
-      includeCastRefsInVideo.value = userCastRefOverrides[shotId]
+      includeCastRefsInVideo.value = Boolean(userCastRefOverrides[shotId])
       return
     }
     try {
@@ -914,13 +1114,14 @@ watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage
   const requestedShot = hasShotParam ? shots.find((shot) => shot.id === shotId) : undefined
   if (hasShotParam) {
     activeShotId.value = requestedShot?.id ?? (shots.length === 0 ? shotId : shots[0]?.id ?? null)
+    if (requestedShot) store.focusShotId = requestedShot.id
     produceDetailOpen.value = true
     // Only replace route if shots have loaded and the project is initialized, and the requested shot is truly missing
     if (shots.length > 0 && requestedShot?.id !== shotId && activeShotId.value && store.currentProject) {
       void router.replace(projectRoute(store.currentProject.id, stage, activeShotId.value))
     }
   } else {
-    activeShotId.value = shots[0]?.id ?? null
+    activeShotId.value = shots.find((shot) => shot.id === store.focusShotId)?.id ?? shots[0]?.id ?? null
     produceDetailOpen.value = false
   }
 }, { immediate: true })
@@ -986,6 +1187,10 @@ function handleGlobalPointerDown(event: PointerEvent) {
 
 function handleGlobalKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    if (deleteChatUrl.value) {
+      if (!deletingChat.value) deleteChatUrl.value = null
+      return
+    }
     if (showScriptGuide.value) {
       showScriptGuide.value = false
       return
@@ -1006,13 +1211,26 @@ onMounted(async () => {
   document.addEventListener('keydown', handleGlobalKeydown)
   const projectId = typeof route.params.projectId === 'string' ? route.params.projectId : undefined
   const queryEpisode = typeof route.query.episode === 'string' ? route.query.episode : undefined
+  const queryCompilation = typeof route.query.compilation === 'string' ? route.query.compilation : undefined
   await store.initialize(projectId, queryEpisode)
   if (!projectId && store.projects[0]) {
     await router.replace(projectRoute(store.projects[0].id, defaultStage(store.projects[0])))
-  } else if (store.currentEpisodeId && route.query.episode !== store.currentEpisodeId) {
-    void router.replace({
-      query: buildSyncedQuery({ episode: store.currentEpisodeId }),
-    })
+  } else {
+    if (queryCompilation && activeStage.value === 'final-cut' && store.currentProject) {
+      const exists = store.compilations.some((c) => c.id === queryCompilation)
+      if (exists) {
+        store.selectCompilation(queryCompilation)
+      } else {
+        void router.replace({
+          query: buildSyncedQuery({ compilation: undefined }),
+        })
+      }
+    }
+    if (store.currentEpisodeId && route.query.episode !== store.currentEpisodeId) {
+      void router.replace({
+        query: buildSyncedQuery({ episode: store.currentEpisodeId }),
+      })
+    }
   }
 })
 
@@ -1151,13 +1369,22 @@ function openProduceDetail(shotId: string, opts?: { editPrompts?: boolean }) {
   })
 }
 
-function closeProduceDetail() {
+async function closeProduceDetail() {
+  const shotId = selectedShot.value?.id
   produceDetailOpen.value = false
   showPromptEditor.value = false
   const projectId = store.currentProject?.id ?? (route.params.projectId as string)
-  if (projectId) {
-    void router.push(projectRoute(projectId, 'shots'))
+  if (!projectId) return
+  if (shotId) {
+    store.focusShotId = shotId
+    if (!expandedProduceShotIds.value.includes(shotId)) {
+      expandedProduceShotIds.value = [...expandedProduceShotIds.value, shotId]
+    }
   }
+  await router.push(projectRoute(projectId, 'shots'))
+  if (!shotId) return
+  await nextTick()
+  document.getElementById(`produce-shot-${shotId}`)?.scrollIntoView({ block: 'center' })
 }
 
 function ensureFirstShotsExpanded() {
@@ -1249,9 +1476,7 @@ function beginGenerateFreshImage() {
 }
 
 function beginGenerateChatGPTDual() {
-  skipDefaultImageReference.value = true
-  showPromptEditor.value = true
-  void generateShotImage(false, false, true, true)
+  beginRegenerateBothImages()
 }
 
 function beginExpandAndGenerateClip() {
@@ -1326,8 +1551,11 @@ function projectRoute(projectId: string, stage: ProductionStage, shotId?: string
     if (store.currentEpisodeId) query.episode = store.currentEpisodeId
     else if (route.query.episode) query.episode = String(route.query.episode)
     query.aspect = mediaAspect.value
-    if (stage === 'final-cut' && route.query.variant !== undefined) {
+    if (stage === 'final-cut') {
       query.variant = mediaAspect.value === '9:16' ? 'shorts' : 'landscape'
+    }
+    if (stage === 'final-cut' && store.activeCompilationId) {
+      query.compilation = store.activeCompilationId
     }
   }
 
@@ -1342,9 +1570,17 @@ function projectRoute(projectId: string, stage: ProductionStage, shotId?: string
   }
 }
 
+const focusShot = computed(() => allShots.value.find((shot) => shot.id === store.focusShotId) ?? null)
+
 function stageRoute(stage: ProductionStage) {
   if (!store.currentProject) return { name: 'studio' }
-  return projectRoute(store.currentProject.id, stage, stage === 'shots' || stage === 'clips' ? selectedShot.value?.id : undefined)
+  const shotId = focusShot.value?.id ?? selectedShot.value?.id
+  if (stage === 'shots' || stage === 'clips') return projectRoute(store.currentProject.id, stage, shotId)
+  const target = projectRoute(store.currentProject.id, stage)
+  if (stage === 'final-cut' && activeStage.value !== 'final-cut' && focusShot.value) {
+    target.query.shot = focusShot.value.id
+  }
+  return target
 }
 
 function progressClass(step: number) {
@@ -1396,6 +1632,7 @@ async function jumpToEpisodeShot(episodeId: string, shotId?: string) {
 
 function selectShot(id: string, stage: 'shots' | 'clips' = 'shots') {
   activeShotId.value = id
+  store.focusShotId = id
   if (store.currentProject) void router.push(projectRoute(store.currentProject.id, stage, id))
 }
 
@@ -1603,10 +1840,10 @@ async function generateShotImage(
       (forceFresh || chatgptDual) ? null : selectedAspectReference.value?.id,
       useDefault,
       {
-        bothAspects: chatgptDual ? false : bothAspects,
+        bothAspects: chatgptDual ? true : bothAspects,
         generateVideo: andVideo,
         includeCastReferences: includeCastRefsInVideo.value,
-        chatgptDual,
+        chatgptDual: false,
       },
     )
   } catch {
@@ -1823,7 +2060,14 @@ const activeTimelineShots = computed(() => {
 async function handleOpenCompilation(compilationId: string) {
   store.selectCompilation(compilationId)
   if (activeStage.value !== 'final-cut') {
-    await router.push(stageRoute('final-cut'))
+    await router.push({
+      ...stageRoute('final-cut'),
+      query: buildSyncedQuery({ compilation: compilationId }),
+    })
+  } else if (route.query.compilation !== compilationId) {
+    await router.replace({
+      query: buildSyncedQuery({ compilation: compilationId }),
+    })
   }
 }
 const scriptCopied = ref(false)
@@ -2516,7 +2760,7 @@ function formatRenderedAt(value: string) {
         <aside class="suggestions-panel">
           <div class="panel-heading suggestions-heading">
             <div><span class="section-label">AI review</span><strong>{{ pendingCount }} open suggestions</strong></div>
-            <span class="review-badge"><Sparkles :size="13" /> Complete</span>
+            <span class="review-badge readiness" :class="scriptReadiness.tone" :title="`${scriptReadiness.blocking} blocking, ${scriptReadiness.warnings} to polish`"><Sparkles :size="13" /> {{ scriptReadiness.label }} · {{ scriptReadiness.score }}</span>
           </div>
 
           <div class="suggestion-list">
@@ -2524,13 +2768,13 @@ function formatRenderedAt(value: string) {
               <div class="suggestion-title">
                 <CircleAlert v-if="item.severity !== 'optional'" :size="16" />
                 <Sparkles v-else :size="16" />
-                <div><span>{{ item.severity }}</span><strong>{{ item.title }}</strong></div>
+                <div><span>{{ item.severity }}<template v-if="isAdvisory(item)"> · {{ item.category }}</template></span><strong>{{ item.title }}</strong></div>
               </div>
               <p>{{ item.reason }}</p>
               <div class="proposed-change">{{ item.change }}</div>
               <div v-if="item.status === 'pending'" class="decision-row">
                 <button class="reject-button" @click="decide(item.id, 'rejected')"><X :size="15" /> Reject</button>
-                <button class="accept-button" @click="decide(item.id, 'accepted')"><Check :size="15" /> Accept</button>
+                <button class="accept-button" @click="decide(item.id, 'accepted')"><Check :size="15" /> {{ isAdvisory(item) ? 'Acknowledge' : 'Accept' }}</button>
               </div>
               <div v-else class="decision-state" :class="item.status">
                 <Check v-if="item.status === 'accepted'" :size="15" />
@@ -2640,7 +2884,7 @@ function formatRenderedAt(value: string) {
               <div class="elements-library-header">
                 <div>
                   <span class="section-label">Elements Library · @References</span>
-                  <strong>Characters (Main + 3D View), Scenes &amp; Props</strong>
+                  <strong>Characters (Main + 3D View), Locations / Sets &amp; Props</strong>
                 </div>
                 <div class="elements-tab-bar" role="tablist" aria-label="Reference element categories">
                   <button
@@ -2659,12 +2903,13 @@ function formatRenderedAt(value: string) {
                     type="button"
                     role="tab"
                     class="element-tab-btn kind-scene"
+                    title="Reusable location references, not screenplay scene count"
                     :class="{ active: activeElementTab === 'scene' }"
                     :aria-selected="activeElementTab === 'scene'"
                     @click="activeElementTab = 'scene'"
                   >
                     <span class="element-dot kind-scene"></span>
-                    <span>Scenes</span>
+                    <span>Locations / Sets</span>
                     <small>{{ sceneElements.length }}</small>
                   </button>
                   <button
@@ -2690,7 +2935,7 @@ function formatRenderedAt(value: string) {
                   @click="generateMissingCastFaces"
                 >
                   <Sparkles :size="15" />
-                  {{ activeElementTab === 'character' ? 'Generate missing faces' : activeElementTab === 'scene' ? 'Generate missing scenes' : 'Generate missing props' }}
+                  {{ activeElementTab === 'character' ? 'Generate missing faces' : activeElementTab === 'scene' ? 'Generate missing sets' : 'Generate missing props' }}
                 </button>
                 <button class="secondary-button" type="button" :disabled="castingBusy" @click="syncCastFromScript">
                   Sync from script
@@ -2700,7 +2945,7 @@ function formatRenderedAt(value: string) {
                     v-model="newCharacterName"
                     type="text"
                     maxlength="120"
-                    :placeholder="activeElementTab === 'character' ? 'Add character' : activeElementTab === 'scene' ? 'Add scene / location' : 'Add prop'"
+                    :placeholder="activeElementTab === 'character' ? 'Add character' : activeElementTab === 'scene' ? 'Add location / set' : 'Add prop'"
                     :disabled="castingBusy"
                   />
                   <button class="secondary-button" type="submit" :disabled="castingBusy || !newCharacterName.trim()"><Plus :size="15" />Add</button>
@@ -2712,7 +2957,7 @@ function formatRenderedAt(value: string) {
                 Sync cast from the script, then generate Main View + 3D View turnaround sheets. Type <code>@CHARACTER</code> in any shot prompt to lock identity.
               </template>
               <template v-else-if="activeElementTab === 'scene'">
-                Click <strong>Sync from script</strong> to extract scene locations, or add a Scene reference to lock architectural environments across shots with <code>@SCENE</code>.
+                Add each physical space separately, such as Compound, Parlour, or Kitchen. Generate or upload its reference, then choose it under Reusable set for each scene.
               </template>
               <template v-else>
                 Click <strong>Sync from script</strong> to extract recurring props from continuity notes, or add a Prop reference on a white studio background with <code>@PROP</code>.
@@ -2825,7 +3070,14 @@ function formatRenderedAt(value: string) {
                   </button>
                 </header>
                 <div class="continuity-grid">
-                  <label>Set / location<textarea v-model="continuityDraft(scene).set_notes" rows="2" placeholder="Environment, architecture, weather…" @blur="saveContinuity(scene)"></textarea></label>
+                  <label>Reusable set
+                    <select :value="sceneSet(scene)?.name ?? scene.location" :aria-label="`Reusable set for ${scene.title}`" :disabled="isContinuitySaving(scene.id)" @change="assignSceneSet(scene, $event)">
+                      <option v-if="!sceneSet(scene)" :value="scene.location">{{ scene.location || 'Choose a set' }} · not linked</option>
+                      <option v-for="element in sceneElements" :key="element.id" :value="element.name">{{ element.name }}{{ element.references.length ? '' : ' · reference needed' }}</option>
+                    </select>
+                    <span>{{ sceneSet(scene)?.references.length ? 'Set reference is attached automatically to new generations.' : 'Add or sync a set in Locations / Sets, then generate or upload its reference.' }}</span>
+                  </label>
+                  <label>Scene dressing / staging<textarea v-model="continuityDraft(scene).set_notes" rows="2" placeholder="Environment, architecture, weather…" @blur="saveContinuity(scene)"></textarea></label>
                   <label>Lighting<textarea v-model="continuityDraft(scene).lighting_notes" rows="2" placeholder="Key light, time of day mood…" @blur="saveContinuity(scene)"></textarea></label>
                   <label>Wardrobe<textarea v-model="continuityDraft(scene).wardrobe_notes" rows="2" placeholder="Outfits that must match across shots…" @blur="saveContinuity(scene)"></textarea></label>
                   <label>Props<textarea v-model="continuityDraft(scene).props_notes" rows="2" placeholder="Important objects that recur…" @blur="saveContinuity(scene)"></textarea></label>
@@ -2838,6 +3090,7 @@ function formatRenderedAt(value: string) {
                   <button
                     v-for="(shot, shotIndex) in scene.shots"
                     :key="shot.id"
+                    :id="`produce-shot-${shot.id}`"
                     type="button"
                     class="produce-shot-row"
                     :class="{ active: selectedShot?.id === shot.id, open: isProduceShotExpanded(shot.id) }"
@@ -3042,6 +3295,7 @@ function formatRenderedAt(value: string) {
                   <span>Chat session</span>
                   <ExternalLink :size="10" />
                 </a>
+                <button v-if="canDeleteChat" type="button" class="secondary-button" :disabled="deletingChat" title="Remove linked chat from Cutline (keeps chat in ChatGPT/Gemini)" @click="beginDeleteChat"><Trash2 :size="14" />Delete chat</button>
                 <button
                   v-if="selectedShotScene"
                   type="button"
@@ -3143,7 +3397,7 @@ function formatRenderedAt(value: string) {
 
                 <div v-if="castCharacters.length" class="cast-chip-row">
                   <button
-                    v-for="character in castCharacters"
+                    v-for="character in visibleCastCharacters"
                     :key="character.id"
                     type="button"
                     class="cast-chip"
@@ -3158,6 +3412,17 @@ function formatRenderedAt(value: string) {
                     <span>@{{ elementTag(character) }}</span>
                     <span v-if="elementHas3DView(character)" class="chip-3d-tag">3D</span>
                     <small v-if="!character.references.length">no ref</small>
+                  </button>
+
+                  <button
+                    v-if="hasHiddenCastChips || castChipsExpanded"
+                    type="button"
+                    class="cast-chip-toggle-btn"
+                    :title="castChipsExpanded ? 'Collapse element list' : `Show all ${sortedCastCharacters.length} elements`"
+                    @click="castChipsExpanded = !castChipsExpanded"
+                  >
+                    <component :is="castChipsExpanded ? ChevronUp : ChevronDown" :size="13" />
+                    <span>{{ castChipsExpanded ? 'Show less' : `+${hiddenCastChipCount} more` }}</span>
                   </button>
                 </div>
 
@@ -3232,11 +3497,11 @@ function formatRenderedAt(value: string) {
                   <button
                     class="secondary-button"
                     :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
-                    title="Generate both 16:9 and 9:16 images in a single ChatGPT Web prompt and save both takes"
-                    @click="beginGenerateChatGPTDual"
+                    title="Generate both 16:9 and 9:16 storyboard images in one pass"
+                    @click="beginRegenerateBothImages"
                   >
                     <Sparkles :size="15" />
-                    ChatGPT Dual (16:9 + 9:16)
+                    Generate 16:9 + 9:16 images
                   </button>
                   <button
                     class="primary-button"
@@ -3264,18 +3529,9 @@ function formatRenderedAt(value: string) {
                     Generate 16:9 + 9:16 images
                   </button>
                   <button
-                    class="secondary-button"
-                    :disabled="store.isProcessingShot(selectedShot.id) || !imageGenerationAvailable"
-                    title="Generate both 16:9 and 9:16 images in a single ChatGPT Web prompt and save both takes"
-                    @click="beginGenerateChatGPTDual"
-                  >
-                    <Sparkles :size="15" />
-                    ChatGPT Dual (16:9 + 9:16)
-                  </button>
-                  <button
                     class="primary-button"
                     :disabled="store.isProcessingShot(selectedShot.id) || store.isProcessingClip(selectedShot.id) || !imageGenerationAvailable || !store.videoProvider?.configured || !store.videoProvider?.available"
-                    :title="!imageGenerationAvailable ? 'Image provider is offline' : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : 'Generate storyboard image(s) and automatically animate video clip(s) on Google Flow'"
+                    :title="!imageGenerationAvailable ? 'Image provider is offline' : (!store.videoProvider?.configured || !store.videoProvider?.available) ? (store.videoProvider?.detail || 'Video provider is offline') : `Generate storyboard image(s) and automatically animate video clip(s) with ${store.videoProvider?.label || 'video provider'}`"
                     @click="beginRegenerateImageAndClip"
                   >
                     <Clapperboard :size="15" />
@@ -3317,6 +3573,7 @@ function formatRenderedAt(value: string) {
                   }}
                 </button>
                 <select
+                  v-if="store.videoProvider?.id === 'flowkit'"
                   class="flow-model-inline-select"
                   :value="store.videoProvider?.active_preset || 'veo_lite'"
                   :disabled="switchingFlowModel || store.isProcessingClip(selectedShot.id)"
@@ -3333,7 +3590,7 @@ function formatRenderedAt(value: string) {
                   </option>
                 </select>
                 <button
-                  v-if="store.videoProvider?.configured"
+                  v-if="store.videoProvider?.id === 'flowkit' && store.videoProvider?.configured"
                   type="button"
                   class="secondary-button"
                   :disabled="resettingFlow"
@@ -3355,6 +3612,7 @@ function formatRenderedAt(value: string) {
                   <span>Chat session</span>
                   <ExternalLink :size="12" />
                 </a>
+                <button v-if="canDeleteChat" type="button" class="secondary-button" :disabled="deletingChat" title="Remove linked chat from Cutline (keeps chat in ChatGPT/Gemini)" @click="beginDeleteChat"><Trash2 :size="14" />Delete chat</button>
                 <button
                   v-if="selectedShot.dialogue?.length"
                   class="secondary-button lipsync-toolbar-button"
@@ -3512,6 +3770,13 @@ function formatRenderedAt(value: string) {
                 <label>Framing<input v-model="shotDraft.framing" list="framing-options" /><datalist id="framing-options"><option value="Wide" /><option value="Medium" /><option value="Close-up" /><option value="Extreme close-up" /><option value="Over-the-shoulder" /><option value="Insert" /></datalist></label>
                 <label>Duration (seconds)<input type="number" min="1" max="30" step="0.5" :value="shotDraft.duration_ms / 1000" @input="setShotDuration" /></label>
               </div>
+              <label v-if="selectedShotScene">Reusable set
+                <select :value="sceneSet(selectedShotScene)?.name ?? selectedShotScene.location" aria-label="Reusable set for this scene" :disabled="isContinuitySaving(selectedShotScene.id)" @change="assignSceneSet(selectedShotScene, $event)">
+                  <option v-if="!sceneSet(selectedShotScene)" :value="selectedShotScene.location">{{ selectedShotScene.location || 'Choose a set' }} · not linked</option>
+                  <option v-for="element in sceneElements" :key="element.id" :value="element.name">{{ element.name }}{{ element.references.length ? '' : ' · reference needed' }}</option>
+                </select>
+                <span>{{ sceneSet(selectedShotScene)?.references.length ? 'Uses this set for every shot in the scene.' : 'Generate or upload this set reference in Locations / Sets.' }}</span>
+              </label>
               <p class="shot-action-blurb">{{ selectedShot.action || 'No action line on this shot.' }}</p>
               <div v-if="!showPromptEditor" class="prompt-collapsed">
                 <div>
@@ -3558,7 +3823,7 @@ function formatRenderedAt(value: string) {
 
                 <div class="prompt-field-with-mentions">
                   <label>
-                    <span>Image prompt <small class="mention-hint">(type <code>@</code> to reference Characters, Scenes, or Props)</small></span>
+                    <span>Image prompt <small class="mention-hint">(type <code>@</code> to reference Characters, Locations / Sets, or Props)</small></span>
                     <textarea
                       v-model="shotDraft.image_prompt"
                       rows="5"
@@ -3739,7 +4004,7 @@ function formatRenderedAt(value: string) {
       </header>
       <div class="guide-summary">
         <p>Traditional screenplays are supported, but this format preserves every supplied shot and timecode before AI review.</p>
-        <div><strong>Recognized fields</strong><code>SHOT N - TITLE</code><code>Scene:</code><code>Location:</code><code>Set:</code><code>Props:</code><code>Time:</code><code>Framing:</code><code>Cast:</code><code>Action:</code><code>Dialogue:</code><code>Sound:</code><code>Image prompt:</code><code>Video prompt:</code></div>
+        <div><strong>Recognized fields</strong><code>SHOT N - TITLE</code><code>Scene:</code><code>Location:</code><code>Set:</code><code>Lighting:</code><code>Wardrobe:</code><code>Props:</code><code>Time of day:</code><code>Time:</code><code>Framing:</code><code>Cast:</code><code>Action:</code><code>Dialogue:</code><code>Sound:</code><code>Image prompt:</code><code>Video prompt:</code></div>
       </div>
       <div class="guide-prompt-heading">
         <div><span class="section-label">Reusable prompt</span><strong>Give this to your script generator</strong></div>
@@ -4093,6 +4358,19 @@ function formatRenderedAt(value: string) {
     </section>
   </div>
 
+  <div v-if="deleteChatUrl" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => { if (!deletingChat) deleteChatUrl = null })">
+    <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-chat-title" :aria-busy="deletingChat">
+      <header><div class="danger-icon"><Trash2 :size="18" /></div><button type="button" class="mini-icon" aria-label="Close delete chat dialog" :disabled="deletingChat" @click="deleteChatUrl = null"><X :size="17" /></button></header>
+      <div>
+        <h2 id="delete-chat-title">Delete chat from Cutline?</h2>
+        <p>This removes the linked chat from Cutline. The conversation in {{ deleteChatProvider }} remains safe and untouched. Future generations or edits for this shot will start fresh in a new chat.</p>
+        <a :href="deleteChatUrl" target="_blank" rel="noopener noreferrer">Review chat in browser</a>
+      </div>
+      <p v-if="deleteChatError" class="form-error" role="alert">{{ deleteChatError }}</p>
+      <footer><button type="button" class="secondary-button" :disabled="deletingChat" @click="deleteChatUrl = null">Cancel</button><button type="button" class="danger-button" :disabled="deletingChat" @click="confirmDeleteChat"><Trash2 :size="15" />{{ deletingChat ? 'Deleting…' : 'Delete chat' }}</button></footer>
+    </section>
+  </div>
+
   <div v-if="deleteCandidate" class="modal-backdrop" @mousedown="trackModalBackdropPress" @click="handleBackdropClose($event, () => deleteCandidate = null)">
     <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-project-title">
       <header>
@@ -4225,6 +4503,14 @@ function formatRenderedAt(value: string) {
   flex-shrink: 0;
   margin: 0;
 }
+.review-badge.readiness.polish {
+  color: #b7791f;
+}
+
+.review-badge.readiness.blocked {
+  color: #c53030;
+}
+
 .review-badge {
   padding: 5px 9px;
   background: rgba(73,169,120,.1) !important;

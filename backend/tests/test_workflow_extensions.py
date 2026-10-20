@@ -66,7 +66,8 @@ def test_format_dialogue_script_uses_speaker_numbers() -> None:
     assert "Speaker 1: Papers." in script
 
 
-def test_video_provider_defaults_to_runway_when_configured_via_settings(monkeypatch) -> None:
+def test_video_provider_defaults_to_runway_when_configured_via_settings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "video_provider", "runway")
     monkeypatch.setattr(settings, "runway_api_key", "")
     provider_id, label, configured, available, _, detail = video_provider_status()

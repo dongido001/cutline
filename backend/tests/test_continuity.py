@@ -7,6 +7,39 @@ from backend.models import Character, CharacterReference, Project, Scene, Script
 from backend.settings import settings
 
 
+def test_snapshot_automatically_attaches_only_the_current_room_even_with_empty_cast(tmp_path, monkeypatch):
+    from backend.cast import load_cast_references
+    import pytest
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    engine = create_engine(f"sqlite:///{tmp_path / 'sets.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        project = Project(title="Compound")
+        version = ScriptVersion(project=project, source_text="test")
+        scene = Scene(script_version=version, order_index=0, title="Night visit", location="INT. COMPOUND KITCHEN - NIGHT", lighting_notes="Warm lamp")
+        shot = Shot(scene=scene, order_index=0, image_prompt="Empty kitchen", character_ids=[])
+        kitchen = Character(project=project, kind="scene", name="@COMPOUND_KITCHEN", notes="Blue tiled walls, door on the left")
+        parlour = Character(project=project, kind="scene", name="COMPOUND PARLOUR", notes="Red sofa")
+        kitchen.references.append(CharacterReference(filename="kitchen.png", mime_type="image/png", view_type="scene"))
+        (settings.media_dir / "kitchen.png").write_bytes(b"reference")
+        db.add(project)
+        db.flush()
+        # A stale room selection must not override the current scene location.
+        shot.character_ids = [parlour.id]
+        snapshot = get_or_create_shot_snapshot(db, project, shot, "16:9", character_ids=[], require_cast_references=True)
+        assert snapshot["character_ids"] == [kitchen.id]
+        refs = load_cast_references(db, project.id, snapshot["character_ids"])
+        assert [(ref.character_name, ref.view_type) for ref in refs] == [("@COMPOUND_KITCHEN", "scene")]
+        assert snapshot["character_voices"] == []
+        assert "Blue tiled walls" in snapshot["effective_image_prompt"]
+        assert snapshot["scene"]["lighting_notes"] == "Warm lamp"
+        assert "Character identity continuity" not in video_continuity_prompt(snapshot, "A slow pan", "16:9", shot=shot)
+        scene.location = "COMPOUND PARLOUR"
+        with pytest.raises(RuntimeError, match="COMPOUND PARLOUR"):
+            get_or_create_shot_snapshot(db, project, shot, "16:9", require_cast_references=True)
+
+
 def test_shot_snapshot_captures_exact_package_and_reuses_until_explicit_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     engine = create_engine(f"sqlite:///{tmp_path / 'continuity.db'}")
@@ -33,7 +66,9 @@ def test_shot_snapshot_captures_exact_package_and_reuses_until_explicit_refresh(
             shot.character_ids = [character.id]
             first = get_or_create_shot_snapshot(db, project, shot, "16:9")
             assert first["character_ids"] == [character.id]
-            assert first["characters"] == [{"id": character.id, "name": "MARA", "reference_ids": [reference.id]}]
+            assert first["characters"] == [
+                {"id": character.id, "name": "MARA", "kind": "character", "reference_ids": [reference.id]}
+            ]
             assert first["scene"] == {
                 "title": "INT. STUDIO - NIGHT", "location": "Studio", "time_of_day": "Night",
                 "set_notes": "Rain window", "lighting_notes": "Blue practical",
@@ -252,5 +287,149 @@ def test_vocative_phone_address_does_not_create_offscreen_caller(tmp_path, monke
     assert "ISABEL (off-screen phone caller" not in continuity_prompt
     assert "Lip-sync lock: ISABEL" not in continuity_prompt
     assert "Silent character lock: ROSA's lips and jaw MUST remain completely closed and motionless at all times — do NOT lip-sync ROSA to any speech or audio." in continuity_prompt
+    # On-camera "Gabe says, ..." must not be rewritten into a filtered phone line.
+    assert 'Gabe says, "Isabel, send a car to San Aurelio. I\'m coming to see my father."' in continuity_prompt
+    assert "unseen caller Gabe" not in continuity_prompt
 
 
+def test_props_notes_only_include_props_mentioned_in_shot() -> None:
+    from backend.continuity import _filter_props_notes_for_shot, video_continuity_prompt
+
+    props = (
+        "@OLD_AGREEMENT is the exact folded aged cream Santos-De Leon historical agreement. "
+        "@GABE begins Episode 12 holding it, then places it on the counter. "
+        "@GABE_PHONE is Gabe's exact black smartphone and must be visibly established before use."
+    )
+    assert "@OLD_AGREEMENT" in _filter_props_notes_for_shot(
+        props, '@GABE holds @OLD_AGREEMENT in his LEFT hand.'
+    )
+    assert "@GABE_PHONE" not in _filter_props_notes_for_shot(
+        props, '@GABE holds @OLD_AGREEMENT in his LEFT hand.'
+    )
+    assert _filter_props_notes_for_shot(props, "@GABE and @MAYA speak face to face.") == ""
+    assert _filter_props_notes_for_shot("Red mug on the table.", "She turns.") == "Red mug on the table."
+
+    snapshot = {
+        "characters": [{"id": "1", "name": "EDUARDO"}, {"id": "2", "name": "ISABEL"}],
+        "dialogue": [{"character": "EDUARDO", "text": "The project continues."}],
+        "scene": {
+            "location": "@DE_LEON_OFFICE",
+            "time_of_day": "Afternoon",
+            "props_notes": props,
+        },
+        "framing": "Medium two-shot",
+        "action": "@EDUARDO stands screen-LEFT. @ISABEL stands screen-RIGHT.",
+    }
+    prompt = video_continuity_prompt(
+        snapshot,
+        '@EDUARDO says, "The project continues."',
+        "9:16",
+    )
+    assert "Props continuity:" not in prompt
+    assert "@GABE_PHONE" not in prompt
+    assert "@OLD_AGREEMENT" not in prompt
+
+
+def test_on_camera_says_dialogue_is_not_rewritten_as_phone_call() -> None:
+    from backend.continuity import _sanitize_phone_video_prompt, video_continuity_prompt
+
+    video_prompt = (
+        '@GABE says, "I\'ll help." '
+        '@MAYA answers, "Help Nico get the older residents home. Come back before the rain gets bad." '
+        '@NICO says, "Come on." '
+        "@GABE and @NICO turn toward the doorway. End before they completely leave frame."
+    )
+    sanitized = _sanitize_phone_video_prompt(video_prompt)
+    assert '@GABE says, "I\'ll help."' in sanitized
+    assert '@NICO says, "Come on."' in sanitized
+    assert "unseen caller" not in sanitized
+    assert "telephone earpiece" not in sanitized
+
+    # Explicit off-screen phone cues still sanitize.
+    phone_prompt = (
+        'Over the filtered telephone earpiece, unseen caller Isabel says, '
+        '"Yes. But the acquisition continues." Gabe listens.'
+    )
+    phone_sanitized = _sanitize_phone_video_prompt(phone_prompt)
+    assert "unseen caller Isabel speaks while the listener remains completely silent" in phone_sanitized
+
+    snapshot = {
+        "characters": [
+            {"id": "1", "name": "GABE"},
+            {"id": "2", "name": "MAYA"},
+            {"id": "3", "name": "NICO"},
+        ],
+        "dialogue": [
+            {"character": "GABE", "text": "I'll help."},
+            {"character": "MAYA", "text": "Help Nico get the older residents home."},
+            {"character": "NICO", "text": "Come on."},
+        ],
+        "scene": {
+            "location": "@SANTOS_CAFE",
+            "time_of_day": "Early Afternoon",
+            "props_notes": "@GABE_PHONE is Gabe's exact black smartphone.",
+        },
+        "framing": "Medium three-shot",
+        "action": "@GABE stands screen-LEFT with empty hands. @NICO stands CENTER. @MAYA stands screen-RIGHT.",
+    }
+    continuity_prompt = video_continuity_prompt(snapshot, video_prompt, "9:16")
+    assert '@GABE says, "I\'ll help."' in continuity_prompt
+    assert "unseen caller GABE" not in continuity_prompt
+    assert "unseen caller NICO" not in continuity_prompt
+
+
+
+
+def test_speaker_lock_pins_dialogue_to_screen_positions() -> None:
+    from backend.continuity import current_shot_snapshot
+
+    project = Project(title="Coastal Hold", aspect_ratio="16:9")
+    gabe = Character(id="char-gabe", project=project, name="GABE", notes="29 years old.")
+    eduardo = Character(id="char-eduardo", project=project, name="EDUARDO", notes="61 years old.")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(script_version=version, order_index=0, title="OFFICE", location="Office", time_of_day="Morning")
+    shot = Shot(
+        scene=scene,
+        order_index=0,
+        title="I RESIGN",
+        framing="Medium Gabe-primary two-shot",
+        action="@GABE remains screen-LEFT facing @EDUARDO. His decision is already made.",
+        image_prompt="Medium two-shot with @GABE dominant screen-LEFT and @EDUARDO screen-RIGHT.",
+        dialogue=[
+            {"character": "GABE", "text": "Then take what I have left. I resign today."},
+            {"character": "EDUARDO", "text": "You'd walk away?"},
+        ],
+        video_prompt='@GABE says, "Then take what I have left. I resign today." @EDUARDO asks, "You\'d walk away?"',
+        character_ids=[gabe.id, eduardo.id],
+    )
+
+    snapshot = current_shot_snapshot(shot, "16:9")
+    prompt = video_continuity_prompt(snapshot, shot.video_prompt, "16:9", shot=shot)
+
+    assert (
+        'Speaker lock: GABE on screen-left speaks "Then take what I have left. I resign today."; '
+        'EDUARDO on screen-right speaks "You\'d walk away?".'
+    ) in prompt
+
+
+def test_speaker_lock_skipped_without_distinct_positions() -> None:
+    from backend.continuity import _speaker_position_lock
+
+    snapshot = {
+        "characters": [{"name": "GABE"}, {"name": "MAYA"}],
+        "action": "Gabe and Maya sit at the counter.",
+        "dialogue": [{"character": "GABE", "text": "Hi."}],
+    }
+    assert _speaker_position_lock(snapshot) == ""
+
+
+def test_episode_timecodes_become_clip_relative() -> None:
+    from backend.continuity import _clip_relative_timecodes
+
+    shot = Shot(start_ms=170_000, end_ms=180_000, duration_ms=10_000)
+
+    assert _clip_relative_timecodes("Hold on Maya. Snap to black exactly at 03:00.", shot) == (
+        "Hold on Maya. Snap to black exactly at the very end of the clip."
+    )
+    assert _clip_relative_timecodes("The lights flicker at 02:54.", shot) == "The lights flicker at 4 seconds into the clip."
+    assert _clip_relative_timecodes("Recall the storm at 01:10.", shot) == "Recall the storm at 01:10."

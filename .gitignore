@@ -3,6 +3,8 @@
 *.log
 .runtime/
 .pytest_cache/
+**/__pycache__/
+node_modules/
 
 backend/.venv/
 backend/data/
@@ -18,8 +20,13 @@ bridges/.env
 bridges/*.env
 bridges/.playwright/
 bridges/chatgpt-profile/
+bridges/chatgpt-profile-*/
 bridges/chatgpt-web-provider/
+bridges/gemini-profile/
+bridges/gemini-web-provider/
 bridges/gemini-web-to-api/
+bridges/sync_gemini_cookies.py
+bridges/stems/
 *.db
 *.sqlite*
 

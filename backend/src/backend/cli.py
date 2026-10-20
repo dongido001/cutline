@@ -30,7 +30,13 @@ def run_worker() -> None:
                 "-k",
                 "thread",
                 "-w",
-                str(settings.video_worker_concurrency) if queue == "backend.tasks.video_huey" else "1",
+                (
+                    str(settings.video_worker_concurrency)
+                    if queue == "backend.tasks.video_huey"
+                    else str(settings.image_worker_concurrency)
+                    if queue == "backend.tasks.image_huey"
+                    else "1"
+                ),
             ]
         )
         for queue in queues

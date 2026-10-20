@@ -1,3 +1,5 @@
+import base64
+import httpx
 import pytest
 
 from backend import media
@@ -77,6 +79,32 @@ def test_image_generation_reports_all_provider_failures(monkeypatch) -> None:
         generate_storyboard_image("prompt", "scene", "wide", "16:9")
 
 
+def test_reference_failures_never_retry_without_attachments(tmp_path, monkeypatch) -> None:
+    from backend.media import FaceReferenceImage
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "image_providers", "chatgpt_web,gemini_web")
+    monkeypatch.setattr(media, "image_provider_statuses", lambda: [
+        {"id": provider, "label": provider, "available": True}
+        for provider in ("chatgpt_web", "gemini_web")
+    ])
+    refs = [FaceReferenceImage(character_name="GABE", mime_type="image/png", data=b"face")]
+    calls = []
+
+    def request(provider, prompt, aspect_ratio, progress=None, references=None, conversation_url=None):
+        calls.append((provider, references))
+        if not references:
+            return b"\x89PNG\r\n\x1a\nimage", "model", {}
+        raise RuntimeError("reference_attach_failed")
+
+    monkeypatch.setattr(media, "_request_provider_image", request)
+    with pytest.raises(RuntimeError, match="reference_attach_failed"):
+        generate_storyboard_image("GABE waits", "Office", "Medium", "9:16", references=refs)
+
+    assert calls == [("chatgpt_web", refs), ("gemini_web", refs)]
+    assert not list(settings.media_dir.glob("generated-*"))
+
+
 def test_prepare_face_reference_prompt_names_characters() -> None:
     from backend.media import FaceReferenceImage, prepare_face_reference_prompt
 
@@ -108,6 +136,7 @@ def test_prepare_face_reference_prompt_with_3d_turnaround() -> None:
     )
 
     assert "Character 3D turnaround reference sheet(s)" in prepared
+    assert "never for pose" in prepared
     assert "attached for: GABE" in prepared
     assert "clothing/wardrobe, body build, and proportions" in prepared
     assert "Identity references are attached for: ROSA" in prepared
@@ -117,6 +146,29 @@ def test_prepare_face_reference_prompt_with_3d_turnaround() -> None:
     assert payload[0]["reference_type"] == "character_3d"
     assert payload[1]["reference_type"] == "face_identity"
     assert payload[2]["reference_type"] == "face_identity"
+
+
+def test_prepare_face_reference_prompt_prop_and_scene() -> None:
+    from backend.media import FaceReferenceImage, _reference_payload, prepare_face_reference_prompt
+
+    refs = [
+        FaceReferenceImage(character_name="BISCUIT PACK", mime_type="image/png", data=b"prop", view_type="prop"),
+        FaceReferenceImage(character_name="KITCHEN", mime_type="image/png", data=b"scene", view_type="scene"),
+        FaceReferenceImage(character_name="MARA", mime_type="image/png", data=b"face", view_type="main"),
+    ]
+    prepared = prepare_face_reference_prompt("MARA holds @BISCUIT_PACK in @KITCHEN", refs)
+    assert "Prop object references are attached for: BISCUIT PACK" in prepared
+    assert "Scene/set environment references are attached for: KITCHEN" in prepared
+    assert "Identity references are attached for: MARA" in prepared
+    assert "exact face and likeness" in prepared
+    assert "shape, proportions, materials" in prepared
+
+    payload = _reference_payload(refs)
+    assert [item["reference_type"] for item in payload] == [
+        "prop_object",
+        "scene_environment",
+        "face_identity",
+    ]
 
 
 
@@ -244,3 +296,63 @@ def test_generate_storyboard_chatgpt_dual(tmp_path, monkeypatch) -> None:
         assert im.width > im.height
     with Image.open(settings.media_dir / fn_9_16) as im:
         assert im.height > im.width
+
+
+def test_gemini_web_retries_on_client_not_initialized(monkeypatch) -> None:
+    calls = []
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+    b64_png = base64.b64encode(png_bytes).decode()
+
+    def mock_post(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            req = httpx.Request("POST", url)
+            resp = httpx.Response(500, text='{"error":"client not initialized"}', request=req)
+            raise httpx.HTTPStatusError("500 client not initialized", request=req, response=resp)
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"b64_json": b64_png}],
+                "provider_metadata": {"conversation_url": "https://gemini.google.com/app/c_test"},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", mock_post)
+    monkeypatch.setattr(media.time, "sleep", lambda s: None)
+
+    image, model, metadata = media._request_provider_image(
+        "gemini_web",
+        "A Nigerian provision shop",
+        "16:9",
+    )
+
+    assert len(calls) == 2
+    assert image == png_bytes
+    assert metadata.get("conversation_url") == "https://gemini.google.com/app/test"
+
+
+def test_chatgpt_web_returns_decoded_image_and_metadata(monkeypatch) -> None:
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+    b64_png = base64.b64encode(png_bytes).decode()
+
+    def mock_post(url, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"b64_json": b64_png}],
+                "provider_metadata": {"conversation_url": "https://chatgpt.com/c/chatgpt-test"},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", mock_post)
+
+    image, model, metadata = media._request_provider_image(
+        "chatgpt_web",
+        "A Nigerian provision shop",
+        "16:9",
+    )
+
+    assert image == png_bytes
+    assert metadata.get("conversation_url") == "https://chatgpt.com/c/chatgpt-test"

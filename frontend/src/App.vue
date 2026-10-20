@@ -5,7 +5,7 @@ import { Activity, Bot, Clapperboard, Command, Film, MessageSquareText, Moon, Re
 import { UiBadge, UiButton, UiCard, UiDialog, UiIconButton, UiInput, UiTooltip } from '@/components/ui'
 import { useStudioStore } from '@/stores/studio'
 import { initTheme, setTheme, type ThemeMode } from '@/lib/theme'
-import { api, DEFAULT_FLOW_PRESETS } from '@/lib/api'
+import { api, DEFAULT_FLOW_PRESETS, type StemSeparatorId, type StemSeparatorStatus } from '@/lib/api'
 
 const router = useRouter()
 const store = useStudioStore()
@@ -52,6 +52,72 @@ function openCommands() {
 function openSettings() {
   showCommands.value = false
   showSettings.value = true
+  void loadStemSeparators()
+  void loadVideoProviders()
+}
+
+const stemSeparators = ref<StemSeparatorStatus[]>([])
+const switchingStemSeparator = ref(false)
+const stemSeparatorMessage = ref('')
+
+async function loadStemSeparators() {
+  try {
+    stemSeparators.value = await api.stemSeparators()
+  } catch (err: any) {
+    stemSeparatorMessage.value = err?.message || 'Music separation status is unavailable'
+  }
+}
+
+async function useStemSeparator(providerId: StemSeparatorId) {
+  if (switchingStemSeparator.value) return
+  switchingStemSeparator.value = true
+  stemSeparatorMessage.value = ''
+  try {
+    stemSeparators.value = await api.setStemSeparator(providerId)
+  } catch (err: any) {
+    stemSeparatorMessage.value = err?.message || 'Failed to switch music separator'
+  } finally {
+    switchingStemSeparator.value = false
+  }
+}
+
+const videoProviders = ref<
+  Array<{
+    id: string
+    label: string
+    configured: boolean
+    available: boolean
+    detail: string
+    selected: boolean
+    model?: string
+    active_preset?: string
+    presets?: Array<{ id: string; label: string; short_label: string; credit_note: string }>
+  }>
+>([])
+const switchingVideoProvider = ref(false)
+const videoProviderMessage = ref('')
+
+async function loadVideoProviders() {
+  try {
+    videoProviders.value = await api.videoProviders()
+  } catch (err: any) {
+    videoProviderMessage.value = err?.message || 'Video provider status is unavailable'
+  }
+}
+
+async function useVideoProvider(providerId: string) {
+  if (switchingVideoProvider.value) return
+  switchingVideoProvider.value = true
+  videoProviderMessage.value = ''
+  try {
+    const updated = await api.selectVideoProvider(providerId)
+    store.videoProvider = updated
+    await loadVideoProviders()
+  } catch (err: any) {
+    videoProviderMessage.value = err?.message || 'Failed to switch video provider'
+  } finally {
+    switchingVideoProvider.value = false
+  }
 }
 
 async function runCommand(item: CommandItem) {
@@ -68,7 +134,7 @@ async function runCommand(item: CommandItem) {
 async function refreshProviders() {
   refreshing.value = true
   try {
-    await store.initialize(store.currentProject?.id)
+    await Promise.all([store.initialize(store.currentProject?.id), loadStemSeparators(), loadVideoProviders()])
   } finally {
     refreshing.value = false
   }
@@ -103,6 +169,23 @@ async function selectFlowModel(presetId: string) {
     flowSyncMessage.value = err?.message || 'Failed to switch video model'
   } finally {
     switchingFlowModel.value = false
+  }
+}
+
+const reorderingImageProviders = ref(false)
+const imageOrderMessage = ref('')
+
+async function tryImageProviderFirst(providerId: string) {
+  if (reorderingImageProviders.value) return
+  reorderingImageProviders.value = true
+  imageOrderMessage.value = ''
+  try {
+    const rest = store.imageProviders.map((provider) => provider.id).filter((id) => id !== providerId)
+    store.imageProviders = await api.setImageProviderOrder([providerId, ...rest])
+  } catch (err: any) {
+    imageOrderMessage.value = err?.message || 'Failed to change image provider order'
+  } finally {
+    reorderingImageProviders.value = false
   }
 }
 
@@ -204,17 +287,27 @@ onUnmounted(() => {
       </div>
       <div class="settings-section-heading"><span>Image providers</span></div>
       <div class="provider-settings-list">
-        <UiCard v-for="provider in store.imageProviders" :key="`image-${provider.id}`" class="provider-setting-card"><span class="provider-status-dot" :class="{ ready: provider.verified, connected: provider.connected }"></span><div><strong>{{ provider.priority }}. {{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><UiBadge :tone="provider.verified ? 'success' : provider.connected ? 'accent' : provider.configured ? 'danger' : 'neutral'">{{ provider.verified ? 'Verified' : provider.connected ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
+        <UiCard v-for="provider in store.imageProviders" :key="`image-${provider.id}`" class="provider-setting-card image-provider-card"><span class="provider-status-dot" :class="{ ready: provider.verified, connected: provider.connected }"></span><div><strong>{{ provider.priority }}. {{ provider.label }}</strong><small>{{ provider.model }} · {{ provider.detail }}</small></div><button v-if="provider.priority > 1" type="button" class="image-order-action" :disabled="reorderingImageProviders" @click="tryImageProviderFirst(provider.id)">Try first</button><span v-else class="image-order-first">Tried first</span><UiBadge :tone="provider.verified ? 'success' : provider.connected ? 'accent' : provider.configured ? 'danger' : 'neutral'">{{ provider.verified ? 'Verified' : provider.connected ? 'Connected' : provider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
       </div>
+      <p v-if="store.imageProviders.length > 1" class="image-order-hint">If the first provider is offline or fails, Cutline tries the next one.</p>
+      <p v-if="imageOrderMessage" class="image-order-hint error">{{ imageOrderMessage }}</p>
+      <div class="settings-section-heading"><span>Music separation</span></div>
+      <div class="provider-settings-list">
+        <UiCard v-for="separator in stemSeparators" :key="`stems-${separator.id}`" class="provider-setting-card image-provider-card stem-separator-card"><span class="provider-status-dot" :class="{ ready: separator.available }"></span><div><strong>{{ separator.label }}</strong><small>{{ separator.detail }}</small></div><span v-if="separator.selected" class="image-order-first">Selected</span><button v-else type="button" class="image-order-action" :disabled="switchingStemSeparator" @click="useStemSeparator(separator.id)">Use</button><UiBadge :tone="separator.available ? 'success' : separator.configured ? 'danger' : 'neutral'">{{ separator.available ? 'Ready' : separator.configured ? 'Offline' : 'Not set up' }}</UiBadge></UiCard>
+      </div>
+      <p v-if="stemSeparators.length" class="image-order-hint">Used by “Separate music” in the editor. You can still pick another one per clip.</p>
+      <p v-if="stemSeparatorMessage" class="image-order-hint error">{{ stemSeparatorMessage }}</p>
       <div class="settings-section-heading">
         <span>Video provider</span>
-        <UiButton v-if="store.videoProvider" size="sm" variant="ghost" :disabled="resettingFlow" @click="resetFlowSession">
+        <UiButton v-if="store.videoProvider?.id === 'flowkit'" size="sm" variant="ghost" :disabled="resettingFlow" @click="resetFlowSession">
           <RefreshCw :class="{ spin: resettingFlow }" :size="14" />
           {{ resettingFlow ? 'Syncing Flow…' : 'Switch Account / Sync Flow' }}
         </UiButton>
       </div>
-      <UiCard v-if="store.videoProvider" class="video-provider-setting provider-setting-card"><Bot :size="17" /><div><strong>{{ store.videoProvider.label }}</strong><small>{{ flowSyncMessage || store.videoProvider.detail }}</small></div><UiBadge :tone="store.videoProvider.available ? 'success' : store.videoProvider.configured ? 'danger' : 'neutral'">{{ store.videoProvider.available ? 'Connected' : store.videoProvider.configured ? 'Offline' : 'Not configured' }}</UiBadge></UiCard>
-      <div v-if="store.videoProvider" class="flow-model-presets">
+      <div v-if="videoProviders.length" class="provider-settings-list">
+        <UiCard v-for="vp in videoProviders" :key="`video-${vp.id}`" class="provider-setting-card image-provider-card"><span class="provider-status-dot" :class="{ ready: vp.available }"></span><div><strong>{{ vp.label }}</strong><small>{{ vp.detail }}</small></div><span v-if="vp.selected" class="image-order-first">Selected</span><button v-else type="button" class="image-order-action" :disabled="switchingVideoProvider" @click="useVideoProvider(vp.id)">Use</button><UiBadge :tone="vp.available ? 'success' : vp.configured ? 'danger' : 'neutral'">{{ vp.available ? 'Ready' : vp.configured ? 'Offline' : 'Not set up' }}</UiBadge></UiCard>
+      </div>
+      <div v-if="store.videoProvider?.id === 'flowkit'" class="flow-model-presets">
         <button
           v-for="preset in (store.videoProvider.presets?.length ? store.videoProvider.presets : DEFAULT_FLOW_PRESETS)"
           :key="preset.id"
@@ -228,7 +321,7 @@ onUnmounted(() => {
           <small>{{ preset.credit_note }}</small>
         </button>
       </div>
-      <p v-else class="settings-empty">Video provider status is unavailable.</p>
+      <p v-if="videoProviderMessage" class="image-order-hint error">{{ videoProviderMessage }}</p>
     </UiDialog>
   </div>
 </template>

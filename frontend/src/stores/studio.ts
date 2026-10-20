@@ -12,6 +12,8 @@ export const useStudioStore = defineStore('studio', () => {
   let requestedProjectId: string | null = null
   let requestedEpisodeId: string | null = null
   const currentEpisodeId = ref<string | null>(null)
+  // Shot the user is working on, shared by Produce and Assemble so switching stages keeps the place.
+  const focusShotId = ref<string | null>(null)
   const creatingEpisode = ref(false)
   const updatingProject = ref(false)
   const providers = ref<ProviderStatus[]>([])
@@ -1113,13 +1115,13 @@ export const useStudioStore = defineStore('studio', () => {
 
   async function updateScene(
     id: string,
-    input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
+    input: { location?: string; set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
   ) {
     if (!currentProject.value) return
     error.value = ''
     try {
       await api.updateScene(id, input)
-      await loadProject(currentProject.value.id)
+      await loadProject(currentProject.value.id, { episodeId: currentEpisodeId.value || undefined })
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : 'Could not update scene continuity'
       throw cause
@@ -1957,6 +1959,7 @@ export const useStudioStore = defineStore('studio', () => {
     projects,
     currentProject,
     currentEpisodeId,
+    focusShotId,
     creatingEpisode,
     updatingProject,
     episodes,
@@ -1994,6 +1997,7 @@ export const useStudioStore = defineStore('studio', () => {
     isGeneratingCast,
     isCancellingJob,
     cancelJob,
+    watchJob,
     processingClipId,
     processingAudioId,
     finalCutJob,

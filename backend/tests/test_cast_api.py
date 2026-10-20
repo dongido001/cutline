@@ -40,6 +40,25 @@ def _client(tmp_path, monkeypatch):
     return TestClient(app), session, project, shot
 
 
+def test_assigning_set_preserves_other_notes_and_invalidates_saved_package(tmp_path, monkeypatch):
+    client, session, project, shot = _client(tmp_path, monkeypatch)
+    try:
+        shot.scene.lighting_notes = "Warm practical lamp"
+        shot.scene.wardrobe_notes = "Blue dress"
+        shot.continuity_snapshot = {"scene": {"location": "Old room"}}
+        session.commit()
+        response = client.patch(f"/api/scenes/{shot.scene_id}", json={"location": "COMPOUND KITCHEN"})
+        assert response.status_code == 200
+        assert response.json()["location"] == "COMPOUND KITCHEN"
+        assert response.json()["lighting_notes"] == "Warm practical lamp"
+        assert response.json()["wardrobe_notes"] == "Blue dress"
+        session.expire_all()
+        assert shot.continuity_snapshot is None
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_cast_crud_and_reference_upload(tmp_path, monkeypatch) -> None:
     client, session, project, _shot = _client(tmp_path, monkeypatch)
     try:

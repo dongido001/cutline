@@ -301,7 +301,7 @@ def _generate_missing_images(
             continue
         from .continuity import get_or_create_shot_snapshot
         try:
-            snapshot = get_or_create_shot_snapshot(db, project, shot, aspect)
+            snapshot = get_or_create_shot_snapshot(db, project, shot, aspect, require_cast_references=True)
         except RuntimeError as exc:
             attention.append(f"{shot.title or shot.id}: image failed ({exc})")
             completed += 1
@@ -730,10 +730,11 @@ def _assemble_preview(db: Session, project: Project, job: Job, variant: str) -> 
         job.progress = 0.9
         db.commit()
 
-        def update_progress(completed: int, total: int) -> None:
+        def update_progress(completed: int, total: int, message: str | None = None) -> None:
             raise_if_cancelled(db, job.id)
-            job.progress = 0.9 + (completed / max(total, 1)) * 0.09
-            job.message = f"Rendering preview shot {completed} of {total}"
+            denom = max(total, 1)
+            job.progress = min(0.99, 0.9 + (completed / denom) * 0.09)
+            job.message = message or f"Rendering preview shot {completed} of {total}"
             db.commit()
 
         result = assemble_timeline(project, document, variant, db, update_progress)

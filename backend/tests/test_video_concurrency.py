@@ -9,7 +9,7 @@ from backend.settings import settings
 from test_video_generation_regressions import setup_shot
 
 
-def test_worker_concurrency_only_changes_video_queue(monkeypatch):
+def test_worker_concurrency_only_changes_video_and_image_queues(monkeypatch):
     from backend import cli
     calls = []
     class Process:
@@ -20,10 +20,17 @@ def test_worker_concurrency_only_changes_video_queue(monkeypatch):
             return 0
     monkeypatch.setattr(cli.subprocess, 'Popen', lambda command: calls.append(command) or Process())
     monkeypatch.setattr(settings, 'video_worker_concurrency', 3)
+    monkeypatch.setattr(settings, 'image_worker_concurrency', 2)
     cli.run_worker()
     assert len(calls) == 5
     for command in calls:
-        assert command[-1] == ('3' if command[3] == 'backend.tasks.video_huey' else '1')
+        queue = command[3]
+        if queue == 'backend.tasks.video_huey':
+            assert command[-1] == '3'
+        elif queue == 'backend.tasks.image_huey':
+            assert command[-1] == '2'
+        else:
+            assert command[-1] == '1'
 
 
 @pytest.mark.parametrize("with_failures", [False, True])

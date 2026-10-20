@@ -2,9 +2,44 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PublishPanel from '@/components/PublishPanel.vue'
-import { api, DEFAULT_LUT_PRESETS, lutCssFilter, videoColorBoostFilter, type AspectRatio, type LUTPreset, type OutputVariant, type ProjectDetail, type ProjectTimeline, type ProjectVariantExport, type Shot, type TimelineAsset, type TimelineAudioOverlay, type TimelineGeometry, type TimelineImageOverlay, type TimelinePrimaryItem, type TimelineSource, type TimelineVideoOverlay } from '@/lib/api'
+import ReleaseKitPanel from '@/components/ReleaseKitPanel.vue'
+import LutPicker from '@/components/LutPicker.vue'
+import FrameStylePicker from '@/components/FrameStylePicker.vue'
+import AudioLibraryPanel from '@/components/AudioLibraryPanel.vue'
+import SaveToLibraryControl from '@/components/SaveToLibraryControl.vue'
+import StemSeparationControls from '@/components/StemSeparationControls.vue'
+import { fetchLutCube, LutGlRenderer } from '@/lib/lutGl'
+import {
+  api,
+  DEFAULT_LUT_PRESETS,
+  lutCssFilter,
+  registerLutPresets,
+  videoColorBoostFilter,
+  type AspectRatio,
+  type LayoutTemplatePreset,
+  type LUTPreset,
+  type OutputVariant,
+  type LibraryAudio,
+  type ProjectDetail,
+  type ProjectTimeline,
+  type ReleaseFrameSegment,
+  type ProjectVariantExport,
+  type Shot,
+  type StemSeparatorId,
+  type StemSeparatorStatus,
+  type TimelineAsset,
+  type TimelineAudioOverlay,
+  type TimelineCanvasLayout,
+  type TimelineGeometry,
+  type TimelineImageOverlay,
+  type TimelinePrimaryItem,
+  type TimelineSource,
+  type TimelineTransition,
+  type TimelineTransitionKind,
+  type TimelineVideoOverlay,
+} from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
-import { AlignCenter, Boxes, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CopyPlus, Crosshair, Download, Film, GripVertical, ImagePlus, Keyboard, Layers, LoaderCircle, MoveLeft, MoveRight, Music, Palette, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
+import { AlignCenter, Boxes, Library, Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CopyPlus, Crosshair, Download, Film, Frame, GripVertical, ImagePlus, Keyboard, Layers, LoaderCircle, MoveLeft, MoveRight, Music, Package, Palette, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
 
 const props = defineProps<{ project: ProjectDetail; shots: Shot[]; compilationId?: string }>()
 const emit = defineEmits<{ variantChange: [variant: OutputVariant] }>()
@@ -56,9 +91,12 @@ function readPersistedUiState(projectId = props.project.id, episodeId = store.cu
 
 const initialUiState = readPersistedUiState()
 const requestedVariant = route.query.variant
+const requestedAspect = route.query.aspect
 const variant = ref<OutputVariant>(
   requestedVariant === 'shorts' || requestedVariant === 'landscape'
     ? requestedVariant
+    : requestedAspect === '9:16' || requestedAspect === '16:9'
+      ? requestedAspect === '9:16' ? 'shorts' : 'landscape'
     : initialUiState.variant === 'shorts' || initialUiState.variant === 'landscape'
       ? initialUiState.variant
       : props.project.aspect_ratio === '9:16' ? 'shorts' : 'landscape',
@@ -82,6 +120,11 @@ const playing = ref(false)
 const loopPlayback = ref(false)
 const isMuted = ref(Boolean(initialUiState.isMuted))
 const previewVideo = ref<HTMLVideoElement | null>(null)
+const previewImage = ref<HTMLImageElement | null>(null)
+const lutCanvas = ref<HTMLCanvasElement | null>(null)
+const lutGl = ref<LutGlRenderer | null>(null)
+const lutGlActive = ref(false)
+const lutGlSupported = LutGlRenderer.isSupported()
 const sourceDurationMs = ref(0)
 const timelineScrollRef = ref<HTMLElement | null>(null)
 const addMenuRef = ref<HTMLDetailsElement | null>(null)
@@ -95,6 +138,8 @@ const currentScrollLeft = ref(typeof initialUiState.scrollLeft === 'number' && i
 const showShortcutsModal = ref(false)
 const dragSourceIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
+const primaryTrackRef = ref<HTMLElement | null>(null)
+const overlayToPrimaryDropMs = ref<number | null>(null)
 const dragDuplicateModifier = ref(false)
 // Publish modal state is URL-driven (?publish=1) so refresh preserves it
 const showPublishModal = computed(() => route.query.publish === '1')
@@ -115,6 +160,9 @@ function closeAddMenu() {
 }
 
 function handleDocumentPointerDown(event: PointerEvent) {
+  if (event.target instanceof Element && !event.target.closest('.transition-popover, .transition-marker')) {
+    transitionPopoverIndex.value = null
+  }
   if (!addMenuRef.value?.open) return
   const target = event.target
   if (target instanceof Node && !addMenuRef.value.contains(target)) {
@@ -152,6 +200,66 @@ function closePublishModal() {
   const q = { ...route.query }
   delete q.publish
   router.replace({ query: q })
+}
+
+const showReleaseKit = computed(() => route.query.kit === '1')
+const releaseKitRefresh = ref(0)
+const capturingFrame = ref(false)
+const frameNotice = ref('')
+let frameNoticeTimer: number | null = null
+const releaseKitScope = computed(() => ({
+  variant: variant.value,
+  episodeId: props.compilationId ? null : store.currentEpisodeId || null,
+  compilationId: props.compilationId || null,
+}))
+
+function openReleaseKit() {
+  const q = { ...route.query }
+  delete q.publish
+  q.kit = '1'
+  router.replace({ query: q })
+}
+
+function closeReleaseKit() {
+  const q = { ...route.query }
+  delete q.kit
+  router.replace({ query: q })
+}
+
+function closeModalsFromRoute() {
+  if (showPublishModal.value || showReleaseKit.value) {
+    const q = { ...route.query }
+    delete q.publish
+    delete q.kit
+    router.replace({ query: q })
+  }
+}
+
+async function captureReleaseFrame() {
+  const item = activeItem.value
+  if (!item?.source || item.source.kind === 'shot_audio') {
+    localError.value = 'Move the playhead over a video or image clip to grab a frame.'
+    return
+  }
+  capturingFrame.value = true
+  try {
+    await flushPendingSave()
+    const kit = await api.releaseKit(props.project.id, releaseKitScope.value)
+    const updated = await api.addReleaseKitFrame(kit.id, {
+      source: item.source,
+      source_ms: Math.max(0, Math.round(primarySourceMs(item, activeLocalMs.value))),
+      timeline_ms: Math.max(0, Math.round(playheadMs.value)),
+      label: item.label,
+    })
+    releaseKitRefresh.value += 1
+    frameNotice.value = `Frame added to the ${variant.value === 'shorts' ? 'Shorts' : 'landscape'} release kit (${updated.frames.length}/8)`
+    if (frameNoticeTimer !== null) window.clearTimeout(frameNoticeTimer)
+    frameNoticeTimer = window.setTimeout(() => { frameNotice.value = '' }, 3500)
+  } catch (cause) {
+    localError.value = cause instanceof Error ? cause.message : 'Could not grab the frame'
+  } finally {
+    capturingFrame.value = false
+  }
 }
 
 function updateContainerWidth() {
@@ -214,16 +322,21 @@ let saveTimer: number | undefined
 let pendingSave = false
 let dirtyDocument = false
 let playbackTimer: number | undefined
-type OverlayItem = { id: string; start_ms: number; duration_ms: number }
+type OverlayItem = { id: string; start_ms: number; duration_ms: number; lane?: number | null }
 type OverlayEditMode = 'move' | 'resize-start' | 'resize-end'
 let overlayEdit: {
   pointerId: number
+  kind: 'video' | 'image' | 'text' | 'audio'
   item: OverlayItem
   mode: OverlayEditMode
   startX: number
+  startY: number
+  trackTop: number
   trackWidth: number
   initialStart: number
   initialDuration: number
+  initialLane: number
+  laneCount: number
   before: string
   moved: boolean
 } | null = null
@@ -311,6 +424,98 @@ const activeIndex = computed(() => {
 })
 const activeItem = computed(() => primary.value[activeIndex.value] ?? null)
 const activeLocalMs = computed(() => playheadMs.value - (starts.value[activeIndex.value] ?? 0))
+const TRANSITION_OPTIONS: { kind: TimelineTransitionKind; label: string }[] = [
+  { kind: 'cut', label: 'Cut (no transition)' },
+  { kind: 'fade', label: 'Crossfade' },
+  { kind: 'dissolve', label: 'Grain dissolve' },
+  { kind: 'fadeblack', label: 'Dip to black' },
+  { kind: 'fadewhite', label: 'Dip to white' },
+  { kind: 'wipeleft', label: 'Wipe left' },
+  { kind: 'wiperight', label: 'Wipe right' },
+  { kind: 'slideleft', label: 'Slide left' },
+  { kind: 'slideright', label: 'Slide right' },
+]
+const transitionLabel = (kind: TimelineTransitionKind) => TRANSITION_OPTIONS.find((option) => option.kind === kind)?.label ?? kind
+const defaultTransition = computed(() => timeline.value?.document.default_transition ?? null)
+const transitionPopoverIndex = ref<number | null>(null)
+const transitionDurationDrafts = ref<Record<string, number>>({})
+function transitionDuration(key: string | number, durationMs: number) {
+  return transitionDurationDrafts.value[key] ?? durationMs / 1000
+}
+/** Transition into primary[index] after the default and the clip lengths are applied; null is a hard cut. */
+function effectiveTransition(index: number): { kind: TimelineTransitionKind; duration_ms: number } | null {
+  const item = primary.value[index]
+  const previous = primary.value[index - 1]
+  if (!item || !previous) return null
+  const transition = item.transition ?? defaultTransition.value
+  if (!transition || transition.kind === 'cut') return null
+  return { kind: transition.kind, duration_ms: Math.min(transition.duration_ms, previous.duration_ms, item.duration_ms) }
+}
+function setDefaultTransition(kind: TimelineTransitionKind, durationMs = defaultTransition.value?.duration_ms ?? 500) {
+  delete transitionDurationDrafts.value.default
+  if (!timeline.value) return
+  mutate(() => {
+    timeline.value!.document.default_transition = kind === 'cut' ? null : { kind, duration_ms: durationMs }
+  })
+}
+function setItemTransition(index: number, transition: TimelineTransition | null) {
+  delete transitionDurationDrafts.value[index]
+  const item = primary.value[index]
+  if (!item) return
+  mutate(() => {
+    item.transition = transition
+  })
+}
+function onTransitionKindChange(index: number, value: string) {
+  if (value === 'default') return setItemTransition(index, null)
+  const current = primary.value[index]?.transition ?? defaultTransition.value
+  setItemTransition(index, { kind: value as TimelineTransitionKind, duration_ms: current?.duration_ms ?? 500 })
+}
+function onTransitionDurationChange(index: number, seconds: number) {
+  const item = primary.value[index]
+  const base = item?.transition ?? defaultTransition.value
+  if (!base || base.kind === 'cut') return
+  setItemTransition(index, { kind: base.kind, duration_ms: Math.round(Math.max(0.1, Math.min(2, seconds)) * 1000) })
+}
+watch([selectedId, () => primary.value.length], () => { transitionPopoverIndex.value = null })
+/** Preview stand-in for the rendered blend: the picture dips towards the cut and recovers after it. */
+const transitionPreviewStyle = computed((): Record<string, string> => {
+  const index = activeIndex.value
+  const item = primary.value[index]
+  if (!item) return {}
+  const local = activeLocalMs.value
+  const into = effectiveTransition(index)
+  const out = effectiveTransition(index + 1)
+  let nearest: { kind: TimelineTransitionKind; progress: number } | null = null
+  if (into && local < into.duration_ms / 2) nearest = { kind: into.kind, progress: local / (into.duration_ms / 2) }
+  const toEnd = item.duration_ms - local
+  if (out && toEnd < out.duration_ms / 2) {
+    const progress = toEnd / (out.duration_ms / 2)
+    if (!nearest || progress < nearest.progress) nearest = { kind: out.kind, progress }
+  }
+  if (!nearest) return {}
+  const p = Math.max(0, Math.min(1, nearest.progress))
+  if (nearest.kind === 'fadewhite') return { filter: `brightness(${(1 + (1 - p) * 3).toFixed(3)})` }
+  const floor = nearest.kind === 'fadeblack' ? 0 : 0.35
+  return { opacity: (floor + (1 - floor) * p).toFixed(3) }
+})
+const releaseFrameSegments = computed<ReleaseFrameSegment[]>(() =>
+  primary.value.flatMap((item, index) => {
+    if (!item.source || item.source.kind === 'shot_audio') return []
+    const media = resolveSource(item.source)
+    if (!media?.url) return []
+    return [{
+      id: item.id,
+      start_ms: starts.value[index] ?? 0,
+      duration_ms: item.duration_ms,
+      source: item.source,
+      source_in_ms: item.source_in_ms,
+      label: item.label,
+      url: media.url,
+      mime_type: media.mime_type || '',
+    }]
+  }),
+)
 
 const isMultiSelect = computed(() => selectedEntries.value.length > 1)
 
@@ -436,26 +641,135 @@ function ensureCropFields(geom: TimelineGeometry): TimelineGeometry {
   if (typeof geom.crop_right !== 'number') geom.crop_right = 0
   if (typeof geom.offset_x !== 'number') geom.offset_x = 0
   if (typeof geom.offset_y !== 'number') geom.offset_y = 0
+  if (typeof geom.focal_x !== 'number') geom.focal_x = 0.5
+  if (typeof geom.focal_y !== 'number') geom.focal_y = 0.5
   if (typeof geom.lut !== 'string') geom.lut = 'none'
   if (typeof geom.lut_strength !== 'number') geom.lut_strength = 1
   return geom
 }
 
 const lutPresets = ref<LUTPreset[]>(DEFAULT_LUT_PRESETS)
-
-const lutGroups = computed(() => {
-  const groups: Record<string, LUTPreset[]> = {}
-  for (const preset of lutPresets.value) {
-    const cat = preset.category || 'General'
-    if (!groups[cat]) groups[cat] = []
-    groups[cat].push(preset)
-  }
-  return Object.entries(groups).map(([category, presets]) => ({ category, presets }))
+const layoutCatalog = ref<{ shorts: LayoutTemplatePreset[]; landscape: LayoutTemplatePreset[] }>({
+  shorts: [],
+  landscape: [],
 })
 
-function selectedLutPreset(lutId?: string): LUTPreset | undefined {
-  if (!lutId || lutId === 'none') return undefined
-  return lutPresets.value.find((p) => p.id === lutId)
+function defaultCanvasLayout(): TimelineCanvasLayout {
+  return {
+    template: 'full_bleed',
+    matte: 'solid',
+    matte_color: '#0B0D12',
+    matte_color_b: '#1A2233',
+    top_text: '',
+    bottom_text: '',
+    brand_text: '',
+    accent_bar: false,
+    accent_color: '#39D0FF',
+  }
+}
+
+function ensureCanvasLayout(): TimelineCanvasLayout {
+  if (!timeline.value) return defaultCanvasLayout()
+  const current = timeline.value.document.layout
+  if (!current || typeof current !== 'object') {
+    timeline.value.document.layout = defaultCanvasLayout()
+  } else {
+    timeline.value.document.layout = { ...defaultCanvasLayout(), ...current }
+  }
+  return timeline.value.document.layout!
+}
+
+const canvasLayout = computed(() => {
+  const current = timeline.value?.document?.layout
+  return current ? { ...defaultCanvasLayout(), ...current } : defaultCanvasLayout()
+})
+const layoutFamily = computed(() => (variant.value === 'shorts' ? 'shorts' : 'landscape'))
+const layoutPresets = computed<LayoutTemplatePreset[]>(() => {
+  const fromApi = layoutCatalog.value[layoutFamily.value] || []
+  if (fromApi.length) return fromApi
+  // Offline fallback so the picker is never empty before /layouts loads.
+  const family: 'shorts' | 'landscape' = layoutFamily.value
+  return family === 'shorts'
+    ? [
+        { id: 'full_bleed', label: 'Full bleed', blurb: 'Edge-to-edge', family, video: { x: 0, y: 0, w: 1, h: 1 }, default_matte: 'solid' as const, slots: {} },
+        { id: 'center_stage', label: 'Center stage', blurb: 'Hook + caption bands', family, video: { x: 0, y: 0.16, w: 1, h: 0.68 }, default_matte: 'blur' as const, slots: { top: 'hook', bottom: 'caption' } },
+        { id: 'top_hero', label: 'Top hero', blurb: 'CTA band below', family, video: { x: 0, y: 0, w: 1, h: 0.7 }, default_matte: 'gradient' as const, slots: { bottom: 'caption' } },
+        { id: 'bottom_anchor', label: 'Bottom anchor', blurb: 'Hook band on top', family, video: { x: 0, y: 0.3, w: 1, h: 0.7 }, default_matte: 'gradient' as const, slots: { top: 'hook' } },
+        { id: 'caption_stack', label: 'Caption stack', blurb: 'Tall caption band', family, video: { x: 0, y: 0, w: 1, h: 0.58 }, default_matte: 'solid' as const, slots: { bottom: 'caption' } },
+        { id: 'split_billboard', label: 'Split billboard', blurb: 'Title-card energy', family, video: { x: 0, y: 0.22, w: 1, h: 0.56 }, default_matte: 'duotone' as const, slots: { top: 'hook', bottom: 'brand' }, accent_bar: true },
+      ]
+    : [
+        { id: 'full_bleed', label: 'Full bleed', blurb: 'Edge-to-edge', family, video: { x: 0, y: 0, w: 1, h: 1 }, default_matte: 'solid' as const, slots: {} },
+        { id: 'cinematic_bars', label: 'Cinematic bars', blurb: 'Letterbox prestige', family, video: { x: 0, y: 0.12, w: 1, h: 0.76 }, default_matte: 'solid' as const, slots: { top: 'hook', bottom: 'brand' }, accent_bar: true },
+        { id: 'brand_footer', label: 'Brand footer', blurb: 'Logo strip', family, video: { x: 0, y: 0, w: 1, h: 0.88 }, default_matte: 'gradient' as const, slots: { bottom: 'brand' } },
+        { id: 'lower_third_room', label: 'Lower-third room', blurb: 'Nameplate space', family, video: { x: 0, y: 0, w: 1, h: 0.78 }, default_matte: 'blur' as const, slots: { bottom: 'caption' } },
+      ]
+})
+const activeLayoutPreset = computed(
+  () => layoutPresets.value.find((p) => p.id === canvasLayout.value.template) || layoutPresets.value[0] || null,
+)
+const layoutVideoRect = computed(() => activeLayoutPreset.value?.video || { x: 0, y: 0, w: 1, h: 1 })
+const isFullBleedLayout = computed(
+  () =>
+    Math.abs(layoutVideoRect.value.x) < 1e-6 &&
+    Math.abs(layoutVideoRect.value.y) < 1e-6 &&
+    Math.abs(layoutVideoRect.value.w - 1) < 1e-6 &&
+    Math.abs(layoutVideoRect.value.h - 1) < 1e-6,
+)
+const layoutSectionEl = ref<HTMLDetailsElement | null>(null)
+
+function openLayoutSection() {
+  if (layoutSectionEl.value) layoutSectionEl.value.open = true
+}
+
+watch(
+  isFullBleedLayout,
+  (fullBleed) => {
+    if (!fullBleed) nextTick(openLayoutSection)
+  },
+  { immediate: true },
+)
+
+function applyLayoutTemplate(preset: LayoutTemplatePreset) {
+  if (!timeline.value) return
+  mutate(() => {
+    const layout = ensureCanvasLayout()
+    layout.template = preset.id
+    layout.matte = preset.default_matte || layout.matte
+    layout.accent_bar = Boolean(preset.accent_bar)
+  })
+  const fullBleed =
+    Math.abs(preset.video.x) < 1e-6 &&
+    Math.abs(preset.video.y) < 1e-6 &&
+    Math.abs(preset.video.w - 1) < 1e-6 &&
+    Math.abs(preset.video.h - 1) < 1e-6
+  if (!fullBleed) nextTick(openLayoutSection)
+}
+
+function updateCanvasLayout<K extends keyof TimelineCanvasLayout>(key: K, value: TimelineCanvasLayout[K]) {
+  if (!timeline.value) return
+  mutate(() => {
+    ensureCanvasLayout()[key] = value
+  })
+}
+
+function layoutMatteStyle(): Record<string, string> {
+  const layout = canvasLayout.value
+  if (layout.matte === 'gradient' || layout.matte === 'duotone') {
+    return {
+      background: `linear-gradient(180deg, ${layout.matte_color} 0%, ${layout.matte_color_b} 100%)`,
+    }
+  }
+  if (layout.matte === 'blur' && activeMedia.value?.url) {
+    return {
+      backgroundImage: `url(${activeMedia.value.url})`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      filter: 'blur(18px) brightness(0.55) saturate(0.7)',
+      transform: 'scale(1.08)',
+    }
+  }
+  return { background: layout.matte_color || '#0B0D12' }
 }
 
 function resetLut(geom: TimelineGeometry) {
@@ -465,10 +779,12 @@ function resetLut(geom: TimelineGeometry) {
   })
 }
 
-function setLutStrength(geom: TimelineGeometry, strength: number) {
-  mutate(() => {
-    geom.lut_strength = Math.max(0, Math.min(1, strength))
-  })
+function assignLut(geom: TimelineGeometry, lutId: string) {
+  geom.lut = lutId
+}
+
+function assignLutStrength(geom: TimelineGeometry, strength: number) {
+  geom.lut_strength = Math.max(0, Math.min(1, strength))
 }
 
 /** Frame aspect (height / width) of the current output, used to express Y offsets in container-width units. */
@@ -488,7 +804,7 @@ function geometryOffsetTranslate(geom: TimelineGeometry): string | undefined {
   return `${(ox * 100).toFixed(2)}cqw ${(oy * 100 * frameHeightOverWidth.value).toFixed(2)}cqw`
 }
 
-/** Track fill style for framing ranges. `center` = bipolar fill from midpoint (position). */
+/** Track fill style for framing ranges. `center` = bipolar fill from range midpoint (neutral). */
 function framingRangeStyle(
   value: number | null | undefined,
   min: number,
@@ -500,7 +816,8 @@ function framingRangeStyle(
   const v = Number.isFinite(raw) ? Math.max(min, Math.min(max, raw)) : min
   const pct = ((v - min) / span) * 100
   if (mode === 'center') {
-    const mid = ((0 - min) / span) * 100
+    // Neutral is the geometric midpoint: 0 for −1…1 offsets, 0.5 for Focus X/Y.
+    const mid = (((min + max) / 2 - min) / span) * 100
     const from = Math.min(mid, pct)
     const to = Math.max(mid, pct)
     return {
@@ -587,7 +904,11 @@ function videoOverlayGeometryFor(item: TimelineVideoOverlay) {
   return ensureCropFields(item.variant[variant.value]!)
 }
 
-function geometryCropClipPath(geom: TimelineGeometry, forceClipForZoom = false): string | undefined {
+/** Visible window of a cropped/zoomed element as fractions of its own (untransformed) box. */
+function geometryCropInsets(
+  geom: TimelineGeometry,
+  forceClipForZoom = false,
+): { top: number; right: number; bottom: number; left: number } | null {
   let cTop = Math.max(0, Math.min(0.85, Number(geom.crop_top ?? 0) || 0))
   let cBottom = Math.max(0, Math.min(0.85, Number(geom.crop_bottom ?? 0) || 0))
   let cLeft = Math.max(0, Math.min(0.85, Number(geom.crop_left ?? 0) || 0))
@@ -595,7 +916,7 @@ function geometryCropClipPath(geom: TimelineGeometry, forceClipForZoom = false):
   const zoom = Math.max(1, Number(geom.zoom ?? 1) || 1)
   const hasCrop = cTop > 1e-4 || cBottom > 1e-4 || cLeft > 1e-4 || cRight > 1e-4
   if (!hasCrop && !(forceClipForZoom && zoom > 1.001)) {
-    return undefined
+    return null
   }
   if (cTop + cBottom > 0.9) {
     const scaleV = 0.9 / (cTop + cBottom)
@@ -613,7 +934,62 @@ function geometryCropClipPath(geom: TimelineGeometry, forceClipForZoom = false):
   const localRight = Math.max(0, Math.min(0.95, 1 - (fx + (1 - cRight - fx) / zoom)))
   const localTop = Math.max(0, Math.min(0.95, fy + (cTop - fy) / zoom))
   const localBottom = Math.max(0, Math.min(0.95, 1 - (fy + (1 - cBottom - fy) / zoom)))
-  return `inset(${(localTop * 100).toFixed(2)}% ${(localRight * 100).toFixed(2)}% ${(localBottom * 100).toFixed(2)}% ${(localLeft * 100).toFixed(2)}%)`
+  return { top: localTop, right: localRight, bottom: localBottom, left: localLeft }
+}
+
+function geometryCropClipPath(geom: TimelineGeometry, forceClipForZoom = false, roundCqw = 0): string | undefined {
+  const insets = geometryCropInsets(geom, forceClipForZoom)
+  const round = roundCqw > 1e-3 ? ` round ${roundCqw.toFixed(2)}cqw` : ''
+  if (!insets) return round ? `inset(0${round})` : undefined
+  return `inset(${(insets.top * 100).toFixed(2)}% ${(insets.right * 100).toFixed(2)}% ${(insets.bottom * 100).toFixed(2)}% ${(insets.left * 100).toFixed(2)}%${round})`
+}
+
+function frameRadiusCqw(geom: TimelineGeometry): number {
+  return Math.max(0, Math.min(0.25, Number(geom.frame_radius ?? 0) || 0)) * 100
+}
+
+/** Border ring + glow for an element laid exactly over a media window (sizes in frame-width units, like the export). */
+function mediaBorderStyle(geom: TimelineGeometry | undefined): Record<string, string> | null {
+  const style = geom?.frame_style || 'none'
+  if (!geom || style === 'none') return null
+  const color = /^#[0-9a-f]{6}$/i.test(geom.frame_color || '') ? geom.frame_color! : '#FFFFFF'
+  const w = Math.max(0.002, Math.min(0.04, Number(geom.frame_width ?? 0.008) || 0.008)) * 100
+  const cq = (v: number) => `${v.toFixed(3)}cqw`
+  const borderRadius = cq(frameRadiusCqw(geom))
+  if (style === 'glow') {
+    const blur = w * 2 + 0.6
+    return {
+      borderRadius,
+      border: `${cq(Math.max(0.1, w / 2))} solid ${color}`,
+      boxShadow: `0 0 ${cq(blur * 1.5)} ${cq(w * 0.6)} ${color}, inset 0 0 ${cq(blur)} ${color}`,
+    }
+  }
+  if (style === 'neon') {
+    const blur = w * 2 + 0.6
+    return {
+      borderRadius,
+      border: `${cq(w)} solid ${color}`,
+      boxShadow: `0 0 ${cq(blur * 2)} ${cq(w)} ${color}, inset 0 0 ${cq(blur)} ${color}, inset 0 0 0 ${cq(w / 3)} rgba(255, 255, 255, 0.65)`,
+    }
+  }
+  return { borderRadius, border: `${cq(w)} ${style} ${color}` }
+}
+
+function assignFrame(geom: TimelineGeometry, patch: Partial<TimelineGeometry>) {
+  Object.assign(geom, patch)
+}
+
+function resetFrame(geom: TimelineGeometry) {
+  mutate(() => {
+    geom.frame_style = 'none'
+    geom.frame_radius = 0
+    geom.frame_width = 0.008
+    geom.frame_color = '#FFFFFF'
+  })
+}
+
+function hasFrameDecoration(geom: TimelineGeometry): boolean {
+  return (geom.frame_style ?? 'none') !== 'none' || frameRadiusCqw(geom) > 1e-3
 }
 
 function hasCropOrZoom(geom: TimelineGeometry): boolean {
@@ -764,11 +1140,8 @@ function blockThumbnailUrl(item: TimelinePrimaryItem): string | null {
 
 const activeMedia = computed(() => resolveSource(activeItem.value?.source ?? null))
 const activeGeometry = computed(() => ensureCropFields(activeItem.value?.variant[variant.value] ?? defaultGeometry(activeItem.value ?? undefined)))
-const activeMediaStyle = computed(() => {
+const activeMediaLayoutStyle = computed(() => {
   const geom = activeGeometry.value
-  const boostFilter = videoColorBoostFilter(activeMedia.value?.color_boost_strength)
-  const lutFilter = lutCssFilter(geom.lut, geom.lut_strength)
-  const filter = [boostFilter, lutFilter].filter(Boolean).join(' ')
   const clipPath = geometryCropClipPath(geom)
   const fx = (geom.focal_x ?? 0.5) * 100
   const fy = (geom.focal_y ?? 0.5) * 100
@@ -782,9 +1155,110 @@ const activeMediaStyle = computed(() => {
     transform: `scale(${zoom})`,
     ...(translate ? { translate } : {}),
     ...(clipPath ? { clipPath } : {}),
+  }
+})
+/** Where the primary video sits on the canvas: the whole frame, or the layout template's video window. */
+const primaryWindowRect = computed(() => {
+  const rect = isFullBleedLayout.value ? { x: 0, y: 0, w: 1, h: 1 } : layoutVideoRect.value
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.w * 100}%`,
+    height: `${rect.h * 100}%`,
+  }
+})
+const primaryWindowStyle = computed(() => {
+  const radius = frameRadiusCqw(activeGeometry.value)
+  return {
+    ...primaryWindowRect.value,
+    ...(radius > 1e-3 ? { borderRadius: `${radius.toFixed(3)}cqw` } : {}),
+    ...transitionPreviewStyle.value,
+  }
+})
+const primaryBorderStyle = computed(() => mediaBorderStyle(activeGeometry.value))
+const activeMediaStyle = computed(() => {
+  const geom = activeGeometry.value
+  const boostFilter = videoColorBoostFilter(activeMedia.value?.color_boost_strength)
+  // When WebGL LUT preview is active, grade runs in the shader (same .cube as FFmpeg).
+  const lutFilter = lutGlActive.value ? '' : lutCssFilter(geom.lut, geom.lut_strength)
+  const filter = lutGlActive.value
+    ? ''
+    : [boostFilter, lutFilter].filter(Boolean).join(' ')
+  return {
+    ...activeMediaLayoutStyle.value,
     ...(filter ? { filter } : {}),
   }
 })
+const lutCanvasStyle = computed(() => activeMediaLayoutStyle.value)
+
+async function syncLutGlPreview() {
+  const geom = activeGeometry.value
+  const lutId = geom.lut || 'none'
+  const strength = geom.lut_strength ?? 1
+  const wantsLut = lutGlSupported && lutId !== 'none' && strength >= 0.02 && Boolean(activeMedia.value)
+
+  if (!wantsLut) {
+    lutGl.value?.stop()
+    lutGlActive.value = false
+    return
+  }
+
+  // Show canvas before measuring / binding so clientWidth is non-zero.
+  lutGlActive.value = true
+  await nextTick()
+  const canvas = lutCanvas.value
+  const isVideo = Boolean(activeMedia.value?.mime_type.startsWith('video'))
+  const source = isVideo ? previewVideo.value : previewImage.value
+  if (!canvas || !source) {
+    lutGlActive.value = false
+    return
+  }
+  if (!lutGl.value || lutGl.value.canvas !== canvas) {
+    lutGl.value?.dispose()
+    lutGl.value = new LutGlRenderer(canvas)
+  }
+  if (!lutGl.value.ok) {
+    lutGlActive.value = false
+    return
+  }
+
+  try {
+    const cube = await fetchLutCube(lutId, strength)
+    // Bail if selection changed while fetching.
+    const gNow = activeGeometry.value
+    if ((gNow.lut || 'none') !== lutId) return
+    if (Math.round((gNow.lut_strength ?? 1) * 20) !== Math.round(strength * 20)) return
+    lutGl.value.setLutCube(cube)
+    lutGl.value.setSource(source)
+    lutGlActive.value = true
+    lutGl.value.start(() => {
+      const g = activeGeometry.value
+      return {
+        fit: (g.fit === 'contain' ? 'contain' : 'cover') as 'cover' | 'contain',
+        focalX: g.focal_x ?? 0.5,
+        focalY: g.focal_y ?? 0.5,
+        boost: Number(activeMedia.value?.color_boost_strength ?? 0) || 0,
+        applyLut: true,
+      }
+    })
+  } catch {
+    lutGlActive.value = false
+    lutGl.value?.stop()
+  }
+}
+
+watch(
+  () => [
+    activeGeometry.value.lut,
+    activeGeometry.value.lut_strength,
+    activeMedia.value?.url,
+    activeMedia.value?.mime_type,
+    activeMedia.value?.color_boost_strength,
+  ],
+  () => {
+    void syncLutGlPreview()
+  },
+)
 const activeBadge = computed(() => {
   if (!activeMedia.value) return activeItem.value?.kind === 'title' ? 'TITLE' : 'MISSING'
   if (!activeMedia.value.mime_type.startsWith('video')) return 'STILL FALLBACK'
@@ -821,9 +1295,10 @@ function videoOverlayPreviewStyle(overlay: TimelineVideoOverlay) {
   const filter = [boostFilter, lutFilter].filter(Boolean).join(' ')
   const fx = (geom.focal_x ?? 0.5) * 100
   const fy = (geom.focal_y ?? 0.5) * 100
-  const clipPath = geometryCropClipPath(geom, !isFullFrame)
-  const translate = geometryOffsetTranslate(geom)
   const zoom = Math.max(1, Number(geom.zoom ?? 1) || 1)
+  // Clip-path is in the element's local box, which scale(zoom) then magnifies.
+  const clipPath = geometryCropClipPath(geom, !isFullFrame, frameRadiusCqw(geom) / zoom)
+  const translate = geometryOffsetTranslate(geom)
   if (isFullFrame) {
     return {
       opacity: overlay.opacity ?? 1,
@@ -855,32 +1330,58 @@ function videoOverlayPreviewStyle(overlay: TimelineVideoOverlay) {
   }
 }
 
-function packOverlayLanes<T extends { id: string; start_ms: number; duration_ms: number }>(items: T[]) {
-  const laneEnds: number[] = []
+type LaneItem = { id: string; start_ms: number; duration_ms: number; lane?: number | null }
+
+/** Clip being dragged on an overlay track; it is placed last so no other clip moves rows under it. */
+const editingOverlayId = ref<string | null>(null)
+
+/**
+ * Rows for an overlay track. Clips keep their saved row; a clip only moves (down, to the nearest
+ * free row) when it would sit on top of another clip. Clips without a row fill the first free one.
+ */
+function packOverlayLanes<T extends LaneItem>(items: T[], lastId: string | null = null) {
+  const placed: { item: T; lane: number }[] = []
   const laneById: Record<string, number> = {}
-  for (const item of items) {
-    let assigned = -1
-    for (let i = 0; i < laneEnds.length; i++) {
-      if ((laneEnds[i] ?? 0) <= item.start_ms) {
-        assigned = i
-        laneEnds[i] = item.start_ms + item.duration_ms
-        break
-      }
-    }
-    if (assigned < 0) {
-      assigned = laneEnds.length
-      laneEnds.push(item.start_ms + item.duration_ms)
-    }
-    laneById[item.id] = assigned
+  const isFree = (item: T, lane: number) => !placed.some((other) =>
+    other.lane === lane
+    && item.start_ms < other.item.start_ms + other.item.duration_ms
+    && other.item.start_ms < item.start_ms + item.duration_ms)
+  const place = (item: T, from: number) => {
+    let lane = Math.max(0, from)
+    while (!isFree(item, lane)) lane++
+    placed.push({ item, lane })
+    laneById[item.id] = lane
   }
+  const byStart = (a: T, b: T) => a.start_ms - b.start_ms
+  const hasLane = (item: T) => typeof item.lane === 'number'
+  const others = items.filter((item) => item.id !== lastId)
+  for (const item of others.filter(hasLane).sort(byStart)) place(item, item.lane!)
+  for (const item of others.filter((item) => !hasLane(item)).sort(byStart)) place(item, 0)
+  const last = items.find((item) => item.id === lastId)
+  if (last) place(last, last.lane ?? 0)
   return {
     laneById,
-    laneCount: Math.max(1, laneEnds.length),
+    laneCount: Math.max(1, ...placed.map((entry) => entry.lane + 1)),
   }
 }
 
-const videoOverlayPacking = computed(() => packOverlayLanes(videoOverlays.value))
-const imageOverlayPacking = computed(() => packOverlayLanes(timeline.value?.document.image_overlays ?? []))
+const videoOverlayPacking = computed(() => packOverlayLanes(videoOverlays.value, editingOverlayId.value))
+const imageOverlayPacking = computed(() => packOverlayLanes(timeline.value?.document.image_overlays ?? [], editingOverlayId.value))
+const audioOverlayPacking = computed(() => packOverlayLanes(audioOverlays.value, editingOverlayId.value))
+
+// Save each clip's displayed row so later edits elsewhere never reshuffle it.
+watch([videoOverlayPacking, imageOverlayPacking, audioOverlayPacking], () => {
+  const persist = (items: LaneItem[], laneById: Record<string, number>) => {
+    for (const item of items) {
+      if (item.id === editingOverlayId.value) continue
+      const lane = laneById[item.id]
+      if (lane !== undefined && item.lane !== lane) item.lane = lane
+    }
+  }
+  persist(videoOverlays.value, videoOverlayPacking.value.laneById)
+  persist(timeline.value?.document.image_overlays ?? [], imageOverlayPacking.value.laneById)
+  persist(audioOverlays.value, audioOverlayPacking.value.laneById)
+})
 
 let loadedProjectId = props.project.id
 let loadedEpisodeId: string | undefined = store.currentEpisodeId || undefined
@@ -913,11 +1414,16 @@ async function loadTimeline() {
     if (loadSeq !== timelineLoadSequence) return
     fetched.document.video_overlays ??= []
     fetched.document.audio_overlays ??= []
+    fetched.document.layout = { ...defaultCanvasLayout(), ...(fetched.document.layout || {}) }
     timeline.value = fetched
     loadedProjectId = reqProjectId
     loadedEpisodeId = reqEpisodeId
-    const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
-    const requestedIndex = trimShot ? timeline.value.document.primary.findIndex((item) => item.source?.ref_id === trimShot && item.kind === 'video') : -1
+    const trimShot = requestedShotId()
+    const requestedPrimary = timeline.value.document.primary
+    const requestedIndex = !trimShot ? -1 : Math.max(
+      requestedPrimary.findIndex((item) => item.source?.ref_id === trimShot && item.kind === 'video'),
+      requestedPrimary.findIndex((item) => item.source?.ref_id === trimShot),
+    )
     if (requestedIndex >= 0) {
       selectedKind.value = 'primary'
       selectedId.value = timeline.value.document.primary[requestedIndex]?.id ?? ''
@@ -963,7 +1469,7 @@ async function loadTimeline() {
   await nextTick()
   updateContainerWidth()
   if (timelineScrollRef.value) {
-    const trimShot = typeof route.query.trimShot === 'string' ? route.query.trimShot : null
+    const trimShot = requestedShotId()
     if (!trimShot && typeof persisted.scrollLeft === 'number' && persisted.scrollLeft > 0) {
       timelineScrollRef.value.scrollLeft = persisted.scrollLeft
       currentScrollLeft.value = persisted.scrollLeft
@@ -973,7 +1479,30 @@ async function loadTimeline() {
   }
   syncVideo()
   persistUiState()
+  if (typeof route.query.shot === 'string') {
+    const { shot: _consumed, ...query } = route.query
+    void router.replace({ query })
+  }
 }
+
+function requestedShotId(): string | null {
+  const value = route.query.trimShot ?? route.query.shot
+  return typeof value === 'string' && value ? value : null
+}
+
+function shotRefOf(source: TimelineSource | null | undefined): string | null {
+  return source && source.kind !== 'asset' ? source.ref_id : null
+}
+
+watch(
+  () => shotRefOf(selectedPrimary.value?.source)
+    ?? shotRefOf(selectedVideo.value?.source)
+    ?? shotRefOf(selectedAudio.value?.source)
+    ?? shotRefOf(activeItem.value?.source),
+  (shotId) => {
+    if (shotId) store.focusShotId = shotId
+  },
+)
 
 function snapshot() {
   return timeline.value ? JSON.stringify(timeline.value.document) : ''
@@ -1233,8 +1762,27 @@ function resizeSelected(event: Event) {
     if (nextDuration < previousDuration) removeInterval(start + nextDuration, previousDuration - nextDuration)
     else insertInterval(start + previousDuration, nextDuration - previousDuration)
     item.duration_ms = nextDuration
-    if (item.kind === 'video') item.source_out_ms = item.source_in_ms + nextDuration
+    if (item.kind === 'video') setVideoLength(item, nextDuration, primarySpanMs(item))
   })
+}
+
+function primarySpanMs(item: TimelinePrimaryItem): number {
+  return item.source_out_ms != null ? item.source_out_ms - item.source_in_ms : item.duration_ms
+}
+
+function primarySourceMs(item: TimelinePrimaryItem, localMs: number): number {
+  const span = primarySpanMs(item)
+  return item.source_in_ms + (item.loop && span > 0 ? localMs % span : localMs)
+}
+
+function setVideoLength(item: TimelinePrimaryItem, duration: number, span: number) {
+  if (duration > span) {
+    item.loop = true
+    item.source_out_ms = item.source_in_ms + span
+  } else {
+    item.loop = false
+    item.source_out_ms = item.source_in_ms + duration
+  }
 }
 
 function applyTrim(sourceInMs: number, sourceOutMs: number) {
@@ -1253,6 +1801,7 @@ function applyTrim(sourceInMs: number, sourceOutMs: number) {
     item.source_in_ms = nextIn
     item.source_out_ms = nextOut
     item.duration_ms = nextDuration
+    item.loop = false
     playheadMs.value = Math.min(start + nextDuration, Math.max(start, playheadMs.value))
   })
 }
@@ -1271,7 +1820,7 @@ function setTrimAtPlayhead(edge: 'in' | 'out') {
   if (!item || item.kind !== 'video' || index < 0) return
   const itemStart = starts.value[index] ?? 0
   const local = Math.max(0, Math.min(item.duration_ms, Math.round(playheadMs.value - itemStart)))
-  const sourceTime = Math.round(item.source_in_ms + local)
+  const sourceTime = Math.round(primarySourceMs(item, local))
   if (edge === 'in') applyTrim(sourceTime, selectedTrimOutMs.value)
   else applyTrim(item.source_in_ms, sourceTime)
 }
@@ -1313,8 +1862,20 @@ function splitAtPlayhead() {
               const rightSourceIn = leftSourceOut
               const rightSourceOut = item.source_out_ms != null ? Math.round(item.source_out_ms) : rightSourceIn + rightDuration
 
-              const left = { ...item, duration_ms: leftDuration, source_in_ms: inMs, source_out_ms: leftSourceOut }
-              const right = { ...item, id: crypto.randomUUID(), label: `${item.label} B`, source_in_ms: rightSourceIn, duration_ms: rightDuration, source_out_ms: rightSourceOut }
+              let left: TimelinePrimaryItem = { ...item, duration_ms: leftDuration, source_in_ms: inMs, source_out_ms: leftSourceOut }
+              let right: TimelinePrimaryItem = { ...item, id: crypto.randomUUID(), label: `${item.label} B`, source_in_ms: rightSourceIn, duration_ms: rightDuration, source_out_ms: rightSourceOut, transition: { kind: 'cut', duration_ms: 500 } }
+              const span = primarySpanMs(item)
+              if (item.loop && span > 0) {
+                const phase = leftDuration % span
+                left = { ...item, duration_ms: leftDuration }
+                setVideoLength(left, leftDuration, span)
+                right = { ...item, id: crypto.randomUUID(), label: `${item.label} B`, duration_ms: rightDuration, transition: { kind: 'cut', duration_ms: 500 } }
+                if (rightDuration <= span - phase) {
+                  right.source_in_ms = inMs + phase
+                  right.source_out_ms = inMs + phase + rightDuration
+                  right.loop = false
+                }
+              }
               timeline.value!.document.primary.splice(pIdx, 1, left, right)
               newSelectionEntries.push({ kind: 'primary', id: right.id })
               didSplitAny = true
@@ -1530,6 +2091,10 @@ function clampOverlaysToTotal() {
 }
 
 function onPrimaryDragStart(event: DragEvent, index: number) {
+  if (primaryResize) {
+    event.preventDefault()
+    return
+  }
   dragSourceIndex.value = index
   dragDuplicateModifier.value = Boolean(event.ctrlKey || event.shiftKey || event.altKey || event.metaKey)
   if (event.dataTransfer) {
@@ -2310,6 +2875,15 @@ function handleImageTrackClick(event: MouseEvent) {
   playheadMs.value = Math.round((relativeX / rect.width) * totalMs.value)
 }
 
+function handleAudioTrackClick(event: MouseEvent) {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target || totalMs.value <= 0) return
+  const rect = target.getBoundingClientRect()
+  const relativeX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+  playheadMs.value = Math.round((relativeX / rect.width) * totalMs.value)
+  syncVideo()
+}
+
 function addAudioOverlay(source: TimelineSource, label = 'Audio clip', preferredDurationMs = 3000) {
   closeAddMenu()
   if (!timeline.value) return
@@ -2333,6 +2907,141 @@ function addAudioOverlay(source: TimelineSource, label = 'Audio clip', preferred
     selectedKind.value = 'audio'
     selectedId.value = item.id
   })
+}
+
+interface StemTarget {
+  kind: 'primary' | 'video' | 'audio'
+  id: string
+  label: string
+  source: TimelineSource
+  sourceInMs: number
+  durationMs: number
+  startMs: number
+}
+
+const stemSeparators = ref<StemSeparatorStatus[]>([])
+const stemProvider = ref<StemSeparatorId | ''>('')
+const stemIncludeVoice = ref(false)
+const stemRuns = ref<Record<string, { busy: boolean; status: string; error: string }>>({})
+let stemSeparatorsRequest: Promise<void> | null = null
+
+function hasSeparableAudio(source: TimelineSource | null | undefined): source is TimelineSource {
+  if (!source || source.kind === 'shot_image') return false
+  if (source.kind !== 'asset') return true
+  const mime = timeline.value?.assets.find((asset) => asset.id === source.ref_id)?.mime_type ?? ''
+  return mime.startsWith('video/') || mime.startsWith('audio/')
+}
+
+function stemTargetFor(kind: StemTarget['kind'], id: string): StemTarget | null {
+  const doc = timeline.value?.document
+  if (!doc) return null
+  if (kind === 'primary') {
+    const index = doc.primary.findIndex((item) => item.id === id)
+    const item = doc.primary[index]
+    if (!item || item.kind !== 'video' || !hasSeparableAudio(item.source)) return null
+    return { kind, id, label: item.label, source: item.source, sourceInMs: item.source_in_ms, durationMs: Math.min(item.duration_ms, primarySpanMs(item)), startMs: starts.value[index] ?? 0 }
+  }
+  const overlay = kind === 'video'
+    ? (doc.video_overlays ?? []).find((item) => item.id === id)
+    : (doc.audio_overlays ?? []).find((item) => item.id === id)
+  if (!overlay || !hasSeparableAudio(overlay.source)) return null
+  return { kind, id, label: overlay.label, source: overlay.source, sourceInMs: overlay.source_in_ms ?? 0, durationMs: overlay.duration_ms, startMs: overlay.start_ms }
+}
+
+const stemTarget = computed<StemTarget | null>(() => {
+  if (selectedKind.value === 'primary' && selectedPrimary.value) return stemTargetFor('primary', selectedPrimary.value.id)
+  if (selectedKind.value === 'video' && selectedVideo.value) return stemTargetFor('video', selectedVideo.value.id)
+  if (selectedKind.value === 'audio' && selectedAudio.value) return stemTargetFor('audio', selectedAudio.value.id)
+  return null
+})
+const stemRun = computed(() => (stemTarget.value && stemRuns.value[stemTarget.value.id]) || { busy: false, status: '', error: '' })
+
+function loadStemSeparators() {
+  stemSeparatorsRequest ??= api.stemSeparators().then((list) => {
+    stemSeparators.value = list
+    if (!stemProvider.value) {
+      stemProvider.value = (list.find((item) => item.selected) ?? list.find((item) => item.available))?.id ?? ''
+    }
+  }).catch(() => {
+    stemSeparatorsRequest = null
+  })
+  return stemSeparatorsRequest
+}
+
+watch(stemTarget, (target) => {
+  if (target) void loadStemSeparators()
+})
+
+async function refreshTimelineAssets() {
+  const fetched = props.compilationId
+    ? await api.compilationTimeline(props.compilationId, variant.value)
+    : await api.timeline(props.project.id, variant.value, store.currentEpisodeId || undefined)
+  if (timeline.value) timeline.value.assets = fetched.assets
+}
+
+function applyStemSeparation(target: StemTarget, music: TimelineAsset, voice: TimelineAsset | null): string {
+  const current = stemTargetFor(target.kind, target.id) ?? target
+  let musicOverlayId = ''
+  mutate(() => {
+    const doc = timeline.value!.document
+    doc.audio_overlays ??= []
+    const added = [music, ...(voice ? [voice] : [])].map((asset): TimelineAudioOverlay => ({
+      id: crypto.randomUUID(),
+      label: asset.label,
+      source: { kind: 'asset', ref_id: asset.id },
+      start_ms: current.startMs,
+      duration_ms: current.durationMs,
+      source_in_ms: 0,
+      volume: 1,
+      mute_audio: false,
+    }))
+    doc.audio_overlays.push(...added)
+    const original = target.kind === 'primary'
+      ? doc.primary.find((item) => item.id === target.id)
+      : target.kind === 'video'
+        ? (doc.video_overlays ?? []).find((item) => item.id === target.id)
+        : doc.audio_overlays.find((item) => item.id === target.id)
+    if (original) original.mute_audio = true
+    musicOverlayId = added[0]!.id
+    selectedKind.value = 'audio'
+    selectedId.value = musicOverlayId
+  })
+  return musicOverlayId
+}
+
+async function separateMusic() {
+  const target = stemTarget.value
+  const provider = stemProvider.value
+  if (!target || !provider || stemRuns.value[target.id]?.busy) return
+  const includeVoice = stemIncludeVoice.value
+  const providerLabel = stemSeparators.value.find((item) => item.id === provider)?.label ?? provider
+  const setRun = (busy: boolean, status: string, error = '', ids = [target.id]) => {
+    stemRuns.value = { ...stemRuns.value, ...Object.fromEntries(ids.map((id) => [id, { busy, status, error }])) }
+  }
+  setRun(true, `Separating with ${providerLabel}…`)
+  try {
+    const { separation, job } = await api.startStemSeparation(props.project.id, {
+      source: target.source,
+      source_in_ms: Math.round(target.sourceInMs),
+      duration_ms: Math.max(500, Math.round(target.durationMs)),
+      provider,
+      label: target.label,
+      episode_id: props.compilationId ? null : store.currentEpisodeId || null,
+    })
+    const finished = await store.watchJob(job.id, (update) => {
+      if (update.status === 'queued' || update.status === 'running') setRun(true, `Separating with ${providerLabel}… ${update.message}`)
+    }, { reloadOnComplete: false })
+    if (!finished || finished.status !== 'completed') {
+      throw new Error(finished?.error || finished?.message || `${providerLabel} separation failed`)
+    }
+    const result = await api.stemSeparation(separation.id)
+    if (!result.music_asset) throw new Error(`${providerLabel} returned no music track`)
+    await refreshTimelineAssets()
+    const musicOverlayId = applyStemSeparation(target, result.music_asset, includeVoice ? result.voice_asset : null)
+    setRun(false, `Music from ${providerLabel} added to the AUDIO track; original audio muted.`, '', [target.id, musicOverlayId])
+  } catch (cause) {
+    setRun(false, '', cause instanceof Error ? cause.message : `${providerLabel} separation failed`)
+  }
 }
 
 function shotHasAudio(shot?: Shot | null): boolean {
@@ -2393,6 +3102,26 @@ function probeFileDurationMs(file: File): Promise<number> {
   })
 }
 
+async function addAudioFile(file: File, label: string, durationMs?: number) {
+  if (!timeline.value) return
+  await flushPendingSave()
+  timeline.value = await api.uploadTimelineAsset(
+    props.project.id,
+    file,
+    label,
+    variant.value,
+    props.compilationId ? undefined : store.currentEpisodeId || undefined,
+    'audio',
+    props.compilationId,
+  )
+  timeline.value.document.video_overlays ??= []
+  timeline.value.document.audio_overlays ??= []
+  const asset = timeline.value.assets[timeline.value.assets.length - 1]
+  if (asset) {
+    addAudioOverlay({ kind: 'asset', ref_id: asset.id }, asset.label || label, durationMs)
+  }
+}
+
 async function uploadAudioAsset(event: Event) {
   closeAddMenu()
   const input = event.target as HTMLInputElement
@@ -2400,27 +3129,53 @@ async function uploadAudioAsset(event: Event) {
   if (!file || !timeline.value) return
   try {
     const probedMs = await probeFileDurationMs(file)
-    const cleanLabel = file.name.replace(/\.[^.]+$/, '') || file.name
-    await flushPendingSave()
-    timeline.value = await api.uploadTimelineAsset(
-      props.project.id,
-      file,
-      cleanLabel,
-      variant.value,
-      props.compilationId ? undefined : store.currentEpisodeId || undefined,
-      'audio',
-      props.compilationId,
-    )
-    timeline.value.document.video_overlays ??= []
-    timeline.value.document.audio_overlays ??= []
-    const asset = timeline.value.assets[timeline.value.assets.length - 1]
-    if (asset) {
-      addAudioOverlay({ kind: 'asset', ref_id: asset.id }, asset.label || cleanLabel, probedMs)
-    }
+    await addAudioFile(file, file.name.replace(/\.[^.]+$/, '') || file.name, probedMs)
   } catch (cause) {
     localError.value = cause instanceof Error ? cause.message : 'Could not upload audio'
   } finally {
     input.value = ''
+  }
+}
+
+const audioLibraryOpen = ref(false)
+const audioLibraryPanel = ref<InstanceType<typeof AudioLibraryPanel> | null>(null)
+const librarySaves = ref<Record<string, { busy: boolean; status: string; error: string }>>({})
+const librarySave = computed(() => (stemTarget.value && librarySaves.value[stemTarget.value.id]) || { busy: false, status: '', error: '' })
+
+function openAudioLibrary() {
+  closeAddMenu()
+  audioLibraryOpen.value = true
+}
+
+async function addFromLibrary(item: LibraryAudio) {
+  try {
+    const response = await fetch(item.url)
+    if (!response.ok) throw new Error(`Could not load “${item.label}” from the library`)
+    const blob = await response.blob()
+    const file = new File([blob], `${item.label}.m4a`, { type: item.mime_type || 'audio/mp4' })
+    await addAudioFile(file, item.label, item.duration_ms)
+    audioLibraryOpen.value = false
+  } catch (cause) {
+    localError.value = cause instanceof Error ? cause.message : 'Could not add audio from the library'
+  } finally {
+    audioLibraryPanel.value?.done()
+  }
+}
+
+async function saveToLibrary(label: string) {
+  const target = stemTarget.value
+  if (!target) return
+  librarySaves.value = { ...librarySaves.value, [target.id]: { busy: true, status: '', error: '' } }
+  try {
+    const saved = await api.saveLibraryAudio(props.project.id, {
+      source: target.source,
+      source_in_ms: Math.round(target.sourceInMs),
+      duration_ms: Math.round(target.durationMs),
+      label,
+    })
+    librarySaves.value = { ...librarySaves.value, [target.id]: { busy: false, status: `Saved “${saved.label}” to the audio library`, error: '' } }
+  } catch (cause) {
+    librarySaves.value = { ...librarySaves.value, [target.id]: { busy: false, status: '', error: cause instanceof Error ? cause.message : 'Could not save to the library' } }
   }
 }
 
@@ -2461,8 +3216,7 @@ async function uploadAsset(event: Event, append: boolean) {
 let lastModifierToggleTime = 0
 let lastModifierToggledId = ''
 
-function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: string, start: number, event?: MouseEvent) {
-  stopPlayback()
+function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: string, _start: number, event?: MouseEvent) {
   if (event && (event.shiftKey || event.ctrlKey || event.metaKey)) {
     if (Date.now() - lastModifierToggleTime > 300 || lastModifierToggledId !== id) {
       lastModifierToggleTime = Date.now()
@@ -2471,11 +3225,10 @@ function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: 
     }
     return
   }
+  // Overlay tracks (VIDEO/IMAGE/TEXT/AUDIO): select only — keep playhead/playback where it is.
   selectedKind.value = kind
   selectedId.value = id
   selectedEntries.value = [{ kind, id }]
-  playheadMs.value = start
-  syncVideo()
 }
 
 function handlePrimaryBlockClick(event: MouseEvent, item: TimelinePrimaryItem, index: number) {
@@ -2545,21 +3298,37 @@ function beginOverlayEdit(event: PointerEvent, kind: 'video' | 'image' | 'text' 
   const track = (event.currentTarget as HTMLElement).closest('.overlay-track')
   if (!track) return
   event.preventDefault()
-  stopPlayback()
   selectedKind.value = kind
   selectedId.value = item.id
   selectedEntries.value = [{ kind, id: item.id }]
-  playheadMs.value = mode === 'resize-end' ? item.start_ms + item.duration_ms : item.start_ms
+  // Resize handles may jump the playhead to the edge being edited.
+  // Move/select on secondary clips must not reset the current seek position.
+  if (mode !== 'move') {
+    stopPlayback()
+    playheadMs.value = mode === 'resize-end' ? item.start_ms + item.duration_ms : item.start_ms
+  }
+  const trackRect = track.getBoundingClientRect()
+  const packing = kind === 'video' ? videoOverlayPacking.value : kind === 'image' ? imageOverlayPacking.value : kind === 'audio' ? audioOverlayPacking.value : null
+  const initialLane = packing?.laneById[item.id] ?? 0
   overlayEdit = {
     pointerId: event.pointerId,
+    kind,
     item,
     mode,
     startX: event.clientX,
-    trackWidth: track.getBoundingClientRect().width,
+    startY: event.clientY,
+    trackTop: trackRect.top,
+    trackWidth: trackRect.width,
     initialStart: item.start_ms,
     initialDuration: item.duration_ms,
+    initialLane,
+    laneCount: packing?.laneCount ?? 1,
     before: snapshot(),
     moved: false,
+  }
+  if (packing) {
+    item.lane = initialLane
+    editingOverlayId.value = item.id
   }
   window.addEventListener('pointermove', updateOverlayEdit, { passive: false })
   window.addEventListener('pointerup', finishOverlayEdit)
@@ -2570,6 +3339,10 @@ function updateOverlayEdit(event: PointerEvent) {
   const edit = overlayEdit
   if (!edit || event.pointerId !== edit.pointerId) return
   event.preventDefault()
+  if ((edit.kind === 'image' || edit.kind === 'video') && edit.mode === 'move') {
+    overlayToPrimaryDropMs.value = primaryTrackMsAt(event.clientX, event.clientY)
+    if (overlayToPrimaryDropMs.value !== null) return
+  }
   const deltaMs = Math.round(((event.clientX - edit.startX) / edit.trackWidth * totalMs.value) / 20) * 20
   let nextStart = edit.initialStart
   let nextDuration = edit.initialDuration
@@ -2582,7 +3355,15 @@ function updateOverlayEdit(event: PointerEvent) {
   } else {
     nextDuration = Math.max(100, Math.min(totalMs.value - edit.initialStart, edit.initialDuration + deltaMs))
   }
-  if (nextStart === edit.item.start_ms && nextDuration === edit.item.duration_ms) return
+  let nextLane = edit.item.lane
+  if (edit.mode === 'move' && edit.kind !== 'text') {
+    // Rows only change on a deliberate vertical drag (more than half a row).
+    const pointerLane = Math.floor((event.clientY - edit.trackTop - 5) / 32)
+    nextLane = Math.abs(event.clientY - edit.startY) < 16
+      ? edit.initialLane
+      : Math.max(0, Math.min(edit.laneCount, pointerLane))
+  }
+  if (nextStart === edit.item.start_ms && nextDuration === edit.item.duration_ms && nextLane === edit.item.lane) return
   if (!edit.moved) {
     history.value.push(edit.before)
     if (history.value.length > 50) history.value.shift()
@@ -2591,17 +3372,171 @@ function updateOverlayEdit(event: PointerEvent) {
   }
   edit.item.start_ms = nextStart
   edit.item.duration_ms = nextDuration
+  if (nextLane !== undefined) edit.item.lane = nextLane
   playheadMs.value = edit.mode === 'resize-end' ? nextStart + nextDuration : nextStart
   syncVideo()
 }
 
 function finishOverlayEdit(event?: PointerEvent) {
   if (event && overlayEdit && event.pointerId !== overlayEdit.pointerId) return
-  const changed = overlayEdit?.moved ?? false
+  const edit = overlayEdit
+  const changed = edit?.moved ?? false
+  const dropMs = event?.type === 'pointerup' ? overlayToPrimaryDropMs.value : null
+  if (edit && edit.kind !== 'text') {
+    const packing = edit.kind === 'video' ? videoOverlayPacking.value : edit.kind === 'image' ? imageOverlayPacking.value : audioOverlayPacking.value
+    const shown = packing.laneById[edit.item.id]
+    if (shown !== undefined) edit.item.lane = shown
+  }
   overlayEdit = null
+  editingOverlayId.value = null
+  overlayToPrimaryDropMs.value = null
   window.removeEventListener('pointermove', updateOverlayEdit)
   window.removeEventListener('pointerup', finishOverlayEdit)
   window.removeEventListener('pointercancel', finishOverlayEdit)
+  if (edit && (edit.kind === 'image' || edit.kind === 'video') && dropMs !== null) {
+    moveOverlayToPrimary(edit.kind, edit.item as TimelineImageOverlay | TimelineVideoOverlay, dropMs, edit.moved ? null : edit.before)
+    return
+  }
+  if (changed) scheduleSave()
+}
+
+function primaryTrackMsAt(clientX: number, clientY: number): number | null {
+  const rect = primaryTrackRef.value?.getBoundingClientRect()
+  if (!rect || clientY < rect.top || clientY > rect.bottom || clientX < rect.left || clientX > rect.right) return null
+  return Math.max(0, Math.min(totalMs.value, ((clientX - rect.left) / (rect.width || 1)) * totalMs.value))
+}
+
+function primaryInsertIndexAt(ms: number): number {
+  const index = primary.value.findIndex((item, i) => ms < startAt(i) + item.duration_ms / 2)
+  return index < 0 ? primary.value.length : index
+}
+
+const overlayToPrimaryMarkerMs = computed(() => {
+  if (overlayToPrimaryDropMs.value === null) return null
+  const index = primaryInsertIndexAt(overlayToPrimaryDropMs.value)
+  return index >= primary.value.length ? totalMs.value : startAt(index)
+})
+
+function moveOverlayToPrimary(
+  kind: 'image' | 'video',
+  overlay: TimelineImageOverlay | TimelineVideoOverlay,
+  dropMs: number,
+  historyBefore: string | null,
+) {
+  if (!timeline.value) return
+  const doc = timeline.value.document
+  if (historyBefore !== null) {
+    history.value.push(historyBefore)
+    if (history.value.length > 50) history.value.shift()
+    future.value = []
+  }
+  const index = primaryInsertIndexAt(dropMs)
+  const insertionTime = index >= primary.value.length ? totalMs.value : startAt(index)
+  const duration = Math.max(100, overlay.duration_ms)
+  let item: TimelinePrimaryItem
+  if (kind === 'video' && 'source_in_ms' in overlay) {
+    item = {
+      id: crypto.randomUUID(),
+      kind: 'video',
+      label: overlay.label || 'Video',
+      source: overlay.source,
+      duration_ms: duration,
+      source_in_ms: overlay.source_in_ms,
+      source_out_ms: overlay.source_in_ms + duration,
+      text: '',
+      mute_audio: overlay.mute_audio ?? false,
+      variant: {},
+    }
+    doc.video_overlays = (doc.video_overlays ?? []).filter((entry) => entry.id !== overlay.id)
+  } else {
+    const asset = overlay.source.kind === 'asset' ? timeline.value.assets.find((entry) => entry.id === overlay.source.ref_id) : undefined
+    item = {
+      id: crypto.randomUUID(),
+      kind: 'image',
+      label: asset?.label || 'Image',
+      source: overlay.source,
+      duration_ms: duration,
+      source_in_ms: 0,
+      source_out_ms: null,
+      text: '',
+      variant: {},
+    }
+    doc.image_overlays = doc.image_overlays.filter((entry) => entry.id !== overlay.id)
+  }
+  doc.primary.splice(index, 0, item)
+  insertInterval(insertionTime, item.duration_ms)
+  selectedKind.value = 'primary'
+  selectedId.value = item.id
+  selectedEntries.value = [{ kind: 'primary', id: item.id }]
+  playheadMs.value = insertionTime
+  syncVideo()
+  scheduleSave()
+}
+
+let primaryResize: {
+  pointerId: number
+  item: TimelinePrimaryItem
+  startX: number
+  msPerPx: number
+  initialDuration: number
+  initialSpan: number
+  before: string
+  moved: boolean
+} | null = null
+
+function beginPrimaryResize(event: PointerEvent, item: TimelinePrimaryItem) {
+  if (event.button !== 0 || !timeline.value || !primaryTrackRef.value) return
+  stopPlayback()
+  selectedKind.value = 'primary'
+  selectedId.value = item.id
+  selectedEntries.value = [{ kind: 'primary', id: item.id }]
+  primaryResize = {
+    pointerId: event.pointerId,
+    item,
+    startX: event.clientX,
+    msPerPx: totalMs.value / (primaryTrackRef.value.getBoundingClientRect().width || 1),
+    initialDuration: item.duration_ms,
+    initialSpan: primarySpanMs(item),
+    before: snapshot(),
+    moved: false,
+  }
+  window.addEventListener('pointermove', updatePrimaryResize, { passive: false })
+  window.addEventListener('pointerup', finishPrimaryResize)
+  window.addEventListener('pointercancel', finishPrimaryResize)
+}
+
+function updatePrimaryResize(event: PointerEvent) {
+  const edit = primaryResize
+  if (!edit || event.pointerId !== edit.pointerId || !timeline.value) return
+  event.preventDefault()
+  const index = primary.value.findIndex((entry) => entry.id === edit.item.id)
+  if (index < 0) return
+  const deltaMs = Math.round(((event.clientX - edit.startX) * edit.msPerPx) / 100) * 100
+  const nextDuration = Math.max(edit.item.kind === 'video' ? 200 : 500, edit.initialDuration + deltaMs)
+  const previousDuration = edit.item.duration_ms
+  if (nextDuration === previousDuration) return
+  if (!edit.moved) {
+    history.value.push(edit.before)
+    if (history.value.length > 50) history.value.shift()
+    future.value = []
+    edit.moved = true
+  }
+  const start = startAt(index)
+  if (nextDuration < previousDuration) removeInterval(start + nextDuration, previousDuration - nextDuration)
+  else insertInterval(start + previousDuration, nextDuration - previousDuration)
+  edit.item.duration_ms = nextDuration
+  if (edit.item.kind === 'video') setVideoLength(edit.item, nextDuration, edit.initialSpan)
+  playheadMs.value = start + nextDuration
+  syncVideo()
+}
+
+function finishPrimaryResize(event?: PointerEvent) {
+  if (event && primaryResize && event.pointerId !== primaryResize.pointerId) return
+  const changed = primaryResize?.moved ?? false
+  primaryResize = null
+  window.removeEventListener('pointermove', updatePrimaryResize)
+  window.removeEventListener('pointerup', finishPrimaryResize)
+  window.removeEventListener('pointercancel', finishPrimaryResize)
   if (changed) scheduleSave()
 }
 
@@ -2610,14 +3545,19 @@ function startAt(index: number) {
 }
 
 function seek(event: Event) {
-  stopPlayback()
+  const keepPlaying = playing.value
   playheadMs.value = Number((event.target as HTMLInputElement).value)
   if (!selectedId.value && activeItem.value) {
     selectedKind.value = 'primary'
     selectedId.value = activeItem.value.id
   }
-  syncVideo()
-  persistUiState()
+  if (keepPlaying) {
+    // Scrubbing the TIMELINE seek bar should not pause — retarget media and keep playing.
+    void startActiveVideo()
+  } else {
+    syncVideo()
+    persistUiState()
+  }
 }
 
 const videoOverlayEls = new Map<string, HTMLVideoElement>()
@@ -2629,6 +3569,64 @@ function setVideoOverlayRef(id: string, el: HTMLVideoElement | null) {
     videoOverlayEls.delete(id)
   }
 }
+
+const programMonitor = ref<HTMLElement | null>(null)
+type BorderRect = { left: string; top: string; width: string; height: string }
+const overlayBorderRects = ref<Record<string, BorderRect>>({})
+const anyOverlayBorder = computed(() => videoOverlays.value.some((overlay) => Boolean(mediaBorderStyle(overlay.variant[variant.value]))))
+let overlayBorderRaf = 0
+
+/** Track each bordered overlay's visible (post-crop, post-transform) box so its border sits on the video edge. */
+function measureOverlayBorders() {
+  const monitor = programMonitor.value
+  const next: Record<string, BorderRect> = {}
+  if (monitor) {
+    const m = monitor.getBoundingClientRect()
+    for (const overlay of videoOverlays.value) {
+      const geom = overlay.variant[variant.value]
+      if (!mediaBorderStyle(geom)) continue
+      const el = videoOverlayEls.get(overlay.id)
+      if (!el || !el.isConnected) continue
+      const r = el.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1) continue
+      const insets = geometryCropInsets(geom!, geom!.position !== 'full-frame') ?? { top: 0, right: 0, bottom: 0, left: 0 }
+      next[overlay.id] = {
+        left: `${(r.left - m.left - monitor.clientLeft + insets.left * r.width).toFixed(1)}px`,
+        top: `${(r.top - m.top - monitor.clientTop + insets.top * r.height).toFixed(1)}px`,
+        width: `${(r.width * (1 - insets.left - insets.right)).toFixed(1)}px`,
+        height: `${(r.height * (1 - insets.top - insets.bottom)).toFixed(1)}px`,
+      }
+    }
+  }
+  if (JSON.stringify(next) !== JSON.stringify(overlayBorderRects.value)) overlayBorderRects.value = next
+}
+
+function stopOverlayBorderLoop() {
+  if (overlayBorderRaf) cancelAnimationFrame(overlayBorderRaf)
+  overlayBorderRaf = 0
+}
+
+function startOverlayBorderLoop() {
+  if (overlayBorderRaf || typeof requestAnimationFrame !== 'function') return
+  const tick = () => {
+    measureOverlayBorders()
+    overlayBorderRaf = requestAnimationFrame(tick)
+  }
+  overlayBorderRaf = requestAnimationFrame(tick)
+}
+
+watch(
+  anyOverlayBorder,
+  (active) => {
+    if (active) {
+      startOverlayBorderLoop()
+    } else {
+      stopOverlayBorderLoop()
+      overlayBorderRects.value = {}
+    }
+  },
+  { immediate: true },
+)
 
 function pauseAllVideoOverlays() {
   for (const el of videoOverlayEls.values()) {
@@ -2681,6 +3679,26 @@ function syncVideoOverlays() {
 }
 
 const audioOverlayPlayers = new Map<string, HTMLAudioElement>()
+/** Audio file lengths in ms, keyed by URL, learned from the preview players' metadata. */
+const audioFileDurations = ref<Record<string, number>>({})
+
+/** Length of the portion that repeats, or null when the clip doesn't outlast its file. */
+function audioLoopSpanMs(overlay: TimelineAudioOverlay): number | null {
+  if (overlay.loop === false) return null
+  const url = resolveSource(overlay.source)?.url
+  const total = url ? audioFileDurations.value[url] : undefined
+  if (!total) return null
+  const span = total - (overlay.source_in_ms || 0)
+  return span > 50 && span < overlay.duration_ms ? span : null
+}
+
+function toggleSelectedAudioLoop() {
+  const item = selectedAudio.value
+  if (!item) return
+  mutate(() => {
+    item.loop = item.loop === false
+  })
+}
 
 function pauseAllAudioOverlays() {
   for (const el of audioOverlayPlayers.values()) {
@@ -2719,6 +3737,13 @@ function syncAudioOverlays() {
       try {
         player = new Audio()
         player.preload = 'auto'
+        const el = player
+        el.addEventListener('loadedmetadata', () => {
+          const src = el.dataset.src
+          if (src && Number.isFinite(el.duration) && el.duration > 0) {
+            audioFileDurations.value = { ...audioFileDurations.value, [src]: Math.round(el.duration * 1000) }
+          }
+        })
         audioOverlayPlayers.set(overlay.id, player)
       } catch {
         continue
@@ -2732,7 +3757,9 @@ function syncAudioOverlays() {
     const muted = isMuted.value || Boolean(overlay.mute_audio) || (overlay.volume ?? 1) <= 0
     player.muted = muted
     player.volume = Math.max(0, Math.min(1, overlay.volume ?? 1))
-    const targetSec = Math.max(0, ((overlay.source_in_ms || 0) + (playheadMs.value - overlay.start_ms)) / 1000)
+    const elapsed = Math.max(0, playheadMs.value - overlay.start_ms)
+    const span = audioLoopSpanMs(overlay)
+    const targetSec = ((overlay.source_in_ms || 0) + (span ? elapsed % span : elapsed)) / 1000
     if (playing.value && inWindow && !muted) {
       try {
         if (Math.abs((player.currentTime || 0) - targetSec) > 0.25) {
@@ -2771,9 +3798,18 @@ function syncVideo() {
   if (!video || !item || !activeMedia.value?.mime_type.startsWith('video')) return
   const isItemMuted = Boolean(item.mute_audio)
   video.muted = isMuted.value || isItemMuted
-  const target = Math.max(0, (item.source_in_ms + activeLocalMs.value) / 1000)
+  const target = Math.max(0, primarySourceMs(item, activeLocalMs.value) / 1000)
   if (Number.isFinite(video.duration)) video.currentTime = Math.min(target, video.duration)
   else video.currentTime = target
+}
+
+function wrapLoopingPreview() {
+  const video = previewVideo.value
+  const item = activeItem.value
+  if (!video || !item?.loop || item.source_out_ms == null) return
+  if (video.currentTime * 1000 < item.source_out_ms - 40 && !video.ended) return
+  syncVideo()
+  if (playing.value && video.paused) void video.play().catch(() => undefined)
 }
 
 function toggleSelectedAudio() {
@@ -2993,6 +4029,7 @@ function handleLoadedMetadata() {
   if (video) video.muted = isMuted.value || Boolean(activeItem.value?.mute_audio)
   sourceDurationMs.value = video && Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : selectedTrimOutMs.value
   syncVideo()
+  void syncLutGlPreview()
 }
 
 async function startActiveVideo() {
@@ -3035,6 +4072,7 @@ function togglePlayback() {
     if (!playing.value) return
     playheadMs.value = Math.min(totalMs.value, playheadMs.value + now - previous)
     previous = now
+    wrapLoopingPreview()
     syncVideoOverlays()
     syncAudioOverlays()
     scrollPlayheadIntoView()
@@ -3140,11 +4178,17 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && transitionPopoverIndex.value !== null) {
+    transitionPopoverIndex.value = null
+    event.preventDefault()
+    return
+  }
+  if (event.target instanceof Element && event.target.closest('.transition-popover')) return
   if (isTypingTarget(event.target)) return
-  if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value) {
+  if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value || showReleaseKit.value) {
     if (event.key === 'Escape') {
       event.preventDefault()
-      if (showPublishModal.value) closePublishModal()
+      closeModalsFromRoute()
       showShortcutsModal.value = false
       showAddShotModal.value = false
       showAddVideoOverlayModal.value = false
@@ -3290,8 +4334,8 @@ function handleKeydown(event: KeyboardEvent) {
 
   // Escape: Close shortcuts modal or deselect
   if (event.key === 'Escape') {
-    if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value) {
-      closePublishModal()
+    if (showShortcutsModal.value || showAddShotModal.value || showAddVideoOverlayModal.value || showAddImageOverlayModal.value || showPublishModal.value || showReleaseKit.value) {
+      closeModalsFromRoute()
       event.preventDefault()
       showShortcutsModal.value = false
       showAddShotModal.value = false
@@ -3317,21 +4361,29 @@ onMounted(() => {
   }
   window.addEventListener('resize', updateContainerWidth)
   window.addEventListener('keydown', handleKeydown)
-  window.addEventListener('pointerdown', handleDocumentPointerDown)
+  window.addEventListener('pointerdown', handleDocumentPointerDown, true)
   window.addEventListener('beforeunload', handleBeforeUnload)
   void loadTimeline()
   void api.getTimelineLuts().then((list) => {
     if (Array.isArray(list) && list.length > 0) {
       lutPresets.value = list
+      registerLutPresets(list)
     }
+  }).catch(() => {})
+  void api.getTimelineLayouts().then((catalog) => {
+    if (catalog?.shorts && catalog?.landscape) layoutCatalog.value = catalog
   }).catch(() => {})
 })
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect()
   window.removeEventListener('resize', updateContainerWidth)
   window.removeEventListener('keydown', handleKeydown)
-  window.removeEventListener('pointerdown', handleDocumentPointerDown)
+  window.removeEventListener('pointerdown', handleDocumentPointerDown, true)
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  lutGl.value?.dispose()
+  lutGl.value = null
+  lutGlActive.value = false
+  stopOverlayBorderLoop()
   stopPlayback()
   finishOverlayEdit()
   persistUiState()
@@ -3371,7 +4423,7 @@ onBeforeUnmount(() => {
           <button :class="{ active: variant === 'shorts' }" @click="variant = 'shorts'">Shorts 9:16</button>
         </div>
         <button class="secondary-button" :disabled="saving" @click="saveTimeline"><Save :size="15" />Save</button>
-        <button class="primary-button" :disabled="store.renderingFinalCut || !timeline" @click="renderVariant"><LoaderCircle v-if="store.renderingFinalCut" class="spin" :size="15" /><RefreshCw v-else :size="15" />{{ store.renderingFinalCut ? 'Rendering…' : variantExport ? 'Render again' : 'Export video' }}</button>
+        <button class="primary-button" :disabled="store.renderingFinalCut || !timeline" @click="renderVariant"><LoaderCircle v-if="store.renderingFinalCut" class="spin" :size="15" /><RefreshCw v-else :size="15" />{{ store.renderingFinalCut ? (store.finalCutJob?.progress ? `Rendering… ${Math.round(store.finalCutJob.progress * 100)}%` : 'Rendering…') : variantExport ? 'Render again' : 'Export video' }}</button>
         <button
           v-if="store.renderingFinalCut && store.finalCutJob && (store.finalCutJob.status === 'queued' || store.finalCutJob.status === 'running')"
           class="secondary-button"
@@ -3382,7 +4434,14 @@ onBeforeUnmount(() => {
         </button>
         <a v-if="variantExport" class="secondary-button" :href="variantExport.url" :download="downloadFilename"><Download :size="15" />MP4</a>
         <button
-          v-if="!props.compilationId"
+          class="secondary-button"
+          title="Frames, AI titles, description, tags and covers for this video"
+          @click="openReleaseKit()"
+        >
+          <Package :size="14" />
+          <span>Release kit</span>
+        </button>
+        <button
           class="secondary-button publish-header-btn"
           title="Publish to YouTube and social channels"
           @click="openPublishModal()"
@@ -3393,6 +4452,22 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <div v-if="store.renderingFinalCut && store.finalCutJob" class="render-progress-banner">
+      <div class="render-progress-info">
+        <div class="render-progress-label">
+          <LoaderCircle class="spin" :size="14" />
+          <span>{{ store.finalCutJob.message || 'Exporting video cut…' }}</span>
+        </div>
+        <span class="render-progress-pct">{{ Math.round((store.finalCutJob.progress || 0) * 100) }}%</span>
+      </div>
+      <div class="render-progress-track">
+        <div
+          class="render-progress-fill"
+          :style="{ width: `${Math.min(100, Math.max(0, Math.round((store.finalCutJob.progress || 0) * 100)))}%` }"
+        ></div>
+      </div>
+    </div>
+
     <div v-if="localError || store.error" class="form-error timeline-error-banner">
       <span>{{ localError || store.error }}</span>
       <button type="button" class="form-error-dismiss" aria-label="Dismiss error" @click="localError = ''; store.error = ''"><X :size="13" /></button>
@@ -3401,11 +4476,79 @@ onBeforeUnmount(() => {
     <template v-else-if="timeline">
       <div class="editor-main">
         <div class="preview-pane">
-          <section class="program-monitor" :class="variant">
-            <video v-if="activeMedia?.mime_type.startsWith('video')" ref="previewVideo" :src="activeMedia.url" :style="activeMediaStyle" :muted="isMuted || Boolean(activeItem?.mute_audio)" playsinline preload="auto" @loadedmetadata="handleLoadedMetadata"></video>
-            <img v-else-if="activeMedia" class="preview-primary-media" :src="activeMedia.url" :style="activeMediaStyle" alt="" />
-            <div v-else-if="activeItem?.kind === 'title'" class="preview-title">{{ activeItem.text }}</div>
-            <div v-else class="preview-missing">Missing media</div>
+          <section ref="programMonitor" class="program-monitor" :class="[variant, { 'has-layout': !isFullBleedLayout }]">
+            <div
+              v-if="!isFullBleedLayout"
+              class="layout-matte"
+              :class="[`matte-${canvasLayout.matte}`]"
+              :style="layoutMatteStyle()"
+              aria-hidden="true"
+            ></div>
+            <div class="preview-primary-window" :style="primaryWindowStyle">
+              <video
+                v-if="activeMedia?.mime_type.startsWith('video')"
+                ref="previewVideo"
+                :src="activeMedia.url"
+                class="preview-primary-media"
+                :class="{ 'lut-source-hidden': lutGlActive }"
+                :style="activeMediaStyle"
+                :muted="isMuted || Boolean(activeItem?.mute_audio)"
+                playsinline
+                preload="auto"
+                @loadedmetadata="handleLoadedMetadata"
+              ></video>
+              <img
+                v-else-if="activeMedia"
+                ref="previewImage"
+                class="preview-primary-media"
+                :class="{ 'lut-source-hidden': lutGlActive }"
+                :src="activeMedia.url"
+                :style="activeMediaStyle"
+                alt=""
+                @load="syncLutGlPreview"
+              />
+              <div v-else-if="activeItem?.kind === 'title'" class="preview-title" :style="activeMediaStyle">{{ activeItem.text }}</div>
+              <div v-else class="preview-missing" :style="activeMediaStyle">Missing media</div>
+              <canvas
+                v-show="lutGlActive && activeMedia"
+                ref="lutCanvas"
+                class="preview-primary-media lut-gl-canvas"
+                :style="lutCanvasStyle"
+                aria-hidden="true"
+              ></canvas>
+            </div>
+            <div
+              v-if="primaryBorderStyle && activeItem"
+              class="preview-media-border primary-border"
+              :style="[primaryWindowRect, primaryBorderStyle]"
+              aria-hidden="true"
+            ></div>
+            <template v-if="!isFullBleedLayout">
+              <div
+                v-if="layoutVideoRect.y > 0.02"
+                class="layout-band top"
+                :style="{ height: `${layoutVideoRect.y * 100}%` }"
+              >
+                <span v-if="canvasLayout.top_text || canvasLayout.brand_text">{{ canvasLayout.top_text || canvasLayout.brand_text }}</span>
+              </div>
+              <div
+                v-if="layoutVideoRect.y + layoutVideoRect.h < 0.98"
+                class="layout-band bottom"
+                :style="{ height: `${(1 - layoutVideoRect.y - layoutVideoRect.h) * 100}%` }"
+              >
+                <span v-if="canvasLayout.bottom_text || (!canvasLayout.top_text && canvasLayout.brand_text)">{{ canvasLayout.bottom_text || canvasLayout.brand_text }}</span>
+              </div>
+              <i
+                v-if="canvasLayout.accent_bar && layoutVideoRect.y > 0"
+                class="layout-accent top"
+                :style="{ top: `calc(${layoutVideoRect.y * 100}% - 2px)`, background: canvasLayout.accent_color }"
+              ></i>
+              <i
+                v-if="canvasLayout.accent_bar && layoutVideoRect.y + layoutVideoRect.h < 1"
+                class="layout-accent bottom"
+                :style="{ top: `${(layoutVideoRect.y + layoutVideoRect.h) * 100}%`, background: canvasLayout.accent_color }"
+              ></i>
+            </template>
             <template v-for="overlay in videoOverlays" :key="overlay.id">
               <video
                 v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms && resolveSource(overlay.source)?.mime_type.startsWith('video')"
@@ -3419,6 +4562,12 @@ onBeforeUnmount(() => {
                 preload="auto"
                 @loadedmetadata="syncVideoOverlays"
               ></video>
+              <div
+                v-if="overlayBorderRects[overlay.id] && playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms"
+                class="preview-media-border overlay-border"
+                :style="[overlayBorderRects[overlay.id]!, mediaBorderStyle(overlay.variant[variant]) ?? {}, { opacity: overlay.opacity ?? 1 }]"
+                aria-hidden="true"
+              ></div>
             </template>
             <template v-for="overlay in timeline.document.image_overlays" :key="overlay.id">
               <img
@@ -3456,6 +4605,17 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div class="transport-secondary">
+              <button
+                type="button"
+                class="transport-btn"
+                title="Add the frame at the playhead to the release kit"
+                aria-label="Add frame to release kit"
+                :disabled="capturingFrame || !activeItem"
+                @click="captureReleaseFrame"
+              >
+                <LoaderCircle v-if="capturingFrame" class="spin" :size="14" />
+                <Camera v-else :size="14" />
+              </button>
               <button type="button" class="transport-btn" :class="{ active: loopPlayback }" title="Loop playback" aria-label="Toggle loop playback" @click="loopPlayback = !loopPlayback">
                 <Repeat :size="14" />
               </button>
@@ -3471,7 +4631,8 @@ onBeforeUnmount(() => {
             <span v-if="activeItem" class="preview-active-clip" :title="activeItem.label">
               <em>#{{ activeIndex + 1 }}</em> {{ activeItem.label }}
             </span>
-            <span class="preview-shortcut">Space play · ←/→ step · S split</span>
+            <span v-if="frameNotice" class="preview-frame-notice" role="status">{{ frameNotice }} · <button type="button" @click="openReleaseKit()">Open kit</button></span>
+            <span v-else class="preview-shortcut">Space play · ←/→ step · S split</span>
           </div>
         </div>
         <aside class="timeline-inspector" @focusin="captureInspectorSnapshot" @pointerdown="captureInspectorSnapshot">
@@ -3479,6 +4640,143 @@ onBeforeUnmount(() => {
             <span class="inspector-eyebrow">Inspector · {{ isMultiSelect ? 'MULTI-SELECTION' : selectedKind.toUpperCase() }}</span>
             <strong>{{ isMultiSelect ? `${selectedEntries.length} items selected` : (selectedPrimary?.label || selectedVideo?.label || selectedText?.text || selectedAudio?.label || (selectedImage ? 'Image overlay' : 'Nothing selected')) }}</strong>
           </header>
+
+          <details ref="layoutSectionEl" class="inspector-section layout-section">
+            <summary class="inspector-section-summary layout-section-summary">
+              <span>{{ variant === 'shorts' ? 'Shorts layout' : 'Landscape layout' }}</span>
+              <span class="layout-summary-chip" :title="activeLayoutPreset?.blurb || ''">
+                <span class="layout-summary-thumb" :class="variant" aria-hidden="true">
+                  <span
+                    class="layout-summary-video"
+                    :style="{
+                      left: `${(activeLayoutPreset?.video.x ?? 0) * 100}%`,
+                      top: `${(activeLayoutPreset?.video.y ?? 0) * 100}%`,
+                      width: `${(activeLayoutPreset?.video.w ?? 1) * 100}%`,
+                      height: `${(activeLayoutPreset?.video.h ?? 1) * 100}%`,
+                    }"
+                  ></span>
+                </span>
+                {{ activeLayoutPreset?.label || 'Full bleed' }}
+              </span>
+            </summary>
+            <div class="framing-card layout-template-card">
+              <p class="layout-card-blurb">{{ activeLayoutPreset?.blurb || 'Pick a canvas template — empty bands are for hooks, captions, and branding.' }}</p>
+              <div class="layout-template-grid" role="listbox" :aria-label="`${variant} layout templates`">
+                <button
+                  v-for="preset in layoutPresets"
+                  :key="preset.id"
+                  type="button"
+                  class="layout-template-thumb"
+                  :class="{ active: canvasLayout.template === preset.id }"
+                  :title="preset.blurb"
+                  role="option"
+                  :aria-selected="canvasLayout.template === preset.id"
+                  @click="applyLayoutTemplate(preset)"
+                >
+                  <span class="layout-thumb-canvas" :class="variant">
+                    <i
+                      class="layout-thumb-video"
+                      :style="{
+                        left: `${preset.video.x * 100}%`,
+                        top: `${preset.video.y * 100}%`,
+                        width: `${preset.video.w * 100}%`,
+                        height: `${preset.video.h * 100}%`,
+                      }"
+                    ></i>
+                  </span>
+                  <em>{{ preset.label }}</em>
+                </button>
+              </div>
+              <template v-if="!isFullBleedLayout">
+                <label class="layout-field">
+                  Band fill
+                  <select :value="canvasLayout.matte" @change="updateCanvasLayout('matte', ($event.target as HTMLSelectElement).value as TimelineCanvasLayout['matte'])">
+                    <option value="solid">Solid color</option>
+                    <option value="gradient">Gradient wash</option>
+                    <option value="blur">Blurred video bed</option>
+                    <option value="duotone">Duotone glow</option>
+                  </select>
+                </label>
+                <div class="layout-color-row">
+                  <label>Matte A<input type="color" :value="canvasLayout.matte_color" @input="updateCanvasLayout('matte_color', ($event.target as HTMLInputElement).value)" /></label>
+                  <label>Matte B<input type="color" :value="canvasLayout.matte_color_b" @input="updateCanvasLayout('matte_color_b', ($event.target as HTMLInputElement).value)" /></label>
+                  <label>Accent<input type="color" :value="canvasLayout.accent_color" @input="updateCanvasLayout('accent_color', ($event.target as HTMLInputElement).value)" /></label>
+                </div>
+                <label class="layout-field">
+                  Top band text
+                  <input
+                    type="text"
+                    :value="canvasLayout.top_text"
+                    maxlength="280"
+                    placeholder="Hook / title…"
+                    @change="updateCanvasLayout('top_text', ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+                <label class="layout-field">
+                  Bottom band text
+                  <input
+                    type="text"
+                    :value="canvasLayout.bottom_text"
+                    maxlength="280"
+                    placeholder="Caption / CTA…"
+                    @change="updateCanvasLayout('bottom_text', ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+                <label class="layout-field">
+                  Brand lockup
+                  <input
+                    type="text"
+                    :value="canvasLayout.brand_text"
+                    maxlength="80"
+                    placeholder="Channel / series name…"
+                    @change="updateCanvasLayout('brand_text', ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+                <label class="layout-check">
+                  <input
+                    type="checkbox"
+                    :checked="canvasLayout.accent_bar"
+                    @change="updateCanvasLayout('accent_bar', ($event.target as HTMLInputElement).checked)"
+                  />
+                  Neon seam bars
+                </label>
+              </template>
+            </div>
+          </details>
+
+          <details class="inspector-section transition-section">
+            <summary class="inspector-section-summary">
+              <span>Transitions</span>
+              <span class="layout-summary-chip">{{ defaultTransition ? `${transitionLabel(defaultTransition.kind)} · ${transitionDuration('default', defaultTransition.duration_ms).toFixed(1)}s` : 'No transition' }}</span>
+            </summary>
+            <div class="framing-card transition-card">
+              <label class="layout-field">
+                Default between shots
+                <select
+                  aria-label="Default transition"
+                  :value="defaultTransition?.kind ?? 'cut'"
+                  @change="setDefaultTransition(($event.target as HTMLSelectElement).value as TimelineTransitionKind)"
+                >
+                  <option v-for="option in TRANSITION_OPTIONS" :key="option.kind" :value="option.kind">{{ option.label }}</option>
+                </select>
+              </label>
+              <label v-if="defaultTransition" class="layout-field">
+                Length · {{ transitionDuration('default', defaultTransition.duration_ms).toFixed(1) }}s
+                <input
+                  aria-label="Default transition length"
+                  type="range"
+                  min="0.1"
+                  max="2"
+                  step="0.1"
+                  :value="transitionDuration('default', defaultTransition.duration_ms)"
+                  @input="transitionDurationDrafts.default = Number(($event.target as HTMLInputElement).value)"
+                  @change="setDefaultTransition(defaultTransition.kind, Math.round(Number(($event.target as HTMLInputElement).value) * 1000))"
+                />
+              </label>
+              <p class="layout-card-blurb">Click a ◆ between shots on the PRIMARY track to override one cut.</p>
+            </div>
+          </details>
+
           <template v-if="isMultiSelect">
             <div class="multi-select-inspector">
               <div class="multi-select-summary-badge">{{ multiSelectSummary }}</div>
@@ -3525,6 +4823,21 @@ onBeforeUnmount(() => {
             <label>Name<input v-model="selectedPrimary.label" @change="commitInspectorEdit" /></label>
             <label v-if="selectedPrimary.kind === 'title'">Text<textarea v-model="selectedPrimary.text" rows="3" @change="commitInspectorEdit"></textarea></label>
             <label>Duration (seconds)<input type="number" min="0.1" step="0.1" :value="selectedPrimary.duration_ms / 1000" @change="resizeSelected" /></label>
+            <div v-if="selectedPrimaryIndex > 0" class="transition-in-row">
+              <label>Transition in
+                <select
+                  aria-label="Transition in"
+                  :value="selectedPrimary.transition?.kind ?? 'default'"
+                  @change="onTransitionKindChange(selectedPrimaryIndex, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="default">Use default — {{ transitionLabel(defaultTransition?.kind ?? 'cut') }}</option>
+                  <option v-for="option in TRANSITION_OPTIONS" :key="option.kind" :value="option.kind">{{ option.label }}</option>
+                </select>
+              </label>
+              <label v-if="selectedPrimary.transition && selectedPrimary.transition.kind !== 'cut'">Length · {{ transitionDuration(selectedPrimaryIndex, selectedPrimary.transition.duration_ms).toFixed(1) }}s
+                <input type="range" min="0.1" max="2" step="0.1" :value="transitionDuration(selectedPrimaryIndex, selectedPrimary.transition.duration_ms)" @input="transitionDurationDrafts[selectedPrimaryIndex] = Number(($event.target as HTMLInputElement).value)" @change="onTransitionDurationChange(selectedPrimaryIndex, Number(($event.target as HTMLInputElement).value))" />
+              </label>
+            </div>
             <template v-if="selectedPrimary.kind === 'video'">
               <div class="trim-heading">
                 <span><Scissors :size="13" />Trim clip</span>
@@ -3546,6 +4859,8 @@ onBeforeUnmount(() => {
               <label>In · {{ (selectedPrimary.source_in_ms / 1000).toFixed(2) }}s<input type="range" min="0" :max="trimMaximumMs" step="50" :value="selectedPrimary.source_in_ms" @input="changeTrimIn" /></label>
               <label>Out · {{ (selectedTrimOutMs / 1000).toFixed(2) }}s<input type="range" min="100" :max="trimMaximumMs" step="50" :value="selectedTrimOutMs" @input="changeTrimOut" /></label>
               <div class="trim-actions"><button type="button" title="Set In point at playhead (I)" @click="setTrimAtPlayhead('in')">Set in (I)</button><button type="button" title="Set Out point at playhead (O)" @click="setTrimAtPlayhead('out')">Set out (O)</button></div>
+              <StemSeparationControls v-if="stemTarget" v-model:provider="stemProvider" v-model:include-voice="stemIncludeVoice" :separators="stemSeparators" :busy="stemRun.busy" :status="stemRun.status" :error="stemRun.error" @separate="separateMusic" />
+              <SaveToLibraryControl v-if="stemTarget" :default-label="stemTarget.label" :busy="librarySave.busy" :status="librarySave.status" :error="librarySave.error" @save="saveToLibrary" />
 
               <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this clip so it plays twice (Ctrl+D)">
                 <CopyPlus :size="13" />Duplicate clip (play twice)
@@ -3660,7 +4975,7 @@ onBeforeUnmount(() => {
                     />
                   </label>
                   <div class="framing-grid-2col">
-                    <label class="framing-slider-field">
+                    <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
                         <span>Focus X</span>
                         <b>{{ Math.round((geometryFor(selectedPrimary).focal_x ?? 0.5) * 100) }}%</b>
@@ -3672,11 +4987,11 @@ onBeforeUnmount(() => {
                         max="1"
                         step="0.01"
                         aria-label="Focus X"
-                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_x ?? 0.5, 0, 1)"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_x ?? 0.5, 0, 1, 'center')"
                         @change="commitInspectorEdit"
                       />
                     </label>
-                    <label class="framing-slider-field">
+                    <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
                         <span>Focus Y</span>
                         <b>{{ Math.round((geometryFor(selectedPrimary).focal_y ?? 0.5) * 100) }}%</b>
@@ -3688,7 +5003,7 @@ onBeforeUnmount(() => {
                         max="1"
                         step="0.01"
                         aria-label="Focus Y"
-                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_y ?? 0.5, 0, 1)"
+                        :style="framingRangeStyle(geometryFor(selectedPrimary).focal_y ?? 0.5, 0, 1, 'center')"
                         @change="commitInspectorEdit"
                       />
                     </label>
@@ -3802,73 +5117,34 @@ onBeforeUnmount(() => {
                 </button>
               </summary>
               <div class="lut-panel">
-                <label>
-                  Look / Preset
-                  <select v-model="geometryFor(selectedPrimary).lut" @change="commitInspectorEdit">
-                    <option value="none">None (Original colors)</option>
-                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
-                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
-                        {{ preset.label }}
-                      </option>
-                    </optgroup>
-                  </select>
-                </label>
-                <div v-if="selectedLutPreset(geometryFor(selectedPrimary).lut)" class="lut-description">
-                  {{ selectedLutPreset(geometryFor(selectedPrimary).lut)?.description }}
-                </div>
-                <template v-if="geometryFor(selectedPrimary).lut && geometryFor(selectedPrimary).lut !== 'none'">
-                  <label class="framing-slider-field">
-                    <span class="framing-field-head">
-                      <span>Strength</span>
-                      <b>{{ Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) }}%</b>
-                    </span>
-                    <input
-                      v-model.number="geometryFor(selectedPrimary).lut_strength"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      aria-label="LUT strength"
-                      :style="framingRangeStyle(geometryFor(selectedPrimary).lut_strength ?? 1, 0, 1)"
-                      @change="commitInspectorEdit"
-                    />
-                  </label>
-                  <div class="quick-dur-buttons">
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 25 }"
-                      @click="setLutStrength(geometryFor(selectedPrimary), 0.25)"
-                    >
-                      25%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 50 }"
-                      @click="setLutStrength(geometryFor(selectedPrimary), 0.5)"
-                    >
-                      50%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 75 }"
-                      @click="setLutStrength(geometryFor(selectedPrimary), 0.75)"
-                    >
-                      75%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedPrimary).lut_strength ?? 1) * 100) === 100 }"
-                      @click="setLutStrength(geometryFor(selectedPrimary), 1)"
-                    >
-                      100%
-                    </button>
-                  </div>
-                </template>
+                <LutPicker
+                  :lut="geometryFor(selectedPrimary).lut || 'none'"
+                  :strength="geometryFor(selectedPrimary).lut_strength ?? 1"
+                  :presets="lutPresets"
+                  @update:lut="(id) => assignLut(geometryFor(selectedPrimary!), id)"
+                  @update:strength="(s) => assignLutStrength(geometryFor(selectedPrimary!), s)"
+                  @change="commitInspectorEdit"
+                />
               </div>
+            </details>
+            <details class="inspector-section frame-section" open>
+              <summary class="inspector-section-summary">
+                <span class="inspector-section-title"><Frame :size="13" />Border &amp; corners</span>
+                <button
+                  v-if="hasFrameDecoration(geometryFor(selectedPrimary))"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Remove border and rounded corners"
+                  @click.stop.prevent="resetFrame(geometryFor(selectedPrimary))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <FrameStylePicker
+                :geometry="geometryFor(selectedPrimary)"
+                @update="(patch) => assignFrame(geometryFor(selectedPrimary!), patch)"
+                @change="commitInspectorEdit"
+              />
             </details>
           </template>
           <template v-else-if="selectedVideo">
@@ -3994,7 +5270,7 @@ onBeforeUnmount(() => {
                     />
                   </label>
                   <div class="framing-grid-2col">
-                    <label class="framing-slider-field">
+                    <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
                         <span>Focus X</span>
                         <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) * 100) }}%</b>
@@ -4006,11 +5282,11 @@ onBeforeUnmount(() => {
                         max="1"
                         step="0.01"
                         aria-label="Focus X"
-                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5, 0, 1)"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5, 0, 1, 'center')"
                         @change="commitInspectorEdit"
                       />
                     </label>
-                    <label class="framing-slider-field">
+                    <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
                         <span>Focus Y</span>
                         <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).focal_y ?? 0.5) * 100) }}%</b>
@@ -4022,7 +5298,7 @@ onBeforeUnmount(() => {
                         max="1"
                         step="0.01"
                         aria-label="Focus Y"
-                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_y ?? 0.5, 0, 1)"
+                        :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).focal_y ?? 0.5, 0, 1, 'center')"
                         @change="commitInspectorEdit"
                       />
                     </label>
@@ -4136,73 +5412,34 @@ onBeforeUnmount(() => {
                 </button>
               </summary>
               <div class="lut-panel">
-                <label>
-                  Look / Preset
-                  <select v-model="videoOverlayGeometryFor(selectedVideo).lut" @change="commitInspectorEdit">
-                    <option value="none">None (Original colors)</option>
-                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
-                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
-                        {{ preset.label }}
-                      </option>
-                    </optgroup>
-                  </select>
-                </label>
-                <div v-if="selectedLutPreset(videoOverlayGeometryFor(selectedVideo).lut)" class="lut-description">
-                  {{ selectedLutPreset(videoOverlayGeometryFor(selectedVideo).lut)?.description }}
-                </div>
-                <template v-if="videoOverlayGeometryFor(selectedVideo).lut && videoOverlayGeometryFor(selectedVideo).lut !== 'none'">
-                  <label class="framing-slider-field">
-                    <span class="framing-field-head">
-                      <span>Strength</span>
-                      <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) }}%</b>
-                    </span>
-                    <input
-                      v-model.number="videoOverlayGeometryFor(selectedVideo).lut_strength"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      aria-label="LUT strength"
-                      :style="framingRangeStyle(videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1, 0, 1)"
-                      @change="commitInspectorEdit"
-                    />
-                  </label>
-                  <div class="quick-dur-buttons">
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 25 }"
-                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.25)"
-                    >
-                      25%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 50 }"
-                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.5)"
-                    >
-                      50%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 75 }"
-                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 0.75)"
-                    >
-                      75%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1) * 100) === 100 }"
-                      @click="setLutStrength(videoOverlayGeometryFor(selectedVideo), 1)"
-                    >
-                      100%
-                    </button>
-                  </div>
-                </template>
+                <LutPicker
+                  :lut="videoOverlayGeometryFor(selectedVideo).lut || 'none'"
+                  :strength="videoOverlayGeometryFor(selectedVideo).lut_strength ?? 1"
+                  :presets="lutPresets"
+                  @update:lut="(id) => assignLut(videoOverlayGeometryFor(selectedVideo!), id)"
+                  @update:strength="(s) => assignLutStrength(videoOverlayGeometryFor(selectedVideo!), s)"
+                  @change="commitInspectorEdit"
+                />
               </div>
+            </details>
+            <details class="inspector-section frame-section" open>
+              <summary class="inspector-section-summary">
+                <span class="inspector-section-title"><Frame :size="13" />Border &amp; corners</span>
+                <button
+                  v-if="hasFrameDecoration(videoOverlayGeometryFor(selectedVideo))"
+                  type="button"
+                  class="framing-inline-reset"
+                  title="Remove border and rounded corners"
+                  @click.stop.prevent="resetFrame(videoOverlayGeometryFor(selectedVideo))"
+                >
+                  Reset
+                </button>
+              </summary>
+              <FrameStylePicker
+                :geometry="videoOverlayGeometryFor(selectedVideo)"
+                @update="(patch) => assignFrame(videoOverlayGeometryFor(selectedVideo!), patch)"
+                @change="commitInspectorEdit"
+              />
             </details>
             <label>Opacity · {{ Math.round((selectedVideo.opacity ?? 1) * 100) }}%<input v-model.number="selectedVideo.opacity" type="range" min="0" max="1" step="0.05" @change="commitInspectorEdit" /></label>
             <label>Volume · {{ Math.round((selectedVideo.volume ?? 1) * 100) }}%<input v-model.number="selectedVideo.volume" type="range" min="0" max="2" step="0.05" @input="syncVideoOverlays" @change="commitInspectorEdit" /></label>
@@ -4243,6 +5480,8 @@ onBeforeUnmount(() => {
                 Detach audio
               </button>
             </div>
+            <StemSeparationControls v-if="stemTarget" v-model:provider="stemProvider" v-model:include-voice="stemIncludeVoice" :separators="stemSeparators" :busy="stemRun.busy" :status="stemRun.status" :error="stemRun.error" @separate="separateMusic" />
+            <SaveToLibraryControl v-if="stemTarget" :default-label="stemTarget.label" :busy="librarySave.busy" :status="librarySave.status" :error="librarySave.error" @save="saveToLibrary" />
           </template>
           <template v-else-if="selectedText">
             <label>Text<textarea v-model="selectedText.text" rows="3" @change="commitInspectorEdit"></textarea></label>
@@ -4309,72 +5548,14 @@ onBeforeUnmount(() => {
                 </button>
               </summary>
               <div class="lut-panel">
-                <label>
-                  Look / Preset
-                  <select v-model="geometryFor(selectedImage).lut" @change="commitInspectorEdit">
-                    <option value="none">None (Original colors)</option>
-                    <optgroup v-for="group in lutGroups" :key="group.category" :label="group.category">
-                      <option v-for="preset in group.presets" :key="preset.id" :value="preset.id">
-                        {{ preset.label }}
-                      </option>
-                    </optgroup>
-                  </select>
-                </label>
-                <div v-if="selectedLutPreset(geometryFor(selectedImage).lut)" class="lut-description">
-                  {{ selectedLutPreset(geometryFor(selectedImage).lut)?.description }}
-                </div>
-                <template v-if="geometryFor(selectedImage).lut && geometryFor(selectedImage).lut !== 'none'">
-                  <label class="framing-slider-field">
-                    <span class="framing-field-head">
-                      <span>Strength</span>
-                      <b>{{ Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) }}%</b>
-                    </span>
-                    <input
-                      v-model.number="geometryFor(selectedImage).lut_strength"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      aria-label="LUT strength"
-                      :style="framingRangeStyle(geometryFor(selectedImage).lut_strength ?? 1, 0, 1)"
-                      @change="commitInspectorEdit"
-                    />
-                  </label>
-                  <div class="quick-dur-buttons">
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 25 }"
-                      @click="setLutStrength(geometryFor(selectedImage), 0.25)"
-                    >
-                      25%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 50 }"
-                      @click="setLutStrength(geometryFor(selectedImage), 0.5)"
-                    >
-                      50%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 75 }"
-                      @click="setLutStrength(geometryFor(selectedImage), 0.75)"
-                    >
-                      75%
-                    </button>
-                    <button
-                      type="button"
-                      class="quick-dur-btn"
-                      :class="{ active: Math.round((geometryFor(selectedImage).lut_strength ?? 1) * 100) === 100 }"
-                      @click="setLutStrength(geometryFor(selectedImage), 1)"
-                    >
-                      100%
-                    </button>
-                  </div>
-                </template>
+                <LutPicker
+                  :lut="geometryFor(selectedImage).lut || 'none'"
+                  :strength="geometryFor(selectedImage).lut_strength ?? 1"
+                  :presets="lutPresets"
+                  @update:lut="(id) => assignLut(geometryFor(selectedImage!), id)"
+                  @update:strength="(s) => assignLutStrength(geometryFor(selectedImage!), s)"
+                  @change="commitInspectorEdit"
+                />
               </div>
             </details>
             <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this image overlay (Ctrl+D)">
@@ -4387,6 +5568,11 @@ onBeforeUnmount(() => {
             <label>Duration (ms)<input v-model.number="selectedAudio.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
             <label>Trim in (ms)<input v-model.number="selectedAudio.source_in_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
             <label>Volume · {{ Math.round((selectedAudio.volume ?? 1) * 100) }}%<input v-model.number="selectedAudio.volume" type="range" min="0" max="2" step="0.05" @input="syncAudioOverlays" @change="commitInspectorEdit" /></label>
+            <label class="layout-check">
+              <input type="checkbox" aria-label="Loop audio" :checked="selectedAudio.loop !== false" @change="toggleSelectedAudioLoop" />
+              Loop when longer than the audio
+            </label>
+            <small v-if="audioLoopSpanMs(selectedAudio)" class="audio-loop-note">Repeats every {{ (audioLoopSpanMs(selectedAudio)! / 1000).toFixed(1) }}s</small>
             <button type="button" class="inspector-action-btn" @click="duplicateSelected" title="Duplicate this audio clip (Ctrl+D)">
               <CopyPlus :size="13" />Duplicate audio clip
             </button>
@@ -4404,6 +5590,8 @@ onBeforeUnmount(() => {
                 <span>{{ selectedAudio.mute_audio ? 'Muted' : 'Active' }}</span>
               </button>
             </div>
+            <StemSeparationControls v-if="stemTarget" v-model:provider="stemProvider" v-model:include-voice="stemIncludeVoice" :separators="stemSeparators" :busy="stemRun.busy" :status="stemRun.status" :error="stemRun.error" @separate="separateMusic" />
+            <SaveToLibraryControl v-if="stemTarget" :default-label="stemTarget.label" :busy="librarySave.busy" :status="librarySave.status" :error="librarySave.error" @save="saveToLibrary" />
           </template>
         </aside>
       </div>
@@ -4443,6 +5631,7 @@ onBeforeUnmount(() => {
         <button title="Add text overlay" @click="addText"><Type :size="16" /><span>Text overlay</span></button>
         <button title="Add image overlay" @click="addImageOverlay()"><ImagePlus :size="16" /><span>Image overlay</span></button>
         <label class="tool-upload" title="Upload image overlay"><Upload :size="16" /><span>Upload image</span><input type="file" aria-label="Upload image overlay" accept="image/png,image/jpeg,image/webp" @change="uploadAsset($event, false)" /></label>
+        <button title="Add saved music or sounds from the audio library" @click="openAudioLibrary"><Library :size="16" /><span>From audio library</span></button>
         <label class="tool-upload" title="Upload audio onto AUDIO track"><Music :size="16" /><span>Upload audio</span><input type="file" aria-label="Upload audio overlay" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm" @change="uploadAudioAsset($event)" /></label>
         <button v-if="activeShotWithAudio" title="Add shot audio onto AUDIO track" @click="addShotAudioToTimeline()"><Volume2 :size="16" /><span>Shot audio</span></button>
         </div></details>
@@ -4490,7 +5679,8 @@ onBeforeUnmount(() => {
         </div>
 
         <section class="tracks">
-        <div class="track-row primary-track"><strong>PRIMARY</strong><div class="track-content"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+        <div class="track-row primary-track"><strong>PRIMARY</strong><div ref="primaryTrackRef" class="track-content" :class="{ 'image-drop-active': overlayToPrimaryMarkerMs !== null }"><i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+          <i v-if="overlayToPrimaryMarkerMs !== null" class="image-drop-marker" :style="{ left: `${(overlayToPrimaryMarkerMs / (totalMs || 1)) * 100}%` }"></i>
           <button
             v-for="(item, index) in primary"
             :key="item.id"
@@ -4528,6 +5718,7 @@ onBeforeUnmount(() => {
               </span>
               <span class="block-status-icons">
                 <Scissors v-if="item.kind === 'video' && (item.source_in_ms > 0)" class="block-trim-icon" :size="10" title="Trimmed clip" />
+                <Repeat v-if="item.kind === 'video' && item.loop" class="block-loop-icon" :size="10" title="Loops to fill its length" />
                 <span
                   v-if="item.kind === 'video'"
                   role="button"
@@ -4543,11 +5734,65 @@ onBeforeUnmount(() => {
                 </span>
               </span>
             </span>
+            <span
+              class="resize-handle end primary-resize-handle"
+              :title="item.kind === 'video' ? 'Drag to trim, or past the clip end to loop it' : 'Drag to change duration'"
+              draggable="false"
+              @pointerdown.stop.prevent="beginPrimaryResize($event, item)"
+              @click.stop
+              @dragstart.stop.prevent
+            ></span>
             <span class="block-bottom">
               <b>{{ item.label }}</b>
               <small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small>
             </span>
           </button>
+          <template v-for="(item, index) in primary" :key="`join-${item.id}`">
+            <button
+              v-if="index > 0"
+              type="button"
+              class="transition-marker"
+              :class="{ active: !!effectiveTransition(index), overridden: !!item.transition, open: transitionPopoverIndex === index }"
+              :style="{ left: `${(startAt(index) / (totalMs || 1)) * 100}%` }"
+              :title="effectiveTransition(index) ? `${transitionLabel(effectiveTransition(index)!.kind)} · ${(effectiveTransition(index)!.duration_ms / 1000).toFixed(1)}s${item.transition ? '' : ' (default)'}` : 'Cut (no transition) — click to add one'"
+              :aria-label="`Transition into clip ${index + 1}`"
+              :data-join-index="index"
+              @click.stop="transitionPopoverIndex = transitionPopoverIndex === index ? null : index"
+              @pointerdown.stop
+            >◆</button>
+            <div
+              v-if="index > 0 && transitionPopoverIndex === index"
+              class="transition-popover"
+              :style="{ left: `${(startAt(index) / (totalMs || 1)) * 100}%` }"
+              @click.stop
+              @pointerdown.stop
+            >
+              <header>
+                <span>Into #{{ index + 1 }}</span>
+                <button type="button" aria-label="Close" @click="transitionPopoverIndex = null"><X :size="12" /></button>
+              </header>
+              <select
+                aria-label="Transition for this cut"
+                :value="item.transition?.kind ?? 'default'"
+                @change="onTransitionKindChange(index, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="default">Use default — {{ transitionLabel(defaultTransition?.kind ?? 'cut') }}</option>
+                <option v-for="option in TRANSITION_OPTIONS" :key="option.kind" :value="option.kind">{{ option.label }}</option>
+              </select>
+              <label v-if="(item.transition ?? defaultTransition) && (item.transition ?? defaultTransition)!.kind !== 'cut'">
+                Length · {{ transitionDuration(index, (item.transition ?? defaultTransition)!.duration_ms).toFixed(1) }}s
+                <input
+                  type="range"
+                  min="0.1"
+                  max="2"
+                  step="0.1"
+                  :value="transitionDuration(index, (item.transition ?? defaultTransition)!.duration_ms)"
+                  @input="transitionDurationDrafts[index] = Number(($event.target as HTMLInputElement).value)"
+                  @change="onTransitionDurationChange(index, Number(($event.target as HTMLInputElement).value))"
+                />
+              </label>
+            </div>
+          </template>
         </div></div>
         <div
           class="track-row video-track-row"
@@ -4688,19 +5933,56 @@ onBeforeUnmount(() => {
         <div
           class="track-row audio-track-row"
           :class="{ 'drag-over': isDraggingOverAudioTrack }"
+          :style="{ minHeight: `${Math.max(38, audioOverlayPacking.laneCount * 32 + 6)}px` }"
           @dragover.prevent="handleAudioTrackDragOver"
           @dragleave="handleAudioTrackDragLeave"
           @drop.prevent="handleAudioTrackDrop"
         >
-          <strong>AUDIO</strong>
-          <div class="overlay-track">
+          <strong class="track-header-cell">
+            <span>AUDIO</span>
+            <span class="track-header-actions">
+              <button
+                type="button"
+                class="track-action-btn"
+                :disabled="!activeShotWithAudio"
+                :title="activeShotWithAudio ? 'Add secondary audio from the current shot (+)' : 'No shot audio available'"
+                @click="addShotAudioToTimeline()"
+              >
+                <Plus :size="11" />
+              </button>
+              <label class="track-action-upload" title="Upload audio file to AUDIO track">
+                <Upload :size="10" />
+                <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm" @change="uploadAudioAsset($event)" />
+              </label>
+              <span class="audio-library-anchor">
+                <button type="button" class="track-action-btn" :class="{ active: audioLibraryOpen }" aria-label="Open audio library" title="Audio library: saved music and sounds from any project" @click.stop="audioLibraryOpen = !audioLibraryOpen">
+                  <Library :size="11" />
+                </button>
+                <AudioLibraryPanel v-if="audioLibraryOpen" ref="audioLibraryPanel" @add="addFromLibrary" @close="audioLibraryOpen = false" />
+              </span>
+            </span>
+          </strong>
+          <div
+            class="overlay-track"
+            :style="{ minHeight: `${Math.max(38, audioOverlayPacking.laneCount * 32 + 6)}px` }"
+            @click="handleAudioTrackClick"
+          >
             <i class="track-playhead" :style="{ left: `${playheadPercent}%` }"></i>
+            <label v-if="!audioOverlays.length" class="empty-track-cta" @click.stop>
+              <Plus :size="11" />
+              <span>Click or drop secondary audio here</span>
+              <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm" @change="uploadAudioAsset($event)" />
+            </label>
             <button
               v-for="item in audioOverlays"
               :key="item.id"
               class="overlay-block audio"
               :class="{ selected: isSelected('audio', item.id), 'is-muted': item.mute_audio }"
-              :style="{ left: `${item.start_ms / (totalMs || 1) * 100}%`, width: `${(item.duration_ms / (totalMs || 1)) * 100}%` }"
+              :style="{
+                left: `${item.start_ms / (totalMs || 1) * 100}%`,
+                width: `${(item.duration_ms / (totalMs || 1)) * 100}%`,
+                top: `${5 + (audioOverlayPacking.laneById[item.id] ?? 0) * 32}px`,
+              }"
               :title="`${item.label} · ${(item.duration_ms / 1000).toFixed(1)}s (drag to move)`"
               @pointerdown="beginOverlayEdit($event, 'audio', item, 'move')"
               @click.stop="selectItem('audio', item.id, item.start_ms, $event)"
@@ -4719,6 +6001,7 @@ onBeforeUnmount(() => {
                 <Music v-else class="overlay-audio-icon" :size="11" />
               </span>
               <span class="overlay-label">{{ item.label }}</span>
+              <Repeat v-if="audioLoopSpanMs(item)" class="overlay-loop-icon" :size="10" :title="`Repeats every ${(audioLoopSpanMs(item)! / 1000).toFixed(1)}s to fill the clip`" />
               <small>{{ (item.duration_ms / 1000).toFixed(1) }}s</small>
               <span class="resize-handle end" title="Adjust end" @pointerdown.stop="beginOverlayEdit($event, 'audio', item, 'resize-end')"></span>
             </button>
@@ -4902,10 +6185,27 @@ onBeforeUnmount(() => {
           <PublishPanel
             :project="project"
             :variant="variant"
-            :episode-id="store.currentEpisodeId || undefined"
+            :episode-id="props.compilationId ? undefined : store.currentEpisodeId || undefined"
+            :compilation-id="props.compilationId || undefined"
             as-modal
             @close="closePublishModal()"
+            @open-kit="openReleaseKit()"
             @published="store.loadProject(project.id); closePublishModal()"
+          />
+        </div>
+      </div>
+      <div v-if="showReleaseKit" class="publish-modal-backdrop" @click.self="closeReleaseKit()">
+        <div class="publish-modal-card release-kit-card">
+          <ReleaseKitPanel
+            :project="project"
+            :variant="variant"
+            :episode-id="releaseKitScope.episodeId"
+            :compilation-id="releaseKitScope.compilationId"
+            :refresh-key="releaseKitRefresh"
+            :segments="releaseFrameSegments"
+            :initial-ms="playheadMs"
+            as-modal
+            @close="closeReleaseKit()"
           />
         </div>
       </div>
@@ -5082,6 +6382,55 @@ onBeforeUnmount(() => {
 /* ==========================================================================
    BANNERS & LOADING
    ========================================================================== */
+.render-progress-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 16px;
+  background: rgba(14, 21, 33, 0.95);
+  border-bottom: 1px solid rgba(56, 220, 255, 0.3);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.render-progress-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.render-progress-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #e2e8f0;
+  font-weight: 500;
+}
+
+.render-progress-pct {
+  font-weight: 700;
+  color: #38dcff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+}
+
+.render-progress-track {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.render-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38dcff 0%, #a3e635 100%);
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 8px rgba(56, 220, 255, 0.6);
+}
+
 .timeline-error-banner {
   display: flex;
   align-items: center;
@@ -5196,6 +6545,36 @@ onBeforeUnmount(() => {
   object-fit: cover;
 }
 
+.program-monitor .preview-primary-window {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.program-monitor .preview-media-border {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.program-monitor .preview-media-border.primary-border {
+  z-index: 3;
+}
+
+.program-monitor .lut-source-hidden {
+  opacity: 0 !important;
+  filter: none !important;
+  pointer-events: none;
+}
+
+.program-monitor .lut-gl-canvas {
+  z-index: 1;
+  pointer-events: none;
+}
+
 .preview-title,
 .preview-missing {
   padding: 30px;
@@ -5224,6 +6603,230 @@ onBeforeUnmount(() => {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.program-monitor.has-layout {
+  overflow: hidden;
+  background: #050607;
+}
+
+.program-monitor .layout-matte {
+  position: absolute;
+  inset: -8%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.program-monitor.has-layout > video,
+.program-monitor.has-layout > .preview-primary-media,
+.program-monitor.has-layout > .preview-title,
+.program-monitor.has-layout > .preview-missing {
+  z-index: 2;
+}
+
+.layout-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 0 8%;
+  pointer-events: none;
+  text-align: center;
+}
+
+.layout-band.top { top: 0; }
+.layout-band.bottom { bottom: 0; }
+
+.layout-band span {
+  color: #f4f7fb;
+  font-weight: 800;
+  font-size: clamp(0.72rem, 2.4vw, 1.05rem);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85), 0 0 18px rgba(0, 0, 0, 0.35);
+  line-height: 1.25;
+}
+
+.layout-accent {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 4;
+  pointer-events: none;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.layout-section {
+  margin: 0 0 8px;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 10px;
+  border-top: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.layout-section-summary {
+  padding: 2px 0 6px;
+}
+
+.layout-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 58%;
+  padding: 2px 7px 2px 3px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.55);
+  color: #e2e8f0;
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.layout-summary-thumb {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 18px;
+  border-radius: 2px;
+  background: #0a0c10;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.layout-summary-thumb.landscape {
+  width: 22px;
+  height: 12px;
+}
+
+.layout-summary-video {
+  position: absolute;
+  display: block;
+  border-radius: 1px;
+  background: linear-gradient(135deg, #5b7cfa, #39d0ff 55%, #7dffb3);
+}
+
+.layout-template-card {
+  margin: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.layout-card-blurb {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.layout-template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.layout-template-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.55);
+  color: #cbd5e1;
+  cursor: pointer;
+  text-align: left;
+}
+
+.layout-template-thumb:hover {
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.layout-template-thumb.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.layout-thumb-canvas {
+  position: relative;
+  width: 100%;
+  border-radius: 4px;
+  background: #0a0c10;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.layout-thumb-canvas.shorts { aspect-ratio: 9 / 16; }
+.layout-thumb-canvas.landscape { aspect-ratio: 16 / 9; }
+
+.layout-thumb-video {
+  position: absolute;
+  display: block;
+  border-radius: 2px;
+  background: linear-gradient(135deg, #5b7cfa, #39d0ff 55%, #7dffb3);
+  opacity: 0.92;
+}
+
+.layout-template-thumb em {
+  font-style: normal;
+  font-size: 0.68rem;
+  font-weight: 650;
+  color: #e2e8f0;
+}
+
+.layout-field {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 6px !important;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.layout-field input[type='text'],
+.layout-field select {
+  width: 100%;
+}
+
+.layout-color-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.layout-color-row label {
+  display: grid;
+  gap: 2px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin: 0 !important;
+}
+
+.layout-color-row input[type='color'] {
+  width: 100%;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+  background: transparent;
+}
+
+.layout-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0 !important;
+  font-size: 0.75rem;
+  color: #e2e8f0;
 }
 
 .shorts-safe-area {
@@ -6770,15 +8373,27 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   transition: all 0.15s ease;
 }
 
-.track-action-upload input {
+.track-action-upload input,
+.empty-track-cta input {
   display: none;
 }
 
+.track-action-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .track-action-btn:hover,
+.track-action-btn.active,
 .track-action-upload:hover {
   background: rgba(255, 255, 255, 0.14);
   color: #fff;
   border-color: rgba(255, 255, 255, 0.25);
+}
+
+.audio-library-anchor {
+  position: relative;
+  display: inline-flex;
 }
 
 .track-row.video-track-row.drag-over .overlay-track,
@@ -7021,6 +8636,83 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   pointer-events: none;
 }
 
+/* TRANSITIONS */
+.transition-marker {
+  position: absolute;
+  top: 50%;
+  z-index: 8;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  background: rgba(10, 12, 18, 0.85);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 9px;
+  line-height: 14px;
+  cursor: pointer;
+}
+.transition-marker:hover,
+.transition-marker.open {
+  border-color: #fff;
+  color: #fff;
+}
+.transition-marker.active {
+  border-color: #f5c84b;
+  background: #f5c84b;
+  color: #1a1404;
+}
+.transition-marker.active.overridden {
+  box-shadow: 0 0 0 2px rgba(245, 200, 75, 0.35);
+}
+.transition-popover {
+  position: absolute;
+  top: calc(50% + 14px);
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  width: 190px;
+  padding: 8px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: #151821;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  color: #eef0f4;
+  font-size: 11px;
+}
+.transition-popover select {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  background: #0d0f15;
+  color: inherit;
+  font-size: 11px;
+}
+.transition-popover header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+.transition-popover header button {
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.transition-popover label {
+  display: grid;
+  gap: 4px;
+}
+.transition-in-row {
+  display: grid;
+  gap: 6px;
+}
+
 /* PRIMARY FILMSTRIP BLOCKS */
 .timeline-block {
   position: absolute;
@@ -7254,6 +8946,15 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   border-bottom: 2px dashed var(--danger);
 }
 
+.overlay-loop-icon {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+.audio-loop-note {
+  margin-top: -4px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+}
 .overlay-audio-icon {
   flex: none;
   opacity: 0.88;
@@ -7307,6 +9008,34 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   background: #fff;
 }
 
+.primary-resize-handle {
+  z-index: 3;
+  width: 8px;
+}
+
+.timeline-block:hover .primary-resize-handle,
+.timeline-block.selected .primary-resize-handle {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.track-content.image-drop-active {
+  outline: 1px dashed rgba(255, 255, 255, 0.45);
+  outline-offset: -2px;
+}
+
+.image-drop-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 3px;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--accent, #39d0ff);
+  pointer-events: none;
+}
+
 /* ==========================================================================
    EXPORT STATUS FOOTER & MODALS
    ========================================================================== */
@@ -7339,7 +9068,7 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
 .publish-modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 120;
+  z-index: 2000;
   background: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(5px);
   display: grid;
@@ -7537,6 +9266,26 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   max-height: 90vh;
   overflow-y: auto;
   border-radius: 16px;
+}
+
+.publish-modal-card.release-kit-card {
+  max-width: 980px;
+}
+
+.preview-frame-notice {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--workspace-accent, #d9ff63);
+}
+
+.preview-frame-notice button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .timeline-editor button:focus-visible,

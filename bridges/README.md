@@ -52,4 +52,8 @@ PLAYWRIGHT_BROWSERS_PATH=../.playwright .venv/bin/chatgpt-web-provider
 
 The endpoint is `http://127.0.0.1:8791/v1`.
 
+Image jobs open a private tab per request. Raise `CHATGPT_WEB_MAX_CONCURRENT_REQUESTS`
+in `chatgpt.env` and `MOVIE_IMAGE_WORKER_CONCURRENCY` in `backend/.env` together
+(for example both to `3`) after restarting the bridge and movie worker.
+
 Never commit, paste into chat, or expose the Gemini cookies, ChatGPT profile, or bridge API token.

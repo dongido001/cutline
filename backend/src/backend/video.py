@@ -2,6 +2,7 @@ import base64
 import json
 import mimetypes
 import random
+import re
 import time
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from .media import normalize_conversation_url
 from .runway_video import generate_runway_clip, runway_status
 from .settings import settings
 
@@ -565,9 +567,198 @@ def generate_flowkit_clip(
     raise TimeoutError("FlowKit video generation timed out")
 
 
+VIDEO_PROVIDERS: dict[str, str] = {
+    "flowkit": "Google Flow (FlowKit)",
+    "gemini_web": "Gemini Web (Veo)",
+    "comfyui": "ComfyUI",
+    "runway": "Runway",
+}
+
+
+def get_active_video_provider() -> str:
+    state_file = settings.data_dir / "video_provider.json"
+    if state_file.is_file():
+        try:
+            saved = json.loads(state_file.read_text())
+            provider = str(saved.get("provider") or "").strip().lower()
+            if provider in VIDEO_PROVIDERS:
+                return provider
+        except Exception:
+            pass
+    return (settings.video_provider or "runway").strip().lower()
+
+
+def set_video_provider(provider: str) -> str:
+    provider = provider.strip().lower()
+    if provider not in VIDEO_PROVIDERS:
+        raise ValueError(f"Unknown video provider: {provider}")
+    state_file = settings.data_dir / "video_provider.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps({"provider": provider}, indent=2))
+    settings.video_provider = provider
+    from .settings import BACKEND_ROOT
+
+    env_path = BACKEND_ROOT / ".env"
+    if env_path.is_file():
+        try:
+            lines = env_path.read_text().splitlines()
+            updated_lines: list[str] = []
+            found = False
+            for line in lines:
+                if line.strip().startswith("MOVIE_VIDEO_PROVIDER="):
+                    updated_lines.append(f"MOVIE_VIDEO_PROVIDER={provider}")
+                    found = True
+                else:
+                    updated_lines.append(line)
+            if not found:
+                updated_lines.append(f"MOVIE_VIDEO_PROVIDER={provider}")
+            env_path.write_text("\n".join(updated_lines) + "\n")
+        except Exception:
+            pass
+    return provider
+
+
+def gemini_web_video_status() -> tuple[bool, bool, str]:
+    base_url = settings.gemini_web_base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        base_url = base_url[: -len("/chat/completions")]
+    videos_url = f"{base_url}/videos" if not base_url.endswith("/videos") else base_url
+    try:
+        response = httpx.get(videos_url, headers={"Authorization": "Bearer not-needed"}, timeout=2)
+        response.raise_for_status()
+    except Exception as exc:
+        return True, False, f"Gemini Web video unavailable: {exc}"
+    return True, True, "Veo 3.0 · 10s HD video with audio"
+
+
+def video_provider_statuses() -> list[dict[str, Any]]:
+    active = get_active_video_provider()
+    items: list[dict[str, Any]] = []
+    # 1. FlowKit
+    fk_conf, fk_avail, fk_detail = flowkit_status()
+    preset = get_active_flowkit_preset()
+    items.append({
+        "id": "flowkit",
+        "label": "Google Flow (FlowKit)",
+        "configured": fk_conf,
+        "available": fk_avail,
+        "detail": fk_detail,
+        "selected": active == "flowkit",
+        "model": preset["short_label"],
+        "active_preset": preset["id"],
+        "presets": [dict(p) for p in FLOWKIT_MODEL_PRESETS],
+    })
+    # 2. Gemini Web (Veo)
+    gw_conf, gw_avail, gw_detail = gemini_web_video_status()
+    items.append({
+        "id": "gemini_web",
+        "label": "Gemini Web (Veo)",
+        "configured": gw_conf,
+        "available": gw_avail,
+        "detail": gw_detail,
+        "selected": active == "gemini_web",
+        "model": "Veo 3.0 (10s HD)",
+    })
+    # 3. ComfyUI
+    cf_conf, cf_avail, cf_detail = comfyui_status()
+    items.append({
+        "id": "comfyui",
+        "label": "ComfyUI",
+        "configured": cf_conf,
+        "available": cf_avail,
+        "detail": cf_detail,
+        "selected": active == "comfyui",
+        "model": "workflow",
+    })
+    return items
+
+
+def generate_gemini_web_clip(
+    prompt: str,
+    duration_ms: int,
+    aspect_ratio: str,
+    on_conversation_url: Any = None,
+) -> tuple[str, str, str]:
+    base_url = settings.gemini_web_base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        base_url = base_url[: -len("/chat/completions")]
+    videos_url = f"{base_url}/videos" if not base_url.endswith("/videos") else base_url
+    ar = "9:16" if aspect_ratio == "9:16" else "16:9"
+    payload = {
+        "prompt": prompt,
+        "aspect_ratio": ar,
+    }
+    with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        resp = client.post(
+            videos_url,
+            json=payload,
+            headers={"Authorization": "Bearer not-needed"},
+        )
+        resp.raise_for_status()
+        job = resp.json()
+        job_id = job.get("id")
+        if not job_id:
+            raise RuntimeError(f"Gemini Web bridge did not return a video job ID: {job}")
+
+        deadline = time.monotonic() + 600
+        content_url = None
+        cid = None
+        while time.monotonic() < deadline:
+            time.sleep(4)
+            poll_resp = client.get(
+                f"{videos_url}/{job_id}",
+                headers={"Authorization": "Bearer not-needed"},
+            )
+            poll_resp.raise_for_status()
+            status_data = poll_resp.json()
+            if status_data.get("conversation_id") and not cid:
+                cid = status_data["conversation_id"]
+                if on_conversation_url:
+                    try:
+                        clean_cid = re.sub(r"^c_", "", str(cid).strip())
+                        on_conversation_url(f"https://gemini.google.com/app/{clean_cid}")
+                    except Exception:
+                        pass
+            status = status_data.get("status")
+            if status == "completed":
+                content_url = status_data.get("content_url")
+                cid = status_data.get("conversation_id") or cid
+                break
+            elif status == "failed":
+                err = status_data.get("error") or "Video generation failed"
+                raise RuntimeError(f"Gemini Web video generation failed: {err}")
+
+        if not content_url:
+            raise TimeoutError("Gemini Web video generation timed out after 10 minutes")
+
+        if content_url.startswith("http"):
+            download_url = content_url
+        else:
+            host = base_url.split("/openai")[0] if "/openai" in base_url else base_url
+            download_url = f"{host.rstrip('/')}/{content_url.lstrip('/')}"
+
+        dl_resp = client.get(
+            download_url,
+            headers={"Authorization": "Bearer not-needed"},
+        )
+        dl_resp.raise_for_status()
+        filename = f"clip-{uuid.uuid4()}.mp4"
+        (settings.media_dir / filename).write_bytes(dl_resp.content)
+        if cid and on_conversation_url:
+            try:
+                clean_cid = re.sub(r"^c_", "", str(cid).strip())
+                on_conversation_url(f"https://gemini.google.com/app/{clean_cid}")
+            except Exception:
+                pass
+        return filename, "video/mp4", "gemini_web"
+
+
 def video_provider_status() -> tuple[str, str, bool, bool, str, str]:
     """Return id, label, configured, available, model, detail."""
-    provider = (settings.video_provider or "runway").strip().lower()
+    provider = get_active_video_provider()
+    if provider == "gemini_web":
+        configured, available, detail = gemini_web_video_status()
+        return "gemini_web", "Gemini Web (Veo)", configured, available, "veo-3.0", detail
     if provider == "comfyui":
         configured, available, detail = comfyui_status()
         return "comfyui", "ComfyUI", configured, available, "workflow", detail
@@ -602,12 +793,14 @@ def generate_shot_clip(
     on_flow_project_id: Any = None,
     reference_image_paths: list[Path] | None = None,
     video_mode: str = "i2v",
+    on_conversation_url: Any = None,
 ) -> tuple[str, str, str]:
     dispatch_kwargs: dict[str, Any] = {
         "scene_id": scene_id,
         "flow_project_id": flow_project_id,
         "on_flow_project_id": on_flow_project_id,
         "reference_image_paths": reference_image_paths,
+        "on_conversation_url": on_conversation_url,
     }
     if video_mode and video_mode != "i2v":
         dispatch_kwargs["video_mode"] = video_mode
@@ -636,8 +829,16 @@ def _dispatch_clip(
     on_flow_project_id: Any = None,
     reference_image_paths: list[Path] | None = None,
     video_mode: str = "i2v",
+    on_conversation_url: Any = None,
 ) -> tuple[str, str, str]:
-    provider = (settings.video_provider or "runway").strip().lower()
+    provider = get_active_video_provider()
+    if provider == "gemini_web":
+        return generate_gemini_web_clip(
+            prompt,
+            duration_ms,
+            aspect_ratio,
+            on_conversation_url=on_conversation_url,
+        )
     if provider == "flowkit":
         if (
             flow_project_id is None

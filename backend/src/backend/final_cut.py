@@ -108,14 +108,19 @@ class FinalCutResult:
 def _run(command: list[str]) -> None:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
-        detail = result.stderr.strip().splitlines()[-1] if result.stderr else "Unknown FFmpeg error"
+        lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+        detail = "\n".join(lines[-15:]) if lines else "Unknown FFmpeg error"
         raise RuntimeError(f"FFmpeg failed: {detail}")
 
 
-def export_encode_args(*, include_audio_rate: bool = True) -> list[str]:
+def export_encode_args(*, include_audio_rate: bool = True, fast_intermediate: bool = False) -> list[str]:
     """Shared H.264/AAC args for timeline + final-cut exports."""
-    preset = (settings.export_video_preset or "slow").strip() or "slow"
-    crf = max(0, min(51, int(settings.export_video_crf)))
+    if fast_intermediate:
+        preset = "veryfast"
+        crf = max(18, min(51, int(settings.export_video_crf)))
+    else:
+        preset = (settings.export_video_preset or "veryfast").strip() or "veryfast"
+        crf = max(0, min(51, int(settings.export_video_crf)))
     audio_k = max(64, min(512, int(settings.export_audio_bitrate_k)))
     args = [
         "-c:v", "libx264",
@@ -134,6 +139,7 @@ def export_encode_args(*, include_audio_rate: bool = True) -> list[str]:
         args.extend(["-ar", "48000"])
     args.extend(["-movflags", "+faststart"])
     return args
+
 
 
 def _has_audio(path: Path) -> bool:

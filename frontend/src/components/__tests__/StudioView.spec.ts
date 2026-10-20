@@ -16,6 +16,20 @@ const fixture = {
   episode_label: 'Episode',
   current_episode_id: 'ep-1',
   episodes: [],
+  compilations: [
+    {
+      id: 'comp-1',
+      project_id: 'project-1',
+      title: 'Episodes 1-3 Box',
+      description: null,
+      episode_ids: ['ep-1'],
+      settings: {},
+      created_at: '2026-10-13T00:00:00Z',
+      updated_at: '2026-10-13T00:00:00Z',
+      duration_ms: 12000,
+      clip_count: 2,
+    },
+  ],
   current_version: {
     id: 'v1',
     version_number: 1,
@@ -136,9 +150,70 @@ beforeEach(() => {
     if (suggestion) suggestion.status = decision
     return suggestion as never
   })
+  vi.spyOn(api, 'compilationShots').mockResolvedValue([])
+  vi.spyOn(api, 'compilationTimeline').mockResolvedValue({
+    revision: 1,
+    edit: 'landscape',
+    assets: [],
+    document: {
+      version: 1,
+      primary: [],
+      video_overlays: [],
+      image_overlays: [],
+      text_overlays: [],
+      audio_overlays: [],
+    },
+  })
+  vi.spyOn(api, 'compilationExports').mockResolvedValue([])
 })
 
 describe('StudioView', () => {
+  it('assigns a reusable room to the scene while preserving its episode', async () => {
+    vi.spyOn(api, 'project').mockImplementation(async () => {
+      const project = JSON.parse(JSON.stringify(fixture)) as ProjectDetail
+      project.characters = [{ id: 'kitchen', name: 'COMPOUND KITCHEN', kind: 'scene', notes: 'Blue tiles', references: [] }] as unknown as ProjectDetail['characters']
+      return project
+    })
+    const update = vi.spyOn(api, 'updateScene').mockResolvedValue({} as never)
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-1')
+    await router.isReady()
+    const wrapper = mount(StudioView, { global: { plugins: [createPinia(), router] } })
+    await flushPromises()
+    const selector = wrapper.get('select[aria-label="Reusable set for this scene"]')
+    expect(selector.text()).toContain('COMPOUND KITCHEN · reference needed')
+    await selector.setValue('COMPOUND KITCHEN')
+    await flushPromises()
+    expect(update).toHaveBeenCalledWith('demo-1', { location: 'COMPOUND KITCHEN', set_notes: '' })
+    wrapper.unmount()
+  })
+
+  it('requires confirmation before deleting a linked ChatGPT chat and keeps the link on failure', async () => {
+    const url = 'https://chatgpt.com/c/6ad6839a-5588-83ea-a162-39585ae451aa'
+    vi.spyOn(api, 'project').mockImplementation(async () => {
+      const project = JSON.parse(JSON.stringify(fixture)) as ProjectDetail
+      project.current_version!.scenes[0]!.shots[0]!.conversation_url = url
+      return project
+    })
+    const remove = vi.spyOn(api, 'deleteConversation').mockRejectedValue(new Error('Bridge offline'))
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-1')
+    await router.isReady()
+    const wrapper = mount(StudioView, { global: { plugins: [createPinia(), router] } })
+    await flushPromises()
+    const trigger = wrapper.findAll('button').find(button => button.text() === 'Delete chat')!
+    await trigger.trigger('click')
+    expect(remove).not.toHaveBeenCalled()
+    const dialog = wrapper.get('[aria-labelledby="delete-chat-title"]')
+    expect(dialog.get('a').attributes('href')).toBe(url)
+    await dialog.findAll('button').find(button => button.text() === 'Delete chat')!.trigger('click')
+    await flushPromises()
+    expect(remove).toHaveBeenCalledWith('project-1', url)
+    expect(dialog.get('[role="alert"]').text()).toBe('Bridge offline')
+    expect(dialog.get('a').attributes('href')).toBe(url)
+    wrapper.unmount()
+  })
+
   it('updates the open suggestion count when a decision is made', async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: routes() })
     await router.push('/projects/project-1/script')
@@ -401,7 +476,7 @@ describe('StudioView', () => {
     wrapper.unmount()
   })
 
-  it('supports Characters, Scenes, and Props tabs, @mention autocomplete, and direct R2V video generation', async () => {
+  it('supports Characters, Locations / Sets, and Props tabs, @mention autocomplete, and direct R2V video generation', async () => {
     const r2vProject = JSON.parse(JSON.stringify(fixture)) as ProjectDetail
     r2vProject.status = 'shot_plan'
     r2vProject.characters = [
@@ -503,11 +578,12 @@ describe('StudioView', () => {
     })
     await flushPromises()
 
-    // Verify Characters | Scenes | Props tabs in Produce strip
+    // Verify Characters | Locations / Sets | Props tabs in Produce strip
     const tabs = wrapper.findAll('.element-tab-btn')
     expect(tabs).toHaveLength(3)
     expect(tabs[0]!.text()).toContain('Characters')
-    expect(tabs[1]!.text()).toContain('Scenes')
+    expect(tabs[1]!.text()).toContain('Locations / Sets')
+    expect(tabs[1]!.attributes('title')).toContain('not screenplay scene count')
     expect(tabs[2]!.text()).toContain('Props')
     expect(wrapper.text()).toContain('@MARA_ELIAS')
     expect(wrapper.text()).toContain('3D ready')
@@ -551,6 +627,46 @@ describe('StudioView', () => {
         elementIds: expect.arrayContaining(['char-1', 'prop-1', 'scene-1']),
       }),
     )
+
+    wrapper.unmount()
+  })
+
+  it('synchronizes compilation query parameter with active compilation and restores it on reload', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/final-cut?compilation=comp-1')
+    await router.isReady()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useStudioStore()
+
+    const wrapper = mount(StudioView, {
+      global: { plugins: [pinia, router] },
+    })
+    await flushPromises()
+
+    // 1. Restored on mount from URL query
+    expect(store.activeCompilationId).toBe('comp-1')
+    expect(store.isCompilationMode).toBe(true)
+    expect(router.currentRoute.value.query.compilation).toBe('comp-1')
+
+    // 2. Clearing active compilation removes it from URL query
+    store.selectCompilation(null)
+    await flushPromises()
+    expect(store.activeCompilationId).toBeNull()
+    expect(store.isCompilationMode).toBe(false)
+    expect(router.currentRoute.value.query.compilation).toBeUndefined()
+
+    // 3. Selecting compilation again adds it back to URL query
+    store.selectCompilation('comp-1')
+    await flushPromises()
+    expect(store.activeCompilationId).toBe('comp-1')
+    expect(router.currentRoute.value.query.compilation).toBe('comp-1')
+
+    // 4. Navigating to script exits compilation mode
+    await router.push('/projects/project-1/script')
+    await flushPromises()
+    expect(store.activeCompilationId).toBeNull()
+    expect(router.currentRoute.value.query.compilation).toBeUndefined()
 
     wrapper.unmount()
   })

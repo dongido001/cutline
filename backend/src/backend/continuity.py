@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .cast import load_cast_references
+from .cast import load_cast_references, matching_set_element, shot_element_ids
 from .models import Character, Project, Scene, Shot
 from .screenplay_parser import (
     canonical_character_name,
@@ -31,6 +31,143 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _people(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in snapshot.get("characters") or []
+            if isinstance(item, dict) and (item.get("kind") or "character") == "character"]
+
+
+_PROP_TAG_RE = re.compile(r"@([A-Za-z0-9_]+)")
+# Prop definition chunks: "@PROP is …" or "@PROP — …" up to the next @tag.
+_PROP_DEFINITION_RE = re.compile(
+    r"(@[A-Za-z0-9_]+\s*(?:is\b|[—–-])[^@]*)",
+    re.IGNORECASE,
+)
+
+
+def _shot_text_for_prop_filter(
+    snapshot: dict[str, Any] | None,
+    shot: Shot | None,
+    video_prompt: str = "",
+) -> str:
+    """Collect shot-local text used to decide which scene props apply."""
+    snapshot = snapshot or {}
+    parts = [
+        _text(shot.action) if shot is not None else _text(snapshot.get("action")),
+        _text(shot.image_prompt) if shot is not None else _text(snapshot.get("image_prompt_base")),
+        _text(video_prompt)
+        or (_text(shot.video_prompt) if shot is not None else _text(snapshot.get("video_prompt"))),
+        _text(getattr(shot, "sound", "")) if shot is not None else _text(snapshot.get("sound")),
+        _text(shot.framing) if shot is not None else _text(snapshot.get("framing")),
+    ]
+    dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
+    for line in dialogue:
+        if isinstance(line, dict):
+            parts.append(_text(line.get("text") or line.get("line")))
+            parts.append(_text(line.get("character") or line.get("speaker")))
+    return "\n".join(part for part in parts if part)
+
+
+def _filter_wardrobe_notes_for_shot(wardrobe_notes: str, characters: list[dict[str, Any]]) -> str:
+    """Keep only wardrobe descriptions for characters present in this shot.
+
+    If no characters are declared or if notes are general/unsegmented, returns notes unchanged.
+    """
+    notes = _text(wardrobe_notes)
+    if not notes or not characters:
+        return notes
+    char_names = [
+        _text(c.get("name")).upper().strip()
+        for c in characters
+        if (c.get("kind") or "character") == "character" and _text(c.get("name")).strip()
+    ]
+    if not char_names:
+        return notes
+
+    protected = re.sub(r"\b(MR|MRS|MS|DR|PROF|JR|SR)\.", r"\1__DOT__", notes, flags=re.I)
+    sentences = [
+        s.replace("__DOT__", ".").strip()
+        for s in re.split(r"\n+|(?<=[.])\s+(?=[A-Z@])", protected)
+        if s.strip()
+    ]
+    if len(sentences) <= 1:
+        return notes
+
+    kept: list[str] = []
+    has_any_match = False
+    for sent in sentences:
+        mentioned_this_shot = any(
+            re.search(r"\b" + re.escape(name) + r"\b", sent.upper())
+            for name in char_names
+        )
+        if mentioned_this_shot:
+            kept.append(sent.rstrip(" ."))
+            has_any_match = True
+        else:
+            is_other_char = bool(
+                re.match(r"^@?[A-Za-z]+(?:\s+[A-Za-z]+)?\s*(?:wears\b|is\s+wearing\b|in\b|:)", sent)
+                or re.search(r"\b[A-Z]{3,}(?:\s+[A-Z]{3,})?\b\s*(?:wears\b|:)", sent)
+            )
+            if not is_other_char:
+                kept.append(sent.rstrip(" ."))
+
+    if not has_any_match:
+        return notes
+    return ". ".join(kept) + "."
+
+
+def _filter_props_notes_for_shot(props_notes: str, shot_text: str) -> str:
+    """Keep only prop definitions whose @TAG or key object is mentioned in the shot.
+
+    Tagged episode-wide prop bibles filter by @TAG.
+    Plain-text prop bibles filter by object keywords matching the shot text.
+    """
+    notes = _text(props_notes)
+    if not notes or not shot_text:
+        return notes
+    definitions = [seg.strip() for seg in _PROP_DEFINITION_RE.findall(notes) if seg.strip()]
+    if definitions:
+        shot_tags = {tag.upper() for tag in _PROP_TAG_RE.findall(shot_text or "")}
+        if not shot_tags:
+            return ""
+        kept: list[str] = []
+        for segment in definitions:
+            match = _PROP_TAG_RE.match(segment)
+            if match and match.group(1).upper() in shot_tags:
+                kept.append(segment.rstrip(" ."))
+        return " ".join(kept)
+
+    segments = [seg.strip(" .,-–—") for seg in re.split(r"[;\n]+", notes) if seg.strip(" .,-–—")]
+    if len(segments) <= 1:
+        return notes
+
+    shot_lower = shot_text.lower()
+    shot_words = set(re.findall(r"\b[a-z]{3,}\b", shot_lower))
+    modifiers = {
+        "small", "large", "brown", "white", "black", "blue", "cream", "red", "green", "yellow",
+        "metal", "plastic", "plain", "three", "two", "one", "courtyard", "side", "unlettered",
+        "closed", "enclosed", "exterior", "the", "and", "with", "from", "for", "are", "etc",
+        "near", "beside", "behind", "into", "onto", "over", "under", "all", "each", "some",
+        "tobi", "amaka", "bamidele", "zara", "mira", "jun", "ben", "maya", "gabe", "rosa",
+    }
+
+    kept_plain: list[str] = []
+    for seg in segments:
+        base = re.split(
+            r"\s+(?:centered\s+on|beneath|initially\s+in|clipped\s+to|beside|inside|with|attached\s+to|held\s+by|worn\s+by|hanging\s+from|placed\s+on|is\s+an?)\b",
+            seg,
+            flags=re.IGNORECASE,
+        )[0].strip()
+        words = [w for w in re.findall(r"\b[a-z]{3,}\b", base.lower()) if w not in modifiers]
+        if any(w in shot_words for w in words):
+            kept_plain.append(seg)
+        elif not words and any(w in shot_words for w in re.findall(r"\b[a-z]{3,}\b", seg.lower()) if w not in modifiers):
+            kept_plain.append(seg)
+
+    if not kept_plain:
+        return ""
+    return "; ".join(kept_plain) + "."
+
+
 def _resolve_character_voice(character: Character) -> str:
     explicit = _text(getattr(character, "voice_description", ""))
     if explicit:
@@ -42,7 +179,7 @@ def _resolve_character_voice(character: Character) -> str:
 
 
 def _scene_package(scene: Scene) -> dict[str, str]:
-    return {
+    package = {
         "title": _text(scene.title),
         "location": _text(scene.location),
         "time_of_day": _text(scene.time_of_day),
@@ -51,6 +188,45 @@ def _scene_package(scene: Scene) -> dict[str, str]:
         "wardrobe_notes": _text(scene.wardrobe_notes),
         "props_notes": _text(scene.props_notes),
     }
+    reusable_set = matching_set_element(scene.script_version.project.characters, scene.location)
+    if reusable_set and reusable_set.notes:
+        package["set_notes"] = f"Canonical set layout: {reusable_set.notes.strip()}"
+        staging = _text(scene.set_notes)
+        if staging and staging != reusable_set.notes.strip():
+            package["set_notes"] += f"\nScene staging (preserve the canonical layout): {staging}"
+    return package
+
+
+def naturalize_screenplay_tags(text: str) -> str:
+    """Convert raw screenplay tokens like @NKIRU, @NKIRU_SHOP, @RED_CHAIR into natural English."""
+    if not text or "@" not in text:
+        return text
+
+    # Specific compound tokens first
+    text = re.sub(r"@([A-Za-z0-9]+)_(?:SHOP|STORE)S?\b", lambda m: f"{m.group(1).capitalize()}'s shop", text)
+    text = re.sub(r"@([A-Za-z0-9]+)_COUNTER\b", lambda m: f"{m.group(1).capitalize()}'s counter", text)
+    text = re.sub(r"@LAGOS_SHOPFRONT\b", "Lagos street provision shopfront", text, flags=re.I)
+    text = re.sub(r"@RED_CHAIR\b", "red plastic chair", text, flags=re.I)
+    text = re.sub(r"@BLUE_CHAIR\b", "blue plastic chair", text, flags=re.I)
+    text = re.sub(r"@BISCUIT_PACK\b", "biscuit packet", text, flags=re.I)
+    text = re.sub(r"@EXPIRED_BISCUITS\b", "expired biscuit packet", text, flags=re.I)
+    text = re.sub(r"@SHOPPING_BAG\b", "transparent shopping bag", text, flags=re.I)
+    text = re.sub(r"@NAIRA_NOTES\b", "Nigerian naira banknotes", text, flags=re.I)
+    text = re.sub(r"@BREAD_LOAF\b", "packaged loaf of bread", text, flags=re.I)
+    text = re.sub(r"@MILK_TIN\b", "tin of powdered milk", text, flags=re.I)
+    text = re.sub(r"@PRODUCT_BASKET\b", "plastic provisions basket", text, flags=re.I)
+    text = re.sub(r"@BLACK_HANDBAG\b", "black handbag", text, flags=re.I)
+    text = re.sub(r"@CUSTOMER_(\d+)\b", r"Customer \1", text, flags=re.I)
+
+    # General fallback for any remaining @TAG:
+    def _clean_tag(m: re.Match) -> str:
+        tag = m.group(1)
+        if "_" in tag:
+            words = tag.split("_")
+            return " ".join(words).lower()
+        return tag.capitalize()
+
+    return re.sub(r"@([A-Za-z0-9_]+)\b", _clean_tag, text)
 
 
 def _image_prompt(
@@ -60,12 +236,29 @@ def _image_prompt(
     prompt = _text(base_prompt)
     constraints: list[str] = []
     if framing:
-        constraints.append(f"Shot framing: {framing}.")
+        constraints.append(f"Shot framing: {framing.rstrip(' .')}.")
     if action:
-        constraints.append(f"Visible shot action: {action}.")
+        constraints.append(f"Visible shot action: {action.rstrip(' .')}.")
     if characters:
-        names = ", ".join(character["name"] for character in characters)
-        constraints.append(f"Character identity references: {names}. Preserve each canonical face and identity.")
+        people = [c["name"] for c in characters if (c.get("kind") or "character") == "character"]
+        props = [c["name"] for c in characters if (c.get("kind") or "") == "prop"]
+        scenes = [c["name"] for c in characters if (c.get("kind") or "") == "scene"]
+        # Back-compat: snapshots without kind treat everyone as characters.
+        if not people and not props and not scenes:
+            people = [c["name"] for c in characters]
+        if people:
+            constraints.append(
+                f"Character identity references: {', '.join(people)}. Preserve each canonical face and identity."
+            )
+        if props:
+            constraints.append(
+                f"Prop object references: {', '.join(props)}. Preserve each prop's shape, materials, and colors."
+            )
+        if scenes:
+            constraints.append(
+                f"Scene/set references: {', '.join(scenes)}. Preserve architecture, layout and materials; use this scene's lighting instructions."
+            )
+    shot_text = "\n".join(part for part in (prompt, framing, action) if part)
     for key, label in (
         ("location", "Location"),
         ("time_of_day", "Time of day"),
@@ -75,9 +268,14 @@ def _image_prompt(
         ("props_notes", "Props"),
     ):
         value = scene[key]
+        if key == "wardrobe_notes":
+            value = _filter_wardrobe_notes_for_shot(value, characters)
+        elif key == "props_notes":
+            value = _filter_props_notes_for_shot(value, shot_text)
         if value and value.lower() != "unspecified":
-            constraints.append(f"{label}: {value}.")
-    return "\n".join(part for part in (prompt, "Continuity constraints:\n" + "\n".join(constraints) if constraints else "") if part)
+            constraints.append(f"{label}: {value.rstrip(' .')}.")
+    compiled = "\n".join(part for part in (prompt, "Continuity constraints:\n" + "\n".join(constraints) if constraints else "") if part)
+    return naturalize_screenplay_tags(compiled)
 
 
 def create_shot_snapshot(
@@ -87,9 +285,12 @@ def create_shot_snapshot(
     aspect_ratio: str,
     character_ids: list[str] | None = None,
     prompt_override: str | None = None,
+    *,
+    require_cast_references: bool = False,
 ) -> dict[str, Any]:
-    selected_ids = list(dict.fromkeys(shot.character_ids if character_ids is None else character_ids))
-    refs = load_cast_references(db, project.id, selected_ids)
+    elements = list(db.scalars(select(Character).where(Character.project_id == project.id)))
+    selected_ids = shot_element_ids(elements, shot, shot.character_ids if character_ids is None else character_ids)
+    refs = load_cast_references(db, project.id, selected_ids, require_all=require_cast_references)
     by_id = {
         character.id: character
         for character in db.scalars(
@@ -105,6 +306,7 @@ def create_shot_snapshot(
         {
             "id": character_id,
             "name": names[character_id],
+            "kind": (getattr(by_id[character_id], "kind", None) or "character") if character_id in by_id else "character",
             "reference_ids": reference_ids_by_character[character_id],
         }
         for character_id in selected_ids
@@ -117,7 +319,7 @@ def create_shot_snapshot(
             "voice_description": _resolve_character_voice(by_id[character_id]) if character_id in by_id else "",
         }
         for character_id in selected_ids
-        if character_id in by_id
+        if character_id in by_id and (by_id[character_id].kind or "character") == "character"
     ]
     scene = _scene_package(shot.scene)
     framing = _text(shot.framing)
@@ -148,17 +350,20 @@ def get_or_create_shot_snapshot(
     refresh: bool = False,
     character_ids: list[str] | None = None,
     prompt_override: str | None = None,
+    require_cast_references: bool = False,
 ) -> dict[str, Any]:
     saved = shot.continuity_snapshot
     explicit_changes = character_ids is not None or prompt_override is not None
     if (
         saved and not refresh and not explicit_changes
         and saved.get("aspect_ratio") == aspect_ratio
+        and not require_cast_references
     ):
         return saved
     snapshot = create_shot_snapshot(
         db, project, shot, aspect_ratio, character_ids=character_ids,
         prompt_override=prompt_override,
+        require_cast_references=require_cast_references,
     )
     shot.character_ids = snapshot["character_ids"]
     shot.continuity_snapshot = snapshot
@@ -167,12 +372,13 @@ def get_or_create_shot_snapshot(
 
 def current_shot_snapshot(shot: Shot, aspect_ratio: str) -> dict[str, Any]:
     project = shot.scene.script_version.project
-    selected_ids = list(shot.character_ids or [])
+    selected_ids = shot_element_ids(project.characters, shot, shot.character_ids or [])
     by_id = {character.id: character for character in project.characters}
     characters = [
         {
             "id": character_id,
             "name": by_id[character_id].name,
+            "kind": getattr(by_id[character_id], "kind", None) or "character",
             "reference_ids": [reference.id for reference in by_id[character_id].references],
         }
         for character_id in selected_ids if character_id in by_id
@@ -184,7 +390,7 @@ def current_shot_snapshot(shot: Shot, aspect_ratio: str) -> dict[str, Any]:
             "notes": _text(by_id[character_id].notes),
             "voice_description": _resolve_character_voice(by_id[character_id]),
         }
-        for character_id in selected_ids if character_id in by_id
+        for character_id in selected_ids if character_id in by_id and (by_id[character_id].kind or "character") == "character"
     ]
     scene = _scene_package(shot.scene)
     return {
@@ -211,15 +417,49 @@ _OFFSCREEN_PHONE_CUE_RE = re.compile(
     r"(?:assistant|caller)\s+says\s*,)",
     re.IGNORECASE,
 )
+# Require an explicit phone/off-screen cue. Optional prefixes used to match plain
+# `@GABE says, "..."` on-camera dialogue and rewrite it into a phone call.
 _OFFSCREEN_CALLER_QUOTE_RE = re.compile(
-    r"(?:Over the (?:filtered\s+)?telephone\s+earpiece,\s+)?(?:unseen\s+caller\s+)?(?P<caller>[A-Z][a-zA-Z0-9_\s\x27-]+?)(?:\x27s\s+[^,\n]+?)?\s+(?:says|delivers[^,\n]*),\s*[\"\u201c](?P<quote>[^\"\u201d]+)[\"\u201d]",
+    r"(?:"
+    r"Over the (?:filtered\s+)?telephone\s+earpiece,\s+(?:unseen\s+caller\s+)?"
+    r"|unseen\s+caller\s+"
+    r")"
+    r"(?P<caller>[A-Z][a-zA-Z0-9_\s\x27-]+?)(?:\x27s\s+[^,\n]+?)?\s+"
+    r"(?:says|delivers[^,\n]*),\s*[\"\u201c](?P<quote>[^\"\u201d]+)[\"\u201d]",
     re.IGNORECASE,
 )
 
 
+_EPISODE_TIMECODE_RE = re.compile(r"\b(?P<prep>at|by|until)\s+(?P<min>\d{1,2}):(?P<sec>\d{2})(?![\d:])", re.IGNORECASE)
+
+
+def _clip_relative_timecodes(video_prompt: str, shot: Shot | None) -> str:
+    """Rewrite episode timecodes ("snap to black at 03:00") as clip-relative time; video models read MM:SS as clip time."""
+    if shot is None or shot.start_ms is None or not shot.duration_ms:
+        return video_prompt
+    start_ms = shot.start_ms
+    duration_ms = shot.duration_ms
+
+    def replace(match: re.Match[str]) -> str:
+        absolute_ms = (int(match.group("min")) * 60 + int(match.group("sec"))) * 1000
+        relative_ms = absolute_ms - start_ms
+        if relative_ms < 0 or relative_ms > duration_ms:
+            return match.group(0)
+        prep = match.group("prep")
+        if relative_ms >= duration_ms - 500:
+            return f"{prep} the very end of the clip"
+        return f"{prep} {relative_ms / 1000:g} seconds into the clip"
+
+    return _EPISODE_TIMECODE_RE.sub(replace, video_prompt)
+
+
 def _sanitize_phone_video_prompt(video_prompt: str) -> str:
     """Rewrite clauses that place '<Listener>'s mouth' directly before an off-screen caller's quote,
-    and sanitize off-screen caller quoted speech so video models do not lip-sync the visible actor."""
+    and sanitize off-screen caller quoted speech so video models do not lip-sync the visible actor.
+
+    Only rewrites speech that is already marked as telephone / unseen-caller audio.
+    Plain on-camera cues like ``@GABE says, "I'll help."`` must stay untouched.
+    """
     text = _text(video_prompt)
     if not text:
         return text
@@ -234,7 +474,10 @@ def _sanitize_phone_video_prompt(video_prompt: str) -> str:
 
     def _replace_offscreen_quote(match: re.Match[str]) -> str:
         caller = match.group("caller").strip()
-        return f"Over the filtered telephone earpiece, unseen caller {caller} speaks while the listener remains completely silent with mouth closed and jaw motionless."
+        return (
+            f"Over the filtered telephone earpiece, unseen caller {caller} speaks while the listener "
+            f"remains completely silent with mouth closed and jaw motionless."
+        )
 
     text = _OFFSCREEN_CALLER_QUOTE_RE.sub(_replace_offscreen_quote, text)
     return text
@@ -243,7 +486,7 @@ def _sanitize_phone_video_prompt(video_prompt: str) -> str:
 
 def _on_camera_canon_set(snapshot: dict[str, Any], shot: Shot | None = None) -> set[str]:
     canons: set[str] = set()
-    for item in snapshot.get("characters") or []:
+    for item in _people(snapshot):
         if isinstance(item, dict) and _text(item.get("name")):
             canon = canonical_character_name(_text(item.get("name")))
             if canon:
@@ -347,7 +590,7 @@ def _collect_voice_entries(
     shot: Shot | None = None,
     video_prompt: str = "",
 ) -> list[str]:
-    characters = snapshot.get("characters") or []
+    characters = _people(snapshot)
     snapshot_voices = {
         str(item.get("id") or item.get("name") or ""): item
         for item in (snapshot.get("character_voices") or [])
@@ -502,7 +745,7 @@ def _phone_routing_instruction(
             on_camera_lines.append(text)
 
     if not on_camera_speakers and re.search(r'\bspeaks\s*:|["\u201c][^"\u201d]+["\u201d]', video_prompt, re.IGNORECASE):
-        for item in snapshot.get("characters") or []:
+        for item in _people(snapshot):
             if isinstance(item, dict) and _text(item.get("name")):
                 on_camera_speakers.append(_text(item.get("name")))
 
@@ -516,7 +759,7 @@ def _phone_routing_instruction(
     )
 
     raw_on_camera_names: list[str] = []
-    for item in snapshot.get("characters") or []:
+    for item in _people(snapshot):
         if isinstance(item, dict) and _text(item.get("name")):
             name = canonical_character_name(_text(item.get("name")))
             if name and name not in raw_on_camera_names:
@@ -563,11 +806,69 @@ def _phone_routing_instruction(
     )
 
 
+_SCREEN_POSITION_RE = re.compile(r"\bscreen[-\s]?(left|right|center|centre)\b", re.IGNORECASE)
+
+
+def _speaker_position_lock(snapshot: dict[str, Any], shot: Shot | None = None) -> str:
+    """Pin each on-camera dialogue line to the screen position its speaker holds in the frame."""
+    names = [
+        canonical_character_name(_text(item.get("name")))
+        for item in _people(snapshot)
+        if isinstance(item, dict) and _text(item.get("name"))
+    ]
+    names = [name for name in dict.fromkeys(names) if name]
+    if len(names) < 2:
+        return ""
+    name_patterns = {
+        name: re.compile(r"@?\b" + r"[\s_]".join(map(re.escape, name.split())) + r"\b", re.IGNORECASE)
+        for name in names
+    }
+    sources = [
+        _text(shot.action if shot is not None else snapshot.get("action")),
+        _text(getattr(shot, "image_prompt", "") if shot is not None else snapshot.get("image_prompt")),
+    ]
+    positions: dict[str, str] = {}
+    for source in sources:
+        for match in _SCREEN_POSITION_RE.finditer(source):
+            window_start = max(0, match.start() - 60)
+            window = source[window_start:match.start()]
+            window = re.split(r"[.;!?]", window)[-1]
+            nearest: tuple[int, str] | None = None
+            for name, pattern in name_patterns.items():
+                for name_match in pattern.finditer(window):
+                    if nearest is None or name_match.start() > nearest[0]:
+                        nearest = (name_match.start(), name)
+            if nearest is None:
+                continue
+            side = match.group(1).lower().replace("centre", "center")
+            positions.setdefault(nearest[1], f"screen-{side}")
+    if len(set(positions.values())) < 2:
+        return ""
+
+    dialogue = (shot.dialogue if shot is not None else None) or snapshot.get("dialogue") or []
+    entries: list[str] = []
+    for line in dialogue:
+        if not isinstance(line, dict):
+            continue
+        speaker = canonical_character_name(_text(line.get("character") or line.get("speaker")))
+        text = _text(line.get("text") or line.get("line"))
+        position = positions.get(speaker)
+        if not position or not text:
+            continue
+        entries.append(f'{speaker} on {position} speaks "{text}"')
+    if not entries:
+        return ""
+    return (
+        f"Speaker lock: {'; '.join(entries)}. Each line is lip-synced only by the character at that screen position; "
+        "whoever is not speaking keeps their lips closed while listening."
+    )
+
+
 def _collect_visual_profiles(
     snapshot: dict[str, Any],
     shot: Shot | None = None,
 ) -> list[str]:
-    characters = snapshot.get("characters") or []
+    characters = _people(snapshot)
     snapshot_voices = {
         str(item.get("id") or item.get("name") or ""): item
         for item in (snapshot.get("character_voices") or [])
@@ -612,12 +913,17 @@ def video_continuity_prompt(
     *,
     shot: Shot | None = None,
 ) -> str:
-    sanitized_video_prompt = _sanitize_phone_video_prompt(video_prompt)
-    anchor = "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; preserve its composition, faces, wardrobe, set, and lighting throughout the clip, moving or removing props only as explicitly performed in the shot action."
+    sanitized_video_prompt = _clip_relative_timecodes(_sanitize_phone_video_prompt(video_prompt), shot)
+    anchor = (
+        "Approved storyboard frame: use the supplied image as the exact opening frame and visual anchor; "
+        "preserve its composition, faces, wardrobe, set, and lighting throughout the clip, "
+        "moving or removing props only as explicitly performed in the shot action. "
+        "No on-screen text, subtitles, UI elements, or location tags."
+    )
     if not snapshot:
         return "\n\n".join(part for part in (sanitized_video_prompt.strip(), anchor) if part)
     scene = snapshot.get("scene") or {}
-    characters = snapshot.get("characters") or []
+    characters = _people(snapshot)
     cast_names = ", ".join(item.get("name", "") for item in characters if item.get("name"))
     live_framing = _text(shot.framing) if shot is not None else ""
     live_action = _text(shot.action) if shot is not None else ""
@@ -636,17 +942,30 @@ def video_continuity_prompt(
     voice_entries = _collect_voice_entries(snapshot, shot=shot, video_prompt=sanitized_video_prompt)
     if voice_entries:
         package.append(f"Character voices: {'; '.join(voice_entries)}.")
+    speaker_lock = _speaker_position_lock(snapshot, shot=shot)
+    if speaker_lock:
+        package.append(speaker_lock)
     phone_routing = _phone_routing_instruction(snapshot, sanitized_video_prompt, shot=shot)
     if phone_routing:
         package.append(phone_routing)
+    shot_text = _shot_text_for_prop_filter(snapshot, shot, sanitized_video_prompt)
     for key, label in (
         ("location", "Location"), ("time_of_day", "Time of day"),
         ("set_notes", "Set"), ("lighting_notes", "Lighting"),
         ("wardrobe_notes", "Wardrobe"), ("props_notes", "Props"),
     ):
         value = _text(scene.get(key))
+        if key == "wardrobe_notes":
+            value = _filter_wardrobe_notes_for_shot(value, snapshot.get("characters", []))
+        elif key == "props_notes":
+            value = _filter_props_notes_for_shot(value, shot_text)
         if value and value.lower() != "unspecified":
-            package.append(f"{label} continuity: {value}.")
+            clean_value = re.sub(
+                r"@([A-Z0-9_]+)",
+                lambda m: m.group(1).replace("_", " ").title(),
+                value,
+            )
+            package.append(f"{label} continuity: {clean_value}.")
     return "\n\n".join([sanitized_video_prompt.strip(), *package]).strip()
 
 

@@ -523,14 +523,35 @@ def synthesize_shot_dialogue(shot: Shot, db: Session) -> tuple[str, str, str]:
             has_external_provider = True
 
         if not assigned_voice:
-            # Intelligent fallback by name/notes
-            lower = cname.lower()
-            if any(w in lower for w in ("woman", "women", "nwanyeruw", "mother", "lady", "girl")):
-                assigned_voice = "en-Maya_woman"
-            elif any(w in lower for w in ("chief", "officer", "man", "soldier", "cook", "census", "emeruw")):
-                assigned_voice = "en-Carter_man"
-            else:
-                assigned_voice = "en-Frank_man"
+            # Intelligent fallback by name and character notes
+            notes_lower = (char_obj.notes if char_obj and char_obj.notes else "").lower()
+            lower = f"{cname.lower()} {notes_lower}"
+
+            is_female = any(
+                w in lower
+                for w in (
+                    "woman", "women", "female", "mother", "lady", "girl", "daughter",
+                    "mrs", "ms", "sister", "aunt", "she", "her", "nwanyeruw",
+                )
+            )
+            is_older_authoritative = any(
+                w in lower
+                for w in (
+                    "chief", "officer", "chairman", "senior", "elder", "executive",
+                    "commanding", "father", "60", "61", "62", "65", "70", "52", "matriarch",
+                )
+            )
+
+            # Available voice pools for VibeVoice
+            female_pool = ["en-Maya_woman", "en-Alice_woman", "en-Mary_woman_bgm"]
+            male_pool = ["en-Carter_man" if is_older_authoritative else "en-Frank_man", "en-Carter_man", "in-Samuel_man", "en-Frank_man", "ng-Gideon_man"]
+
+            pool = female_pool if is_female else male_pool
+            used_in_shot = set(speaker_map.values())
+
+            # Find the best unused voice from the pool
+            candidate = next((v for v in pool if v not in used_in_shot), pool[0])
+            assigned_voice = candidate
 
         speaker_map[cname] = assigned_voice
         speaker_names_ordered.append(assigned_voice)

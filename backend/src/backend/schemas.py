@@ -300,6 +300,7 @@ class ShotUpdate(BaseModel):
 
 
 class SceneUpdate(BaseModel):
+    location: str | None = Field(default=None, min_length=1, max_length=160)
     set_notes: str = Field(default="", max_length=4000)
     lighting_notes: str = Field(default="", max_length=4000)
     wardrobe_notes: str = Field(default="", max_length=4000)
@@ -502,6 +503,57 @@ class PublishPlanRead(BaseModel):
     shots: list[PublishAssetRead] = []
 
 
+class ReleaseKitTitleOption(BaseModel):
+    id: str | None = None
+    text: str = Field(max_length=180)
+    angle: str = "custom"
+    custom: bool = False
+
+
+class ReleaseKitCoverIdea(BaseModel):
+    id: str | None = None
+    concept: str = Field(default="", max_length=400)
+    headline: str = Field(default="", max_length=60)
+    prompt: str = Field(default="", max_length=2000)
+
+
+class ReleaseKitUpdate(BaseModel):
+    brief: str | None = Field(default=None, max_length=4000)
+    title_options: list[ReleaseKitTitleOption] | None = None
+    selected_title_id: str | None = None
+    description: str | None = Field(default=None, max_length=5000)
+    tags: list[str] | None = None
+    cover_ideas: list[ReleaseKitCoverIdea] | None = None
+    selected_cover_id: str | None = None
+
+
+class ReleaseKitFrameCreate(BaseModel):
+    source: "TimelineSource"
+    source_ms: int = Field(ge=0)
+    timeline_ms: int = Field(default=0, ge=0)
+    label: str = Field(default="", max_length=120)
+
+
+class ReleaseKitSuggest(BaseModel):
+    provider: Literal["chatgpt_web", "gemini_web", "ollama", "compatible", "mock"] | None = None
+
+
+class ReleaseKitSuggestHooks(BaseModel):
+    prompt: str | None = Field(default=None, max_length=2000)
+
+
+class ReleaseKitCoverCreate(BaseModel):
+    idea_id: str | None = None
+    headline: str | None = Field(default=None, max_length=60)
+    prompt: str | None = Field(default=None, max_length=2000)
+    provider: Literal["chatgpt_web", "gemini_web"] | None = None
+
+
+class ReleaseKitPromoteFrame(BaseModel):
+    headline: str | None = Field(default=None, max_length=60)
+    style: Literal["natural", "punch", "vivid", "drama", "warm"] | None = "punch"
+
+
 class PublishCreate(BaseModel):
     platforms: list[Literal["youtube", "facebook"]]
     scope: Literal["final", "scenes", "shots"] = "final"
@@ -515,6 +567,8 @@ class PublishCreate(BaseModel):
     schedule_interval_hours: float | None = None
     made_for_kids: bool = False
     platform_options: dict[str, dict[str, Any]] = {}
+    release_kit_id: str | None = None
+    cover_id: str | None = None
 
     @field_validator("tags", mode="after")
     @classmethod
@@ -583,6 +637,26 @@ class TimelineVariantGeometry(BaseModel):
     offset_y: float = Field(default=0, ge=-1.0, le=1.0)
     lut: str = "none"
     lut_strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Frame radius/width are fractions of the output canvas width so preview (cqw) and export match.
+    frame_style: Literal["none", "solid", "double", "dashed", "glow", "neon"] = "none"
+    frame_radius: float = Field(default=0.0, ge=0.0, le=0.25)
+    frame_width: float = Field(default=0.008, ge=0.0, le=0.04)
+    frame_color: str = Field(default="#FFFFFF", pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+TransitionKind = Literal[
+    "cut", "fade", "dissolve", "fadeblack", "fadewhite", "wipeleft", "wiperight", "slideleft", "slideright",
+]
+
+
+class TimelineTransition(BaseModel):
+    kind: TransitionKind = "cut"
+    duration_ms: int = Field(default=500, ge=100, le=2000)
+
+    @field_validator("duration_ms", mode="before")
+    @classmethod
+    def _coerce_transition_ms(cls, value: Any) -> Any:
+        return round(value) if isinstance(value, (int, float)) else value
 
 
 class TimelinePrimaryItem(BaseModel):
@@ -595,6 +669,9 @@ class TimelinePrimaryItem(BaseModel):
     source_out_ms: int | None = Field(default=None, ge=1)
     text: str = Field(default="", max_length=1000)
     mute_audio: bool = False
+    loop: bool = False
+    # Transition into this clip from the previous one; None uses the document default.
+    transition: TimelineTransition | None = None
     variant: dict[str, TimelineVariantGeometry] = {}
 
     @field_validator("duration_ms", "source_in_ms", "source_out_ms", mode="before")
@@ -613,6 +690,8 @@ class TimelineVideoOverlay(BaseModel):
     source: TimelineSource
     start_ms: int = Field(ge=0)
     duration_ms: int = Field(ge=100, le=3_600_000)
+    # Editor row on its track; display only, so the clip keeps its row until dragged up or down.
+    lane: int | None = Field(default=None, ge=0, le=31)
     source_in_ms: int = Field(default=0, ge=0)
     opacity: float = Field(default=1.0, ge=0.0, le=1.0)
     volume: float = Field(default=1.0, ge=0.0, le=2.0)
@@ -634,6 +713,8 @@ class TimelineImageOverlay(BaseModel):
     source: TimelineSource
     start_ms: int = Field(ge=0)
     duration_ms: int = Field(ge=100, le=3_600_000)
+    # Editor row on its track; display only, so the clip keeps its row until dragged up or down.
+    lane: int | None = Field(default=None, ge=0, le=31)
     opacity: float = Field(default=1, ge=0, le=1)
     variant: dict[str, TimelineVariantGeometry] = {}
 
@@ -674,9 +755,13 @@ class TimelineAudioOverlay(BaseModel):
     source: TimelineSource
     start_ms: int = Field(ge=0)
     duration_ms: int = Field(ge=100, le=3_600_000)
+    # Editor row on its track; display only, so the clip keeps its row until dragged up or down.
+    lane: int | None = Field(default=None, ge=0, le=31)
     source_in_ms: int = Field(default=0, ge=0)
     volume: float = Field(default=1.0, ge=0.0, le=2.0)
     mute_audio: bool = False
+    # Repeat the audio from source_in_ms when the clip is longer than what's left of the file.
+    loop: bool = True
 
     @field_validator("start_ms", "duration_ms", "source_in_ms", mode="before")
     @classmethod
@@ -688,6 +773,20 @@ class TimelineAudioOverlay(BaseModel):
         return value
 
 
+class TimelineCanvasLayout(BaseModel):
+    """Per-document canvas template for the active edit (shorts / landscape)."""
+
+    template: str = "full_bleed"
+    matte: Literal["solid", "blur", "gradient", "duotone"] = "solid"
+    matte_color: str = Field(default="#0B0D12", max_length=20)
+    matte_color_b: str = Field(default="#1A2233", max_length=20)
+    top_text: str = Field(default="", max_length=280)
+    bottom_text: str = Field(default="", max_length=280)
+    brand_text: str = Field(default="", max_length=80)
+    accent_bar: bool = False
+    accent_color: str = Field(default="#39D0FF", max_length=20)
+
+
 class TimelineDocument(BaseModel):
     version: Literal[1] = 1
     primary: list[TimelinePrimaryItem]
@@ -695,6 +794,8 @@ class TimelineDocument(BaseModel):
     image_overlays: list[TimelineImageOverlay] = []
     text_overlays: list[TimelineTextOverlay] = []
     audio_overlays: list[TimelineAudioOverlay] = []
+    layout: TimelineCanvasLayout = Field(default_factory=TimelineCanvasLayout)
+    default_transition: TimelineTransition | None = None
 
 
 class TimelineUpdate(BaseModel):
@@ -795,9 +896,86 @@ class FlowModelUpdateRequest(BaseModel):
     preset: str
 
 
+class ImageProviderOrderUpdate(BaseModel):
+    order: list[str] = Field(min_length=1)
+
+
 class ImageProviderStatus(ProviderStatus):
     supports_image_references: bool = False
     priority: int
     image_generation: bool
     connected: bool = False
     verified: bool = False
+
+
+class StemSeparatorStatus(BaseModel):
+    id: str
+    label: str
+    configured: bool
+    available: bool
+    selected: bool
+    detail: str
+
+
+class StemSeparatorUpdate(BaseModel):
+    provider: Literal["lalal", "demucs", "uvr"]
+
+
+class VideoProviderSelect(BaseModel):
+    provider: Literal["flowkit", "gemini_web", "comfyui", "runway"]
+
+
+class StemSeparationCreate(BaseModel):
+    source: TimelineSource
+    source_in_ms: int = Field(default=0, ge=0)
+    duration_ms: int = Field(ge=500, le=30 * 60 * 1000)
+    provider: Literal["lalal", "demucs", "uvr"] | None = None
+    label: str = Field(default="Clip", max_length=120)
+    episode_id: str | None = None
+
+
+class LibraryAudioCreate(BaseModel):
+    source: TimelineSource
+    source_in_ms: int = Field(default=0, ge=0)
+    duration_ms: int = Field(ge=100, le=60 * 60 * 1000)
+    label: str = Field(min_length=1, max_length=160)
+
+
+class LibraryAudioRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    label: str
+    url: str
+    mime_type: str
+    duration_ms: int
+    created_at: datetime
+
+
+class StemSeparationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    job_id: str | None
+    provider: str
+    source_kind: str
+    source_ref_id: str
+    label: str
+    source_in_ms: int
+    duration_ms: int
+    status: str
+    music_asset_id: str | None
+    voice_asset_id: str | None
+    music_asset: TimelineAssetRead | None = None
+    voice_asset: TimelineAssetRead | None = None
+    error: str | None
+    created_at: datetime
+
+
+class StemSeparationStarted(BaseModel):
+    separation: StemSeparationRead
+    job: JobRead
+
+
+ReleaseKitFrameCreate.model_rebuild()

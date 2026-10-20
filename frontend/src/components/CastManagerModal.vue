@@ -28,14 +28,16 @@ const busy = ref(false)
 const elementKind = computed(() => props.character.kind || 'character')
 
 const elementKindLabel = computed(() => {
-  if (elementKind.value === 'scene') return 'Scene / Set Reference'
+  if (elementKind.value === 'scene') return 'Location / Set Reference'
   if (elementKind.value === 'prop') return 'Prop Element'
   return 'Cast Character'
 })
 
 const elementTag = computed(() => {
-  const slug = (props.character.name || 'ELEMENT')
-    .trim()
+  // Match backend element_mention_slug: strip @, take title before em-dash.
+  const raw = (props.character.name || 'ELEMENT').trim().replace(/^@+/, '')
+  const title = raw.split(/\s*[—–-]\s*/)[0] || raw
+  const slug = title
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
@@ -339,7 +341,7 @@ function onBackdropClick(e: MouseEvent) {
           <div class="cast-prompt-header">
             <label :for="'cast-prompt-' + character.id">
               <strong v-if="elementKind === 'character'">Character Appearance &amp; Wardrobe Prompt</strong>
-              <strong v-else-if="elementKind === 'scene'">Scene Architecture, Layout &amp; Lighting Prompt</strong>
+              <strong v-else-if="elementKind === 'scene'">Set Architecture, Layout &amp; Lighting Prompt</strong>
               <strong v-else>Prop Design, Material &amp; Scale Prompt</strong>
               <small v-if="elementKind === 'character'">Describe facial features, hair, skin tone, age, and signature full-body outfit for both Main and 3D views.</small>
               <small v-else-if="elementKind === 'scene'">Describe room layout, key furniture, architectural style, and lighting atmosphere.</small>
@@ -423,7 +425,7 @@ function onBackdropClick(e: MouseEvent) {
             </div>
             <div class="cast-ref-footer">
               <span class="ref-tag">
-                {{ refItem.view_type === '3d_view' ? '3D View' : refItem.view_type === 'scene' ? 'Scene' : refItem.view_type === 'prop' ? 'Prop' : `Main ${idx + 1}` }}
+                {{ refItem.view_type === '3d_view' ? '3D View' : refItem.view_type === 'scene' ? 'Location / Set' : refItem.view_type === 'prop' ? 'Prop' : `Main ${idx + 1}` }}
               </span>
               <button
                 type="button"
@@ -452,7 +454,7 @@ function onBackdropClick(e: MouseEvent) {
                 isGenerating
                   ? 'Generating…'
                   : elementKind === 'scene'
-                    ? 'Generate Scene with AI'
+                    ? 'Generate Set with AI'
                     : elementKind === 'prop'
                       ? 'Generate Prop with AI'
                       : 'Generate Main View'
@@ -508,6 +510,11 @@ function onBackdropClick(e: MouseEvent) {
 </template>
 
 <style scoped>
+.modal-backdrop {
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+}
+
 .cast-manager-modal {
   max-width: 720px;
   width: 94vw;

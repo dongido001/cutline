@@ -119,6 +119,97 @@ def _transform_night_vision_stealth(r: float, g: float, b: float) -> tuple[float
     return (out_r, out_g, out_b)
 
 
+def _transform_bleach_bypass(r: float, g: float, b: float) -> tuple[float, float, float]:
+    """Gritty action look: keep luminance punch, crush chroma."""
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    r1, g1, b1 = _sat(r, g, b, 0.55)
+    mix = 0.55
+    r2 = _clamp(r1 * (1.0 - mix) + luma * mix)
+    g2 = _clamp(g1 * (1.0 - mix) + luma * mix)
+    b2 = _clamp(b1 * (1.0 - mix) + luma * mix)
+    return (_s_curve(r2, 2.1), _s_curve(g2, 2.1), _s_curve(b2, 2.1))
+
+
+def _transform_noir_bw(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    # Slightly cooler B&W with crushed shadows / bright highlights.
+    v = _s_curve(_clamp(luma**1.08), 2.2)
+    return (v, v, v)
+
+
+def _transform_vhs_tape(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    # Lifted blacks, soft contrast, magenta/cyan channel drift.
+    r1 = _clamp(0.06 + 0.88 * r + 0.04 * (1.0 - luma))
+    g1 = _clamp(0.05 + 0.90 * g)
+    b1 = _clamp(0.07 + 0.86 * b + 0.05 * luma)
+    r2, g2, b2 = _sat(r1, g1, b1, 1.15)
+    return (_s_curve(r2, 1.15), _s_curve(g2, 1.15), _s_curve(b2, 1.15))
+
+
+def _transform_soft_pastel(r: float, g: float, b: float) -> tuple[float, float, float]:
+    r1, g1, b1 = _sat(r, g, b, 0.85)
+    # Lift shadows, tame highlights, gentle pastel wash.
+    out_r = _clamp(0.08 + 0.84 * r1 + 0.04)
+    out_g = _clamp(0.07 + 0.86 * g1 + 0.02)
+    out_b = _clamp(0.09 + 0.84 * b1 + 0.03)
+    return (_s_curve(out_r, 1.05), _s_curve(out_g, 1.05), _s_curve(out_b, 1.05))
+
+
+def _transform_matrix_code(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    # Keep some color but bias hard into digital green.
+    r1 = _clamp(_s_curve(luma * 0.55 + r * 0.15, 1.8))
+    g1 = _clamp(_s_curve(luma * 1.15 + g * 0.25, 1.8))
+    b1 = _clamp(_s_curve(luma * 0.45 + b * 0.10, 1.8))
+    return _sat(r1, g1, b1, 1.20)
+
+
+def _transform_horror_sickly(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    r1, g1, b1 = _sat(r, g, b, 0.70)
+    out_r = _clamp(_s_curve(r1 * 0.95 + 0.04 * (1.0 - luma), 1.7))
+    out_g = _clamp(_s_curve(g1 * 1.08 + 0.06 * (1.0 - luma), 1.7))
+    out_b = _clamp(_s_curve(b1 * 0.78, 1.7))
+    return (out_r, out_g, out_b)
+
+
+def _transform_documentary_natural(r: float, g: float, b: float) -> tuple[float, float, float]:
+    r1, g1, b1 = _sat(r, g, b, 0.88)
+    out_r = _clamp(_s_curve(r1 * 0.98, 1.25))
+    out_g = _clamp(_s_curve(g1 * 1.00, 1.25))
+    out_b = _clamp(_s_curve(b1 * 1.02, 1.25))
+    return (out_r, out_g, out_b)
+
+
+def _transform_crimson_ember(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    r1, g1, b1 = _sat(r, g, b, 1.20)
+    out_r = _clamp(_s_curve(r1 + 0.14 * luma + 0.04 * (1.0 - luma), 1.6))
+    out_g = _clamp(_s_curve(g1 * 0.92 + 0.02 * luma, 1.6))
+    out_b = _clamp(_s_curve(b1 * 0.78 + 0.06 * (1.0 - luma), 1.6))
+    return (out_r, out_g, out_b)
+
+
+def _transform_ice_blue_hour(r: float, g: float, b: float) -> tuple[float, float, float]:
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    r1, g1, b1 = _sat(r, g, b, 0.90)
+    out_r = _clamp(_s_curve(r1 * 0.88, 1.55))
+    out_g = _clamp(_s_curve(g1 * 0.96 + 0.02 * (1.0 - luma), 1.55))
+    out_b = _clamp(_s_curve(b1 * 1.14 + 0.06 * (1.0 - luma), 1.55))
+    return (out_r, out_g, out_b)
+
+
+def _transform_anime_punch(r: float, g: float, b: float) -> tuple[float, float, float]:
+    r1, g1, b1 = _sat(r, g, b, 1.55)
+    # Harder midtone contrast for cel-shaded / cartoon game looks.
+    return (
+        _clamp(_s_curve(r1**0.92, 2.0)),
+        _clamp(_s_curve(g1**0.92, 2.0)),
+        _clamp(_s_curve(b1**0.92, 2.0)),
+    )
+
+
 LUT_PRESETS: list[LUTPreset] = [
     LUTPreset(
         id="vibrant_gaming",
@@ -197,8 +288,89 @@ LUT_PRESETS: list[LUTPreset] = [
         label="Night Vision / Stealth",
         description="Tactical phosphor green monochrome with high silhouette clarity",
         category="Gaming",
-        css_filter="hue-rotate(65deg) saturate(1.6) contrast(1.25) brightness(0.95)",
+        # Must approximate mono green (not a mere hue shift of full-color footage).
+        css_filter="grayscale(1) brightness(0.95) contrast(1.25) sepia(1) hue-rotate(70deg) saturate(2.8)",
         transform=_transform_night_vision_stealth,
+    ),
+    LUTPreset(
+        id="bleach_bypass",
+        label="Bleach Bypass",
+        description="Gritty action silver-retention: hard contrast, drained chroma",
+        category="Cinematic",
+        css_filter="saturate(0.55) contrast(1.35) brightness(0.98)",
+        transform=_transform_bleach_bypass,
+    ),
+    LUTPreset(
+        id="noir_bw",
+        label="Noir B&W",
+        description="Classic high-contrast black and white with crushed shadows",
+        category="Cinematic",
+        css_filter="grayscale(1) contrast(1.35) brightness(0.98)",
+        transform=_transform_noir_bw,
+    ),
+    LUTPreset(
+        id="vhs_tape",
+        label="VHS Tape",
+        description="Lifted blacks, soft contrast, and nostalgic magenta/cyan drift",
+        category="Creative",
+        css_filter="contrast(0.92) saturate(1.12) sepia(0.18) hue-rotate(-8deg) brightness(1.04)",
+        transform=_transform_vhs_tape,
+    ),
+    LUTPreset(
+        id="soft_pastel",
+        label="Soft Pastel",
+        description="Dreamy lifted shadows and gentle desaturated pastel wash",
+        category="Atmospheric",
+        css_filter="saturate(0.85) contrast(0.92) brightness(1.06) sepia(0.08)",
+        transform=_transform_soft_pastel,
+    ),
+    LUTPreset(
+        id="matrix_code",
+        label="Matrix Code",
+        description="Digital green bias with residual color — hacker / sim aesthetic",
+        category="Gaming",
+        css_filter="grayscale(0.35) sepia(0.45) hue-rotate(70deg) saturate(1.8) contrast(1.18)",
+        transform=_transform_matrix_code,
+    ),
+    LUTPreset(
+        id="horror_sickly",
+        label="Horror Sickly",
+        description="Uneasy yellow-green cast with drained warmth for dread",
+        category="Creative",
+        css_filter="saturate(0.7) contrast(1.15) sepia(0.2) hue-rotate(35deg) brightness(0.96)",
+        transform=_transform_horror_sickly,
+    ),
+    LUTPreset(
+        id="documentary_natural",
+        label="Documentary Natural",
+        description="Slightly restrained chroma and gentle contrast for interview/doc cuts",
+        category="Social",
+        css_filter="saturate(0.88) contrast(1.06) brightness(1.01)",
+        transform=_transform_documentary_natural,
+    ),
+    LUTPreset(
+        id="crimson_ember",
+        label="Crimson Ember",
+        description="Deep ember reds and smoky shadows for intense trailers",
+        category="Atmospheric",
+        css_filter="sepia(0.28) saturate(1.3) hue-rotate(-18deg) contrast(1.16) brightness(0.97)",
+        transform=_transform_crimson_ember,
+    ),
+    LUTPreset(
+        id="ice_blue_hour",
+        label="Ice Blue Hour",
+        description="Cold twilight blues with restrained warmth — night city / snow",
+        category="Atmospheric",
+        css_filter="saturate(0.9) contrast(1.12) hue-rotate(-18deg) brightness(0.98)",
+        transform=_transform_ice_blue_hour,
+    ),
+    LUTPreset(
+        id="anime_punch",
+        label="Anime Punch",
+        description="Cel-shaded saturation and hard midtone snap for stylized games",
+        category="Gaming",
+        css_filter="saturate(1.55) contrast(1.28) brightness(1.02)",
+        transform=_transform_anime_punch,
     ),
 ]
 
@@ -247,6 +419,8 @@ def get_lut_cube_path(lut_id: str, strength: float = 1.0) -> Path | None:
     lines: list[str] = [
         f'TITLE "{preset.label} {pct}%"\n',
         f"LUT_3D_SIZE {size}\n",
+        "DOMAIN_MIN 0.0 0.0 0.0\n",
+        "DOMAIN_MAX 1.0 1.0 1.0\n",
     ]
     blend_s = pct / 100.0
     for b_idx in range(size):

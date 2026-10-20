@@ -588,6 +588,42 @@ class TimelineAsset(Base):
         return f"/media/{self.filename}"
 
 
+class StemSeparation(Base):
+    __tablename__ = "stem_separations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    provider: Mapped[str] = mapped_column(String(24))
+    source_kind: Mapped[str] = mapped_column(String(24))
+    source_ref_id: Mapped[str] = mapped_column(String)
+    label: Mapped[str] = mapped_column(String(160), default="Clip")
+    source_in_ms: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    music_asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    voice_asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LibraryAudio(Base):
+    """Saved audio (music, voice, effects) shared across every project."""
+
+    __tablename__ = "library_audio"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    label: Mapped[str] = mapped_column(String(160))
+    filename: Mapped[str] = mapped_column(String(240))
+    mime_type: Mapped[str] = mapped_column(String(80), default="audio/mp4")
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.filename}"
+
+
 class ProjectVariantExport(Base):
     __tablename__ = "project_variant_exports"
     __table_args__ = (
@@ -654,6 +690,34 @@ class PublishRecord(Base):
 
     project: Mapped[Project] = relationship(back_populates="publish_records")
     job: Mapped["Job | None"] = relationship()
+
+
+class ReleaseKit(Base):
+    """Publishing package (frames, copy options, covers) for one episode or compilation in one variant."""
+
+    __tablename__ = "release_kits"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    compilation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("compilations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    variant: Mapped[str] = mapped_column(String(16), default="landscape")
+    brief: Mapped[str] = mapped_column(Text, default="")
+    frames: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    title_options: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    selected_title_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    cover_ideas: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    covers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    selected_cover_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    copy_provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
 class Character(Base):

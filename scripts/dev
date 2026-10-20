@@ -129,9 +129,9 @@ fi
 wait_url "FastAPI" "http://127.0.0.1:8000/api/health" 30
 
 # Always (re)start workers so newly added Huey tasks are registered.
-if pgrep -f "huey_consumer.*backend.tasks.image_huey" >/dev/null 2>&1 || pgrep -f "movie-worker" >/dev/null 2>&1; then
+if pgrep -f "huey_consumer.*backend.tasks" >/dev/null 2>&1 || pgrep -f "movie-worker" >/dev/null 2>&1; then
   log "restarting persistent workers so task registry stays current"
-  pkill -f "huey.bin.huey_consumer backend.tasks" >/dev/null 2>&1 || true
+  pkill -f "huey_consumer(\.py)? backend\.tasks" >/dev/null 2>&1 || true
   pkill -f "backend/.venv/bin/movie-worker" >/dev/null 2>&1 || true
   pkill -f "backend/.venv/bin/python.*movie-worker" >/dev/null 2>&1 || true
   sleep 1

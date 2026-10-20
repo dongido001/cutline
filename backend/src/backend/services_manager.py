@@ -284,6 +284,30 @@ class ServiceDefinition:
                 start_new_session=True,
             )
 
+        elif self.service_id == "gemini_web_image":
+            provider_dir = BRIDGES_ROOT / "gemini-web-provider"
+            python_bin = BRIDGES_ROOT / "chatgpt-web-provider" / ".venv" / "bin" / "python"
+            env = _read_env_file(BRIDGES_ROOT / "gemini.env")
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(BRIDGES_ROOT / ".playwright")
+            proc = subprocess.Popen(
+                [
+                    str(python_bin),
+                    "-m",
+                    "uvicorn",
+                    "gemini_web_provider.app:create_app",
+                    "--factory",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8792",
+                ],
+                cwd=str(provider_dir),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
         elif self.service_id == "gemini_web":
             try:
                 subprocess.run(["docker", "info"], capture_output=True, timeout=3, check=True)
@@ -385,6 +409,16 @@ SERVICES: Dict[str, ServiceDefinition] = {
         category="Worker",
         log_filename="worker.log",
         pattern=r"(movie-worker|huey.*backend\.tasks)",
+    ),
+    "gemini_web_image": ServiceDefinition(
+        service_id="gemini_web_image",
+        name="Gemini Web Image Bridge",
+        description="Browser-backed image generation bridge with reference portrait attachments",
+        category="Image Bridge",
+        port=8792,
+        health_url="http://127.0.0.1:8792/health",
+        log_filename="gemini-image.log",
+        pattern=r"gemini_web_provider",
     ),
     "gemini_web": ServiceDefinition(
         service_id="gemini_web",

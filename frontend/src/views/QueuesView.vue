@@ -424,6 +424,13 @@ function openInspect(job: QueueJobItem) {
   inspectOpen.value = true
 }
 
+const previousPath = typeof window.history.state?.back === 'string' ? window.history.state.back as string : null
+
+function goBack() {
+  if (previousPath) router.back()
+  else void router.push('/')
+}
+
 function openProject(projectId: string) {
   void router.push(`/projects/${projectId}/shots`)
 }
@@ -499,6 +506,11 @@ function statusTone(status: string): 'success' | 'danger' | 'accent' | 'neutral'
   }
 }
 
+function cleanConversationUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined
+  return url.replace(/gemini\.google\.com\/app\/c_([a-zA-Z0-9]+)/i, 'gemini.google.com/app/$1')
+}
+
 let unsubscribeWs: (() => void) | null = null
 
 onMounted(() => {
@@ -535,10 +547,10 @@ onUnmounted(() => {
     <!-- Header -->
     <header class="dashboard-header">
       <div class="header-left">
-        <RouterLink to="/" class="back-link" title="Back to workspace">
+        <a :href="previousPath ?? '/'" class="back-link" :title="previousPath ? 'Back to the previous page' : 'Back to workspace'" @click.prevent="goBack">
           <ArrowLeft :size="16" />
-          <span>Workspace</span>
-        </RouterLink>
+          <span>{{ previousPath ? 'Back' : 'Workspace' }}</span>
+        </a>
         <div class="title-wrap">
           <div class="title-row">
             <span class="pulse-indicator" :class="{ active: activeJobsCount > 0 }"></span>
@@ -1276,8 +1288,8 @@ onUnmounted(() => {
           <div><label>Provider Phase</label><span>{{ selectedJob.provider_phase || '—' }}</span></div>
           <div v-if="selectedJob.conversation_url" class="col-span-2">
             <label>Provider Conversation</label>
-            <a :href="selectedJob.conversation_url" target="_blank" rel="noopener noreferrer" class="conversation-link">
-              <span>{{ selectedJob.conversation_url }}</span>
+            <a :href="cleanConversationUrl(selectedJob.conversation_url)" target="_blank" rel="noopener noreferrer" class="conversation-link">
+              <span>{{ cleanConversationUrl(selectedJob.conversation_url) }}</span>
               <ExternalLink :size="13" />
             </a>
           </div>

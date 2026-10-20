@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .media import FaceReferenceImage
 from .settings import settings
-from .models import Character, Project, Scene, ScriptVersion, Shot
+from .models import Character, CharacterReference, Project, Scene, ScriptVersion, Shot
 from .screenplay_parser import (
     canonical_character_name,
     expand_character_cue_names,
@@ -49,29 +49,126 @@ def is_usable_reference_image(data: bytes) -> bool:
         return bool(data)
 
 
-def cast_portrait_prompt(character: Character, *, look: str | None = None) -> str:
+def element_mention_slug(name: str) -> str:
+    """Derive the @MENTION slug shown in the UI / matched in shot prompts."""
+    raw = (name or "").strip().lstrip("@")
+    # Title is the left side of an em-dash description: "BISCUIT PACK — bright red…"
+    title = re.split(r"\s*[—–]\s*", raw, maxsplit=1)[0].strip()
+    key = canonical_character_name(title) or ""
+    key = key.lstrip("@")
+    slug = re.sub(r"[^A-Z0-9]+", "_", key).strip("_")
+    return slug
+
+
+def location_key(location: str) -> str:
+    """Same physical set across screenplay headings, @tags and time-of-day changes."""
+    name = re.sub(r"^(?:INT\.?/EXT\.?|INT\.?|EXT\.?)\s+", "", (location or "").strip(), flags=re.I)
+    name = re.sub(r"\s*[-–—]\s*(?:DAY|NIGHT|MORNING|AFTERNOON|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME(?:\s+TIME)?).*$", "", name, flags=re.I)
+    key = re.sub(r"[^A-Z0-9]+", " ", name.upper()).strip()
+    return "" if key in {"", "UNSPECIFIED", "NONE", "N A"} else key
+
+
+def matching_set_element(elements: Iterable[Character], location: str) -> Character | None:
+    key = location_key(location)
+    matches = [element for element in elements if element.kind == "scene" and key and location_key(element.name) == key]
+    # Preserve existing references when a legacy project already has naming variants.
+    return next((element for element in matches if element.references), matches[0] if matches else None)
+
+
+def shot_element_ids(elements: Iterable[Character], shot: Shot, selected_ids: Iterable[str]) -> list[str]:
+    """Cast/props plus the current location, never a stale set from another room."""
+    elements = list(elements)
+    scene_ids = {element.id for element in elements if element.kind == "scene"}
+    ids = [item for item in dict.fromkeys(selected_ids) if item not in scene_ids]
+    location = matching_set_element(elements, shot.scene.location)
+    if location:
+        ids.append(location.id)
+    return ids
+
+
+def prompt_element_title(name: str, *, fallback: str = "ELEMENT") -> str:
+    """Human-readable element title for provider prompts (never a raw @tag)."""
+    slug = element_mention_slug(name)
+    if not slug:
+        return fallback
+    return re.sub(r"\s+", " ", slug.replace("_", " ")).strip() or fallback
+
+
+def prompt_element_details(notes: str, title: str, *, kind: str) -> str:
+    """Notes for provider prompts with leading @SLUG — prefixes removed."""
+    desc = (notes or "").strip()
+    if desc:
+        desc = re.sub(
+            r"^@?[A-Z0-9_]+\s*[:—–-]\s*",
+            "",
+            desc,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        desc = re.sub(
+            r"(?:speaking\s+)?voice(?:\s+profile)?\s*:\s*[^\n]+",
+            "",
+            desc,
+            flags=re.IGNORECASE,
+        ).strip(" .,-–—")
+    if not desc:
+        if kind == "prop":
+            return f"Hero prop object named {title}."
+        if kind == "scene":
+            return f"Cinematic location and set environment for {title}."
+        return f"Named {title}."
+    return desc
+
+
+def cast_portrait_prompt(
+    character: Character,
+    *,
+    look: str | None = None,
+    has_attached_reference: bool | None = None,
+) -> str:
     """Build a locked identity-sheet, 3D turnaround sheet, scene, or prop prompt."""
     notes = (character.notes or "").strip()
-    name = canonical_character_name(character.name) or "CHARACTER"
+    name = prompt_element_title(character.name, fallback="CHARACTER")
     kind = (getattr(character, "kind", None) or "character").strip().lower()
     look_key = (look or "").strip().lower()
+    has_refs = (
+        bool(has_attached_reference)
+        if has_attached_reference is not None
+        else bool(getattr(character, "references", None))
+    )
 
     if kind == "prop" or look_key == "prop":
-        desc = notes or f"Hero prop object named {name}."
+        desc = prompt_element_details(notes, name, kind="prop")
+        ref_note = (
+            "The attached image is the prop identity reference. "
+            "Preserve its exact shape, proportions, materials, colors, and surface details from that image. "
+            if has_refs
+            else ""
+        )
         return (
             f"Isolated studio prop reference photograph of {name} centered on a clean pure white studio background. "
+            f"{ref_note}"
             "Sharp focus on the object, accurate materials, surface textures, and proportions, even studio lighting, "
-            f"photoreal cinematic quality. Prop details: {desc} "
-            "No people, no hands, no text, no labels, no logos, no watermark."
+            f"photoreal cinematic quality. Prop details: {desc.rstrip('.')}. "
+            "No people, no hands, no watermark, no UI chrome. "
+            "Avoid readable brand logos unless they are essential to recognizing this prop."
         )
 
     if kind == "scene" or look_key == "scene":
-        desc = notes or f"Cinematic location and set environment for {name}."
+        desc = prompt_element_details(notes, name, kind="scene")
+        ref_note = (
+            "The attached image is the scene/set identity reference. "
+            "Preserve its architecture, layout, key furniture and materials from that image. "
+            "Scene lighting may change with the time of day. "
+            if has_refs
+            else ""
+        )
         return (
             f"Cinematic location and set environment reference photograph for {name}. "
+            f"{ref_note}"
             "Wide architectural establishing view showing the room or outdoor layout, key furniture, props, textures, "
-            f"and lighting atmosphere. Location details: {desc} "
-            "No people in frame, no text, no logos, no watermark."
+            f"and lighting atmosphere. Location details: {desc.rstrip('.')}. "
+            "No people in frame, no watermark, no UI chrome, no logos burned into the frame."
         )
 
     lower_notes = notes.lower()
@@ -85,12 +182,30 @@ def cast_portrait_prompt(character: Character, *, look: str | None = None) -> st
             )
         )
     )
-    appearance = notes or f"Adult character named {name}."
+    # Characters keep the stored canonical name for dialogue identity.
+    name = canonical_character_name(character.name) or "CHARACTER"
+    name = name.lstrip("@") or "CHARACTER"
+    clean_notes = re.sub(
+        r"(?:speaking\s+)?voice(?:\s+profile)?\s*:\s*[^\n]+",
+        "",
+        notes or "",
+        flags=re.IGNORECASE,
+    ).strip(" .,-–—")
+    appearance = clean_notes or f"Adult character named {name}."
     adult_clause = "" if is_minor_or_mascot else "All people are adults age 18 or older. "
+
+    ref_note = (
+        "The attached image is an identity and facial likeness reference. "
+        f"Preserve {name}'s exact facial structure, eye shape, nose, mouth, skin tone, and bone structure from the reference image. "
+        "You are free to change and must modify the hairstyle, clothing, and accessories to match the appearance notes below. "
+        if has_refs
+        else ""
+    )
 
     if look_key in {"3d_view", "turnaround", "3d"}:
         return (
             f"Character 3D turnaround reference sheet for {name} in 16:9 horizontal layout on a clean pure white studio background. "
+            f"{ref_note}"
             "Left side: close-up head-and-shoulders portrait facing the camera with a natural calm expression and sharp facial detail. "
             "Right side: three full-body standing views side-by-side (front view facing camera, side profile view, and back view) "
             "showing the exact same character, facial identity, hairstyle, outfit, footwear, and accessories across all views. "
@@ -120,6 +235,7 @@ def cast_portrait_prompt(character: Character, *, look: str | None = None) -> st
         )
     return (
         f"Character identity reference sheet for {name}. "
+        f"{ref_note}"
         "Head-and-shoulders portrait, front-facing, neutral calm expression, eyes toward camera, "
         "plain seamless light-grey studio background, even soft key light, sharp facial detail, "
         "photoreal cinematic still, no crop through the chin or forehead. "
@@ -183,13 +299,11 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
         action = shot.action or ""
         image_prompt = shot.image_prompt or ""
         video_prompt = shot.video_prompt or ""
-        title = shot.title or ""
     else:
         dialogue = shot.get("dialogue") or []
         action = str(shot.get("action") or "")
         image_prompt = str(shot.get("image_prompt") or "")
         video_prompt = str(shot.get("video_prompt") or "")
-        title = str(shot.get("title") or "")
 
     names: list[str] = []
     seen: set[str] = set()
@@ -204,7 +318,6 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
 
     visual_text = "\n".join(
         (
-            title,
             QUOTED_SPEECH_RE.sub(" ", action),
             QUOTED_SPEECH_RE.sub(" ", image_prompt),
             QUOTED_SPEECH_RE.sub(" ", video_prompt),
@@ -225,15 +338,20 @@ def extract_mention_element_ids(
     char_list = list(characters)
     matched: list[str] = []
     for char in char_list:
-        key = canonical_character_name(char.name)
-        if not key:
+        slug = element_mention_slug(char.name)
+        if not slug:
             continue
-        slug = "_".join(key.split())
-        candidates = [slug, key]
-        parts = key.split()
+        key = canonical_character_name(char.name.lstrip("@") if char.name else "") or slug.replace("_", " ")
+        candidates = [slug, key, key.replace(" ", "_")]
+        parts = [p for p in key.replace("_", " ").split() if p]
         if len(parts) > 1:
             candidates.append(parts[0])
+        seen_cands: set[str] = set()
         for cand in candidates:
+            cand = (cand or "").strip().upper().lstrip("@")
+            if not cand or cand in seen_cands:
+                continue
+            seen_cands.add(cand)
             pattern = rf"@(?<![A-Z0-9_]){re.escape(cand)}(?![A-Z0-9_])"
             if re.search(pattern, combined):
                 if char.id not in matched:
@@ -291,9 +409,9 @@ def match_character_ids(
             first_word and _is_explicitly_absent(first_word, haystack)
         ):
             continue
-        pattern = rf"(?<![A-Z0-9]){re.escape(key)}(?![A-Z0-9])"
+        pattern = rf"(?<![A-Z0-9_]){re.escape(key)}(?![A-Z0-9_])"
         first_pattern = (
-            rf"(?<![A-Z0-9]){re.escape(first_word)}(?![A-Z0-9])" if first_word else None
+            rf"(?<![A-Z0-9_]){re.escape(first_word)}(?![A-Z0-9_])" if first_word else None
         )
         aliases = CHARACTER_MENTION_ALIASES.get(key, ())
         if (
@@ -438,8 +556,9 @@ def sync_project_cast(
         )
     )
     for item in characters:
-        if not (item.voice_description or "").strip() and (item.notes or "").strip():
-            item.voice_description = infer_voice_description(item.name, item.notes)
+        if (getattr(item, "kind", "character") or "character") == "character":
+            if not (item.voice_description or "").strip() and (item.notes or "").strip():
+                item.voice_description = infer_voice_description(item.name, item.notes)
     by_name = {canonical_character_name(item.name): item for item in characters}
 
     for entry in parse_character_consistency(source_text or ""):
@@ -454,25 +573,37 @@ def sync_project_cast(
 
     unique_chars = lambda: list({char.id: char for char in by_name.values()}.values())
 
-    # Build lookup of explicit cast per shot if source_text is present
-    explicit_cast_by_shot_idx: dict[int, list[str]] = {}
-    explicit_cast_by_shot_title: dict[str, list[str]] = {}
-    if source_text:
-        try:
-            parsed = parse_structured_screenplay(source_text)
-            if parsed and parsed.get("scenes"):
-                all_parsed_shots = [sh for sc in parsed["scenes"] for sh in sc.get("shots", [])]
-                for idx, ps in enumerate(all_parsed_shots):
-                    if ps.get("explicit_cast") is not None:
-                        explicit_cast_by_shot_idx[idx] = ps["explicit_cast"]
-                        if ps.get("title"):
-                            explicit_cast_by_shot_title[ps["title"].strip().upper()] = ps["explicit_cast"]
-        except Exception:
-            pass
+    # Each episode's shots must take their Cast: lines from that episode's own script.
+    explicit_cast_cache: dict[str, tuple[dict[int, list[str]], dict[str, list[str]]]] = {}
 
-    global_shot_idx = 0
+    def explicit_cast_lookup(version: ScriptVersion) -> tuple[dict[int, list[str]], dict[str, list[str]]]:
+        if version.id in explicit_cast_cache:
+            return explicit_cast_cache[version.id]
+        by_idx: dict[int, list[str]] = {}
+        by_title: dict[str, list[str]] = {}
+        text = version.source_text or source_text or ""
+        if text:
+            try:
+                parsed = parse_structured_screenplay(text)
+                if parsed and parsed.get("scenes"):
+                    all_parsed_shots = [sh for sc in parsed["scenes"] for sh in sc.get("shots", [])]
+                    for idx, ps in enumerate(all_parsed_shots):
+                        if ps.get("explicit_cast") is not None:
+                            by_idx[idx] = ps["explicit_cast"]
+                            if ps.get("title"):
+                                by_title[ps["title"].strip().upper()] = ps["explicit_cast"]
+            except Exception:
+                pass
+        explicit_cast_cache[version.id] = (by_idx, by_title)
+        return by_idx, by_title
+
+    shot_idx_by_version: dict[str, int] = {}
     for scene in _latest_version_scenes(project, db):
+        version = scene.script_version
+        explicit_cast_by_shot_idx, explicit_cast_by_shot_title = explicit_cast_lookup(version)
         for shot in scene.shots:
+            shot_idx = shot_idx_by_version.get(version.id, 0)
+            shot_idx_by_version[version.id] = shot_idx + 1
             dialogue_names, haystack = shot_mentioned_names(shot)
             for name in dialogue_names:
                 _ensure_character(db, project.id, by_name, name)
@@ -482,8 +613,8 @@ def sync_project_cast(
                 explicit = shot.explicit_cast
             elif shot.title and shot.title.strip().upper() in explicit_cast_by_shot_title:
                 explicit = explicit_cast_by_shot_title[shot.title.strip().upper()]
-            elif global_shot_idx in explicit_cast_by_shot_idx:
-                explicit = explicit_cast_by_shot_idx[global_shot_idx]
+            elif shot_idx in explicit_cast_by_shot_idx:
+                explicit = explicit_cast_by_shot_idx[shot_idx]
 
             if explicit is not None:
                 for name in explicit:
@@ -496,8 +627,8 @@ def sync_project_cast(
                 shot.character_ids = match_character_ids(
                     unique_chars(), dialogue_names, haystack
                 )
-            global_shot_idx += 1
 
+    sync_project_elements(project, db)
     db.flush()
     return unique_chars()
 
@@ -515,28 +646,17 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
     by_name = {canonical_character_name(item.name): item for item in existing}
 
     for scene in _latest_version_scenes(project, db):
-        raw_loc = (scene.location or scene.title or "").strip()
-        cleaned_loc = re.sub(
-            r"^(?:SCENE\s*\d+\s*[:\-–—]?\s*)?(?:INT\.?/EXT\.?|INT\.?|EXT\.?)\s*",
-            "",
-            raw_loc,
-            flags=re.IGNORECASE,
-        )
-        cleaned_loc = re.sub(
-            r"\s*[-–—]\s*(?:DAY|NIGHT|MORNING|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME(?:\s+TIME)?).*$",
-            "",
-            cleaned_loc,
-            flags=re.IGNORECASE,
-        ).strip()
-        loc_key = canonical_character_name(cleaned_loc)
+        loc_key = location_key(scene.location)
+        if loc_key and len(loc_key) > 80:
+            loc_key = re.split(r"[,\n;–—.]", loc_key)[0].strip()
+            loc_key = loc_key[:60].strip()
         if loc_key and len(loc_key) >= 3:
-            set_desc_parts = [
-                part.strip()
-                for part in (scene.set_notes, scene.lighting_notes, scene.action)
-                if (part or "").strip()
-            ]
-            set_desc = " ".join(set_desc_parts)
-            if loc_key not in by_name:
+            set_desc = (scene.set_notes or "").strip()
+            existing_set = matching_set_element(by_name.values(), scene.location)
+            if existing_set:
+                if set_desc and not existing_set.notes:
+                    existing_set.notes = set_desc
+            elif loc_key not in by_name:
                 scene_elem = Character(
                     project_id=project.id,
                     kind="scene",
@@ -547,32 +667,68 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
                 db.add(scene_elem)
                 db.flush()
                 by_name[loc_key] = scene_elem
-            elif by_name[loc_key].kind == "scene" and set_desc and not by_name[loc_key].notes:
-                by_name[loc_key].notes = set_desc
 
         raw_props = (scene.props_notes or "").strip()
         if raw_props:
+            existing_prop_notes = {
+                re.sub(r"\W+", " ", (item.notes or "").lower()).strip()
+                for item in by_name.values()
+                if getattr(item, "kind", None) == "prop" and (item.notes or "").strip()
+            }
             segments = [
                 seg.strip(" .,-–—")
-                for seg in re.split(r"[;\n]+|,\s+(?=[A-Z0-9])", raw_props)
+                for seg in re.split(r"[;\n]+|\.\s+(?=[A-Z@])|,\s+(?=[A-Z0-9@])", raw_props)
                 if seg.strip(" .,-–—")
             ]
             for seg in segments[:6]:
-                words = seg.split()
-                prop_title = " ".join(words[:4]) if len(words) > 4 else seg
-                prop_key = canonical_character_name(prop_title)
-                if not prop_key or len(prop_key) < 3 or prop_key in by_name:
+                if re.search(
+                    r"\b(?:blank\s+or\s+illegible|no\s+generated\s+lettering|separate\s+from\s+the\s+tank)\b",
+                    seg,
+                    flags=re.IGNORECASE,
+                ):
+                    continue
+                # "@BISCUIT_PACK — bright red sealed packet" or "BLUE FOLDER — closed blue folder..."
+                mention = re.match(
+                    r"^@?([A-Z][A-Za-z0-9_'\s]{1,30}?)\s*[—–-]\s*(.+)$",
+                    seg.strip(),
+                ) or re.match(
+                    r"^@([A-Za-z0-9_]+)\s+(.+)$",
+                    seg.strip(),
+                )
+                if mention:
+                    prop_key = canonical_character_name(mention.group(1).replace("_", " "))
+                    prop_notes = mention.group(2).strip()
+                else:
+                    cleaned = seg.lstrip("@").strip()
+                    base_title = re.split(
+                        r"\s+(?:centered\s+on|beneath|initially\s+in|clipped\s+to|beside|inside|with|attached\s+to|held\s+by|worn\s+by|hanging\s+from|placed\s+on|is\s+an?)\b",
+                        cleaned,
+                        flags=re.IGNORECASE,
+                    )[0].strip()
+                    words = base_title.split()
+                    prop_title = " ".join(words[:4]) if len(words) > 4 else base_title
+                    prop_key = canonical_character_name(prop_title)
+                    prop_notes = cleaned
+                norm_notes = re.sub(r"\W+", " ", prop_notes.lower()).strip()
+                if (
+                    not prop_key
+                    or len(prop_key) < 3
+                    or prop_key in by_name
+                    or (norm_notes and norm_notes in existing_prop_notes)
+                ):
                     continue
                 prop_elem = Character(
                     project_id=project.id,
                     kind="prop",
                     name=prop_key,
-                    notes=seg,
+                    notes=prop_notes,
                     voice_description="",
                 )
                 db.add(prop_elem)
                 db.flush()
                 by_name[prop_key] = prop_elem
+                if norm_notes:
+                    existing_prop_notes.add(norm_notes)
 
     db.flush()
     return list({char.id: char for char in by_name.values()}.values())
@@ -581,6 +737,9 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
 def load_cast_references(
     db: Session, project_id: str, character_ids: Iterable[str],
     reference_ids: Iterable[str] | None = None,
+    *,
+    require_all: bool = True,
+    max_per_character: int | None = None,
 ) -> list[FaceReferenceImage]:
     """Resolve the complete selected cast, without silently dropping identities."""
     selected_ids = list(dict.fromkeys(character_ids))
@@ -600,10 +759,18 @@ def load_cast_references(
     for character_id in selected_ids:
         character = by_id[character_id]
         usable = []
-        ordered_refs = sorted(
-            character.references,
-            key=lambda r: 0 if getattr(r, "view_type", "main") == "3d_view" else 1,
-        )
+        kind = (getattr(character, "kind", None) or "character").strip().lower()
+
+        def _ref_rank(ref: CharacterReference) -> tuple[int, float]:
+            v_type = getattr(ref, "view_type", "main") or "main"
+            if kind == "prop":
+                return (0 if v_type == "prop" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
+            if kind == "scene":
+                return (0 if v_type == "scene" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
+            # Characters: prefer 3D turnaround sheets when present.
+            return (0 if v_type == "3d_view" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
+
+        ordered_refs = sorted(character.references, key=_ref_rank)
         for ref in ordered_refs:
             v_type = getattr(ref, "view_type", "main")
             if (
@@ -623,9 +790,11 @@ def load_cast_references(
                     reference_id=ref.id, character_id=character.id,
                     view_type=v_type,
                 ))
-        if not usable:
+        if not usable and kind == "character":
             missing.append(character.name)
+        if max_per_character and max_per_character > 0:
+            usable = usable[:max_per_character]
         references.extend(usable)
-    if missing:
+    if missing and require_all:
         raise RuntimeError("Add a usable reference image for: " + ", ".join(missing))
     return references

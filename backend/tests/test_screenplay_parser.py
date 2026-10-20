@@ -309,3 +309,71 @@ Skylar shouts RED BALL and Jasmine confirms.
         {"character": "JASMINE", "text": "Yes! Red!"},
     ]
 
+
+def test_parses_markdown_headings_and_inline_metadata() -> None:
+    script = """THE ENVIOUS NEIGHBOR
+
+Duration: 12 seconds
+Format: 2 shots x 6 seconds
+
+## Character consistency
+
+CHIAMAKA — A 32-year-old Nigerian Igbo woman.
+NKIRU — A 35-year-old Nigerian Igbo woman.
+
+## Location consistency
+
+Location: @LAGOS_SHOPFRONT — A lively shopping street.
+
+## SHOT 1 - TWO SHOPS, TWO STORIES
+
+Scene: SC01_SHOPFRONT Location: @LAGOS_SHOPFRONT Time: 00:00-00:06 Framing: Wide establishing shot Cast: CHIAMAKA, NKIRU
+
+Action:
+Both shops stand side by side.
+
+Dialogue: None.
+
+Sound: Street chatter.
+
+Image prompt:
+Cinematic wide 16:9 establishing frame.
+
+Video prompt:
+Slow cinematic push.
+
+## SHOT 2 - BUSINESS IS MOVING
+
+Scene: SC01_SHOPFRONT Location: @LAGOS_SHOPFRONT Time: 00:06-00:12 Framing: Medium counter shot Cast: CHIAMAKA
+
+Action:
+Customer stands at counter.
+
+CHIAMAKA: "Welcome to my shop!"
+
+Sound: Customer speech.
+
+Image prompt:
+Medium counter shot.
+
+Video prompt:
+Chiamaka smiles.
+"""
+    result = parse_structured_screenplay(script)
+    assert result is not None
+    assert result["parser"] == "structured-shot-v2"
+    assert result["suggestions"] == []
+    assert len(result["scenes"]) == 1
+    scene = result["scenes"][0]
+    assert scene["title"] == "SC01_SHOPFRONT"
+    assert len(scene["shots"]) == 2
+    assert scene["shots"][0]["start_ms"] == 0
+    assert scene["shots"][0]["end_ms"] == 6000
+    assert scene["shots"][0]["framing"] == "Wide establishing shot"
+    assert scene["shots"][0]["explicit_cast"] == ["CHIAMAKA", "NKIRU"]
+    assert scene["shots"][1]["start_ms"] == 6000
+    assert scene["shots"][1]["end_ms"] == 12000
+    assert scene["shots"][1]["explicit_cast"] == ["CHIAMAKA"]
+    assert scene["shots"][1]["dialogue"] == [{"character": "CHIAMAKA", "text": "Welcome to my shop!"}]
+
+

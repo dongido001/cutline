@@ -138,6 +138,38 @@ def _ensure_publish_records(engine: Engine) -> None:
         connection.execute(text("CREATE INDEX ix_publish_records_job_id ON publish_records (job_id)"))
 
 
+def _ensure_release_kits(engine: Engine) -> None:
+    if "release_kits" in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE release_kits (
+                id VARCHAR PRIMARY KEY,
+                project_id VARCHAR NOT NULL,
+                episode_id VARCHAR,
+                compilation_id VARCHAR,
+                variant VARCHAR(16) NOT NULL DEFAULT 'landscape',
+                brief TEXT NOT NULL DEFAULT '',
+                frames JSON NOT NULL DEFAULT '[]',
+                title_options JSON NOT NULL DEFAULT '[]',
+                selected_title_id VARCHAR,
+                description TEXT NOT NULL DEFAULT '',
+                tags JSON NOT NULL DEFAULT '[]',
+                cover_ideas JSON NOT NULL DEFAULT '[]',
+                covers JSON NOT NULL DEFAULT '[]',
+                selected_cover_id VARCHAR,
+                copy_provider VARCHAR(40),
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+                FOREIGN KEY(compilation_id) REFERENCES compilations(id) ON DELETE CASCADE
+            )
+        """))
+        for column in ("project_id", "episode_id", "compilation_id"):
+            connection.execute(text(f"CREATE INDEX ix_release_kits_{column} ON release_kits ({column})"))
+
+
 def migrate_schema(engine: Engine) -> None:
     """Apply the small additive migrations needed by the local prototype."""
     _ensure_columns(engine, "projects", PROJECT_COLUMNS)
@@ -234,6 +266,7 @@ def migrate_schema(engine: Engine) -> None:
 
     _ensure_columns(engine, "character_references", CHARACTER_REFERENCE_COLUMNS)
     _ensure_publish_records(engine)
+    _ensure_release_kits(engine)
     _ensure_oauth_states(engine)
     _group_legacy_structured_shots(engine)
     _ensure_episodes_table(engine)

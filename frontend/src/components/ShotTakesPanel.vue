@@ -204,10 +204,9 @@ function formatTakeTime(isoDate: string): string {
 }
 
 function getTakeChatUrl(take: ShotTake): string | null {
-  if (take.conversation_url) return take.conversation_url
-  const settings = take.settings as Record<string, unknown> | undefined
-  if (settings && typeof settings.conversation_url === 'string') {
-    return settings.conversation_url
+  const url = take.conversation_url || (take.settings as Record<string, unknown> | undefined)?.conversation_url
+  if (typeof url === 'string' && url) {
+    return url.replace(/gemini\.google\.com\/app\/c_([a-zA-Z0-9]+)/i, 'gemini.google.com/app/$1')
   }
   return null
 }

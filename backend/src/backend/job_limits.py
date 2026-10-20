@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .models import Job
 from .settings import settings
 
-IMAGE_KINDS = frozenset({"shot_image", "cast_reference"})
+IMAGE_KINDS = frozenset({"shot_image", "cast_reference", "release_cover"})
 VIDEO_KINDS = frozenset({"shot_clip", "shot_lipsync", "create_draft", "publish"})
 TEXT_KINDS = frozenset(
     {
@@ -17,6 +17,7 @@ TEXT_KINDS = frozenset(
         "script_continuation",
         "deep_review",
         "deep_review_draft",
+        "release_copy",
     }
 )
 

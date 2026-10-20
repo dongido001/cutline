@@ -14,10 +14,13 @@ import {
   Calendar,
   Eye,
   Tag,
-  FileText
+  FileText,
+  Image as ImageIcon,
+  Package,
 } from '@lucide/vue'
 import {
   api,
+  type ReleaseKit,
   type Job,
   type OutputVariant,
   type ProjectDetail,
@@ -31,13 +34,20 @@ const props = defineProps<{
   project: ProjectDetail
   variant: OutputVariant
   episodeId?: string
+  compilationId?: string
   asModal?: boolean
 }>()
 
 const emit = defineEmits<{
   published: []
   close: []
+  'open-kit': []
 }>()
+
+const kit = ref<ReleaseKit | null>(null)
+const coverId = ref<string | null>(null)
+const kitCovers = computed(() => (kit.value?.covers || []).filter((item) => item.status === 'ready'))
+const selectedCover = computed(() => kitCovers.value.find((item) => item.id === coverId.value) || null)
 
 const plan = ref<PublishPlan | null>(null)
 const loading = ref(false)
@@ -164,13 +174,42 @@ async function loadPlan() {
   loading.value = true
   error.value = ''
   try {
-    plan.value = await api.publishPlan(props.project.id, props.variant, props.episodeId)
+    plan.value = await api.publishPlan(props.project.id, props.variant, props.episodeId, props.compilationId)
     selected.value = readyAssets.value.map((item) => item.id)
+    await loadKit()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not load publish plan'
   } finally {
     loading.value = false
   }
+}
+
+// Prefill from the release kit only when the user has not already typed their own metadata.
+async function loadKit() {
+  try {
+    const next = await api.releaseKit(props.project.id, {
+      variant: props.variant,
+      episodeId: props.episodeId,
+      compilationId: props.compilationId,
+    })
+    const previous = kit.value
+    kit.value = next
+    const selectedTitle = next.title_options.find((item) => item.id === next.selected_title_id)
+    const untouchedTitle = !title.value.trim() || title.value === props.project.title
+      || previous?.title_options.some((item) => item.text === title.value)
+    if (selectedTitle && untouchedTitle) title.value = selectedTitle.text
+    if (next.description && (!description.value.trim() || description.value === previous?.description)) description.value = next.description
+    if (next.tags.length && (!tagsText.value.trim() || tagsText.value === previous?.tags.join(', '))) tagsText.value = next.tags.join(', ')
+    if (!coverId.value || !next.covers.some((item) => item.id === coverId.value && item.status === 'ready')) {
+      coverId.value = next.selected_cover_id
+    }
+  } catch {
+    kit.value = null
+  }
+}
+
+function useTitle(text: string) {
+  title.value = text
 }
 
 async function watchPublish(jobId: string) {
@@ -204,7 +243,9 @@ async function publish() {
       schedule_interval_hours: scheduledAt.value && selectedAssets.value.length > 1 ? Number(scheduleInterval.value) : 0,
       made_for_kids: madeForKids.value,
       platform_options: {},
-    }, props.episodeId)
+      release_kit_id: selectedCover.value ? kit.value?.id : null,
+      cover_id: selectedCover.value?.id || null,
+    }, props.episodeId, props.compilationId)
     await watchPublish(job.value.id)
     emit('published')
   } catch (cause) {
@@ -218,7 +259,7 @@ function resultLinks(record: PublishRecord) {
   return (record.results || []).filter((item) => item.external_url).slice(0, 4)
 }
 
-watch([() => props.variant, () => props.episodeId], loadPlan)
+watch([() => props.variant, () => props.episodeId, () => props.compilationId], loadPlan)
 watch(scope, () => {
   selected.value = []
 })
@@ -435,11 +476,11 @@ onMounted(async () => {
             <span>Final Cut</span>
             <small class="count-badge">{{ plan?.final.length || 0 }}</small>
           </button>
-          <button type="button" :class="{ active: scope === 'scenes' }" @click="scope = 'scenes'">
+          <button v-if="!props.compilationId" type="button" :class="{ active: scope === 'scenes' }" @click="scope = 'scenes'">
             <span>Scene by Scene</span>
             <small class="count-badge">{{ plan?.scenes.filter((item) => item.ready).length || 0 }}/{{ plan?.scenes.length || 0 }}</small>
           </button>
-          <button type="button" :class="{ active: scope === 'shots' }" @click="scope = 'shots'">
+          <button v-if="!props.compilationId" type="button" :class="{ active: scope === 'shots' }" @click="scope = 'shots'">
             <span>Shot by Shot</span>
             <small class="count-badge">{{ plan?.shots.length || 0 }}</small>
           </button>
@@ -515,6 +556,36 @@ onMounted(async () => {
         </div>
       </div>
 
+      <!-- Release kit: cover + suggested titles -->
+      <div class="section-block kit-block">
+        <div class="kit-block-head">
+          <span class="block-label"><ImageIcon :size="12" /> Cover</span>
+          <button type="button" class="btn-text highlight" @click="emit('open-kit')">
+            <Package :size="12" /> {{ kit?.covers.length || kit?.title_options.length ? 'Edit release kit' : 'Create covers & titles with AI' }}
+          </button>
+        </div>
+        <div class="kit-cover-row" :class="{ shorts: props.variant === 'shorts' }" role="radiogroup" aria-label="Cover">
+          <button type="button" role="radio" class="kit-cover none" :class="{ active: !coverId }" :aria-checked="!coverId" @click="coverId = null">
+            <span>Platform default</span>
+          </button>
+          <button
+            v-for="cover in kitCovers"
+            :key="cover.id"
+            type="button"
+            role="radio"
+            class="kit-cover"
+            :class="{ active: coverId === cover.id }"
+            :aria-checked="coverId === cover.id"
+            :aria-label="`Cover ${cover.headline || cover.concept}`"
+            @click="coverId = cover.id"
+          >
+            <img :src="cover.url || ''" :alt="cover.headline || cover.concept" />
+            <CheckCircle2 v-if="coverId === cover.id" :size="16" class="kit-cover-check" />
+          </button>
+        </div>
+        <small v-if="selectedCover && platforms.includes('youtube')" class="kit-note">YouTube applies custom thumbnails only on channels with phone verification; if it refuses, the video still publishes.</small>
+      </div>
+
       <!-- Metadata Grid -->
       <div class="section-block metadata-block">
         <span class="block-label">Video Metadata & SEO</span>
@@ -529,6 +600,16 @@ onMounted(async () => {
             <input v-model="tagsText" placeholder="fitness, workout, routine, health" />
           </label>
 
+          <div v-if="kit?.title_options.length" class="title-suggestions" aria-label="Suggested titles">
+            <button
+              v-for="option in kit.title_options"
+              :key="option.id"
+              type="button"
+              class="title-chip"
+              :class="{ active: title === option.text }"
+              @click="useTitle(option.text)"
+            >{{ option.text }}</button>
+          </div>
           <label class="form-field desc-field">
             <span class="field-label"><FileText :size="12" /> Description</span>
             <textarea
@@ -1512,6 +1593,107 @@ onMounted(async () => {
 .btn-text.highlight {
   color: #38bdf8 !important;
   font-weight: 600;
+}
+
+.kit-block-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.kit-block-head .block-label,
+.kit-block-head .btn-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kit-cover-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 0 4px;
+}
+
+.kit-cover {
+  position: relative;
+  flex: 0 0 auto;
+  width: 136px;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  background: #0b0f14;
+  color: #94a3b8;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.kit-cover-row.shorts .kit-cover {
+  width: 76px;
+  aspect-ratio: 9 / 16;
+}
+
+.kit-cover.none {
+  display: grid;
+  place-items: center;
+  border-style: dashed;
+}
+
+.kit-cover.active {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.kit-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.kit-cover-check {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  color: #38bdf8;
+  background: #0b0f14;
+  border-radius: 50%;
+}
+
+.kit-note {
+  display: block;
+  margin-top: 4px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.title-suggestions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: -4px;
+}
+
+.title-chip {
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.title-chip:hover,
+.title-chip.active {
+  border-color: #38bdf8;
+  color: #e0f2fe;
+  background: rgba(56, 189, 248, 0.12);
 }
 
 </style>

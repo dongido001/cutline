@@ -321,10 +321,10 @@ def _resolve_deep_review_provider_name(preferred: str | None) -> str:
         except Exception:
             return False
 
-    if _bridge_up(settings.chatgpt_web_base_url, settings.chatgpt_web_api_key):
-        return "chatgpt_web"
     if _bridge_up(settings.gemini_web_base_url):
         return "gemini_web"
+    if _bridge_up(settings.chatgpt_web_base_url, settings.chatgpt_web_api_key):
+        return "chatgpt_web"
     if _bridge_up(settings.compatible_base_url, settings.compatible_api_key):
         return "compatible"
     try:

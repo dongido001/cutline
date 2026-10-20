@@ -8,15 +8,23 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from .cast import cast_portrait_prompt, extract_mention_element_ids, is_usable_reference_image, load_cast_references, sync_project_cast
+from .cast import (
+    cast_portrait_prompt,
+    element_mention_slug,
+    extract_mention_element_ids,
+    is_usable_reference_image,
+    load_cast_references,
+    sync_project_cast,
+    shot_element_ids,
+)
 from .continuity import current_shot_snapshot, get_or_create_shot_snapshot, video_continuity_prompt
 from .database import SessionLocal
-from .final_cut import invalidate_final_cut
+from .final_cut import _run as _run_ffmpeg, invalidate_final_cut
 
 from .job_limits import JobCapacityExceeded, raise_if_over_capacity
 from .jobs import JobCancelled, preserve_cancelled, raise_if_cancelled
-from .media import FaceReferenceImage, VisualReferenceImage, delete_media_file, generate_storyboard_image
-from .models import Character, CharacterReference, Compilation, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, Suggestion, now
+from .media import FaceReferenceImage, VisualReferenceImage, delete_media_file, generate_storyboard_image, normalize_conversation_url
+from .models import Character, CharacterReference, Compilation, Job, Project, ProjectVariantExport, PublishRecord, Scene, ScriptVersion, Shot, ShotClip, ShotImage, ShotMediaVariant, StemSeparation, Suggestion, TimelineAsset, now
 from .providers import get_script_provider, normalize_analysis_result
 from .publishing import collect_publish_assets, publish_assets
 from .queue import chatgpt_huey, gemini_huey, general_huey, image_huey, video_huey
@@ -24,8 +32,8 @@ from .screenplay_parser import canonical_character_name, parse_structured_screen
 from .settings import settings
 from .timeline import append_missing_shots, ensure_compilation_timeline, ensure_timeline, promote_available_clips
 from .timeline_render import assemble_timeline
-from .schemas import TimelineDocument
-from .video import generate_shot_clip as render_shot_clip, clip_source_image
+from .schemas import TimelineDocument, TimelineSource
+from .video import generate_shot_clip as render_shot_clip, clip_source_image, get_active_video_provider
 from uuid import uuid4
 from pathlib import Path
 import shutil
@@ -542,16 +550,18 @@ def _generate_shot_image(
                 is_aspect_conversion = bool(
                     image_reference and image_reference.get("mode") == "aspect_conversion"
                 )
+                char_ids = list(dict.fromkeys(shot.character_ids or []))
                 references = (
                     []
                     if (is_aspect_conversion and visual_reference is not None)
                     else load_cast_references(
-                        db, project.id, shot.character_ids,
+                        db, project.id, char_ids,
                         reference_ids=[
                             reference_id
                             for character in snapshot.get("characters", [])
                             for reference_id in character.get("reference_ids", [])
                         ],
+                        max_per_character=1 if len(char_ids) > 1 else None,
                     )
                 )
                 fallback_conv_url = shot.conversation_url or next(
@@ -583,8 +593,9 @@ def _generate_shot_image(
                 job.provider_phase = phase
                 job.message = str(update.get("message") or messages.get(phase, "Rendering storyboard frame"))
                 if update.get("conversation_url"):
-                    job.conversation_url = str(update["conversation_url"])
-                    shot.conversation_url = str(update["conversation_url"])
+                    clean_conv_url = normalize_conversation_url(update["conversation_url"])
+                    job.conversation_url = clean_conv_url
+                    shot.conversation_url = clean_conv_url
                 attempts = deepcopy(job.attempts or [])
                 meta = [
                     item
@@ -598,7 +609,7 @@ def _generate_shot_image(
                 ]
                 attempt = next((item for item in provider_attempts if item.get("provider") == provider), None)
                 values = {
-                    key: update[key]
+                    key: (normalize_conversation_url(update[key]) if key == "conversation_url" else update[key])
                     for key in (
                         "provider", "phase", "error", "failure_category", "conversation_url",
                         "reference_count", "reference_types",
@@ -1109,14 +1120,22 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
             job.message = f"Generating {label_noun} for {character.name}"
             db.commit()
 
-            prompt = cast_portrait_prompt(character, look=look)
-
             seed_references: list[FaceReferenceImage] = []
-            if target_view_type == "3d_view" and character.references:
-                main_candidates = [
-                    r for r in character.references if getattr(r, "view_type", "main") != "3d_view"
-                ] or list(character.references)
-                for ref in reversed(main_candidates):
+            if character.references:
+                if target_view_type in {"prop", "scene"}:
+                    # Prefer same-kind refs when regenerating prop/scene sheets.
+                    seed_candidates = [
+                        r
+                        for r in character.references
+                        if getattr(r, "view_type", "main") == target_view_type
+                    ] or list(character.references)
+                elif target_view_type in {"main", "3d_view"}:
+                    seed_candidates = [
+                        r for r in character.references if getattr(r, "view_type", "main") != "3d_view"
+                    ] or list(character.references)
+                else:
+                    seed_candidates = []
+                for ref in reversed(seed_candidates):
                     ref_path = settings.media_dir / ref.filename
                     try:
                         ref_bytes = ref_path.read_bytes()
@@ -1130,9 +1149,16 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
                                 data=ref_bytes,
                                 reference_id=ref.id,
                                 character_id=character.id,
+                                view_type=getattr(ref, "view_type", "main") or "main",
                             )
                         )
                         break
+
+            prompt = cast_portrait_prompt(
+                character,
+                look=look,
+                has_attached_reference=bool(seed_references),
+            )
 
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
@@ -1150,7 +1176,7 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
                 job.provider_phase = phase
                 job.message = str(update.get("message") or messages.get(phase, job.message))
                 if update.get("conversation_url"):
-                    job.conversation_url = str(update["conversation_url"])
+                    job.conversation_url = normalize_conversation_url(update["conversation_url"])
                 attempts = deepcopy(job.attempts or [])
                 meta = [item for item in attempts if isinstance(item, dict) and item.get("character_id")]
                 provider_attempts = [
@@ -1158,7 +1184,7 @@ def _generate_cast_reference(character_id: str, job_id: str, look: str | None = 
                 ]
                 attempt = next((item for item in provider_attempts if item.get("provider") == provider), None)
                 values = {
-                    key: update[key]
+                    key: (normalize_conversation_url(update[key]) if key == "conversation_url" else update[key])
                     for key in ("provider", "phase", "error", "failure_category", "conversation_url")
                     if update.get(key)
                 }
@@ -1334,33 +1360,7 @@ def _resolve_r2v_element_references(
     selected_ids = list(dict.fromkeys([*base_ids, *mention_ids]))
 
     if include_scene_reference and shot.scene:
-        has_scene_elem = any(
-            (getattr(by_id.get(cid), "kind", "character") or "character") == "scene"
-            for cid in selected_ids
-            if cid in by_id
-        )
-        if not has_scene_elem:
-            raw_loc = (shot.scene.location or shot.scene.title or "").strip()
-            cleaned_loc = re.sub(
-                r"^(?:SCENE\s*\d+\s*[:\-–—]?\s*)?(?:INT\.?/EXT\.?|INT\.?|EXT\.?)\s*",
-                "",
-                raw_loc,
-                flags=re.IGNORECASE,
-            )
-            cleaned_loc = re.sub(
-                r"\s*[-–—]\s*(?:DAY|NIGHT|MORNING|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME(?:\s+TIME)?).*$",
-                "",
-                cleaned_loc,
-                flags=re.IGNORECASE,
-            ).strip()
-            loc_key = canonical_character_name(cleaned_loc)
-            if loc_key:
-                for char in all_chars:
-                    if (getattr(char, "kind", "character") or "character") == "scene":
-                        c_key = canonical_character_name(char.name)
-                        if c_key == loc_key or (loc_key in c_key) or (c_key in loc_key):
-                            selected_ids.append(char.id)
-                            break
+        selected_ids = shot_element_ids(all_chars, shot, selected_ids)
 
     ref_paths: list[Path] = []
     ref_descriptors: list[dict[str, str]] = []
@@ -1379,13 +1379,12 @@ def _resolve_r2v_element_references(
             if path.is_file() and path not in seen_paths:
                 seen_paths.add(path)
                 ref_paths.append(path)
-                key = canonical_character_name(char.name) or char.name.upper()
-                slug = "_".join(key.split())
+                slug = element_mention_slug(char.name)
                 ref_descriptors.append(
                     {
                         "id": char.id,
                         "name": char.name,
-                        "tag": f"@{slug}",
+                        "tag": f"@{slug}" if slug else f"@{canonical_character_name(char.name) or 'ELEMENT'}",
                         "kind": (getattr(char, "kind", "character") or "character"),
                         "view_type": (getattr(ref, "view_type", "main") or "main"),
                     }
@@ -1528,10 +1527,11 @@ def _generate_shot_clip(
             job.status = "running"
             if not _is_second_aspect:
                 job.progress = 0.1
-            provider_name = (settings.video_provider or "runway").strip().lower()
+            provider_name = get_active_video_provider()
             provider_labels = {
                 "runway": "Runway",
                 "flowkit": "Google Flow",
+                "gemini_web": "Gemini Web (Veo)",
                 "comfyui": "ComfyUI",
             }
             project = shot.scene.script_version.project
@@ -1714,6 +1714,7 @@ def _generate_shot_clip(
             import inspect
 
             resolved_flow_projects: list[str] = []
+            resolved_conversation_urls: list[str] = []
             render_kwargs: dict[str, object] = {"scene_id": str(shot.scene.id)}
             active_ref_paths = r2v_ref_paths if video_mode == "r2v" else cast_ref_paths
             try:
@@ -1722,6 +1723,8 @@ def _generate_shot_clip(
                     render_kwargs["flow_project_id"] = project.flow_project_id
                 if "on_flow_project_id" in sig.parameters:
                     render_kwargs["on_flow_project_id"] = resolved_flow_projects.append
+                if "on_conversation_url" in sig.parameters:
+                    render_kwargs["on_conversation_url"] = resolved_conversation_urls.append
                 if active_ref_paths and "reference_image_paths" in sig.parameters:
                     render_kwargs["reference_image_paths"] = active_ref_paths
                 if video_mode == "r2v" and "video_mode" in sig.parameters:
@@ -1740,6 +1743,12 @@ def _generate_shot_clip(
                 target_aspect,
                 **render_kwargs,
             )
+            if resolved_conversation_urls and resolved_conversation_urls[-1]:
+                clean_url = normalize_conversation_url(resolved_conversation_urls[-1])
+                take_settings["conversation_url"] = clean_url
+                for attempt in (job.attempts or []):
+                    if isinstance(attempt, dict):
+                        attempt["conversation_url"] = clean_url
             # Release the render-time read snapshot, then serialize result writes.
             # ponytail: serialize SQLite writes; use server-database row locks for higher throughput.
             project_id = project.id
@@ -2043,10 +2052,11 @@ def _render_project_final_cut(project_id: str, job_id: str, variant: str = "land
             else:
                 document = TimelineDocument.model_validate(timeline.document)
 
-            def update_progress(completed: int, total: int) -> None:
+            def update_progress(completed: int, total: int, message: str | None = None) -> None:
                 raise_if_cancelled(db, job_id)
-                job.progress = 0.1 + (completed / total) * 0.8
-                job.message = f"Rendering shot {completed} of {total}"
+                denom = max(total, 1)
+                job.progress = min(0.95, 0.1 + (completed / denom) * 0.8)
+                job.message = message or f"Rendering shot {completed} of {total}"
                 db.commit()
 
             result = assemble_timeline(project, document, variant, db, update_progress)
@@ -2269,6 +2279,137 @@ def enqueue_deep_review_draft(
     if provider == "gemini_web":
         return deep_review_draft_gemini(run_id, finding_id, job_id)
     return deep_review_draft_general(run_id, finding_id, job_id)
+
+
+@general_huey.task()
+def release_copy_general(kit_id: str, job_id: str) -> None:
+    from .release_kit import run_copy_job
+
+    run_copy_job(kit_id, job_id)
+
+
+@chatgpt_huey.task()
+def release_copy_chatgpt(kit_id: str, job_id: str) -> None:
+    from .release_kit import run_copy_job
+
+    run_copy_job(kit_id, job_id)
+
+
+@gemini_huey.task()
+def release_copy_gemini(kit_id: str, job_id: str) -> None:
+    from .release_kit import run_copy_job
+
+    run_copy_job(kit_id, job_id)
+
+
+def enqueue_release_copy(provider: str, kit_id: str, job_id: str):
+    if provider == "chatgpt_web":
+        return release_copy_chatgpt(kit_id, job_id)
+    if provider == "gemini_web":
+        return release_copy_gemini(kit_id, job_id)
+    return release_copy_general(kit_id, job_id)
+
+
+@image_huey.task()
+def release_cover_worker(kit_id: str, job_id: str, cover_id: str) -> None:
+    from .release_kit import run_cover_job
+
+    run_cover_job(kit_id, job_id, cover_id)
+
+
+def _stem_to_asset(db, project_id: str, wav: Path, label: str) -> TimelineAsset:
+    filename = f"stem-{uuid4()}.m4a"
+    _run_ffmpeg(["ffmpeg", "-y", "-i", str(wav), "-c:a", "aac", "-b:a", "256k", str(settings.media_dir / filename)])
+    asset = TimelineAsset(project_id=project_id, filename=filename, mime_type="audio/mp4", label=label[:160])
+    db.add(asset)
+    db.flush()
+    return asset
+
+
+def _separate_stems(separation_id: str) -> None:
+    import tempfile
+
+    from .stems import SEPARATOR_LABELS, separate
+    from .timeline_render import resolve_audio_source
+
+    with SessionLocal() as db:
+        separation = db.get(StemSeparation, separation_id)
+        if not separation:
+            return
+        job = db.get(Job, separation.job_id) if separation.job_id else None
+        project = db.get(Project, separation.project_id)
+        if not project or (job and job.status == "cancelled"):
+            return
+        provider_label = SEPARATOR_LABELS.get(separation.provider, separation.provider)
+
+        def report(fraction: float, message: str) -> None:
+            if not job:
+                return
+            raise_if_cancelled(db, job.id)
+            job.progress = max(job.progress or 0, min(0.95, fraction))
+            job.message = message[:240]
+            db.commit()
+
+        try:
+            separation.status = "running"
+            if job:
+                job.status = "running"
+                job.provider_phase = "running"
+            report(0.05, f"Preparing audio for {provider_label}")
+            source = TimelineSource(kind=separation.source_kind, ref_id=separation.source_ref_id)
+            media = resolve_audio_source(source, project, db, "16:9")
+            with tempfile.TemporaryDirectory(prefix="cutline-stems-") as tmp:
+                work = Path(tmp)
+                cut = work / "source.wav"
+                _run_ffmpeg([
+                    "ffmpeg", "-y",
+                    "-ss", f"{max(0, separation.source_in_ms) / 1000:.3f}",
+                    "-t", f"{max(1, separation.duration_ms) / 1000:.3f}",
+                    "-i", str(media),
+                    "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(cut),
+                ])
+                music_wav, voice_wav = separate(separation.provider, cut, work, report)
+                report(0.92, "Saving music and voice tracks")
+                music = _stem_to_asset(db, project.id, music_wav, f"{separation.label} music ({provider_label})")
+                voice = _stem_to_asset(db, project.id, voice_wav, f"{separation.label} voice ({provider_label})")
+            separation.music_asset_id = music.id
+            separation.voice_asset_id = voice.id
+            separation.status = "completed"
+            if job:
+                raise_if_cancelled(db, job.id)
+                job.status = "completed"
+                job.progress = 1
+                job.message = f"Music separated with {provider_label}"
+                job.provider_phase = "completed"
+            db.commit()
+        except JobCancelled:
+            db.rollback()
+            separation = db.get(StemSeparation, separation_id)
+            if separation:
+                separation.status = "cancelled"
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            separation = db.get(StemSeparation, separation_id)
+            job = db.get(Job, separation.job_id) if separation and separation.job_id else None
+            if separation:
+                separation.status = "failed"
+                separation.error = str(exc)
+            if job and not preserve_cancelled(job):
+                job.status = "failed"
+                job.message = f"{provider_label} separation failed"
+                job.error = str(exc)
+                job.provider_phase = "failed"
+            db.commit()
+
+
+@general_huey.task()
+def separate_stems_worker(separation_id: str) -> None:
+    _separate_stems(separation_id)
+
+
+def enqueue_stem_separation(separation_id: str):
+    return separate_stems_worker(separation_id)
 
 
 from .draft import create_draft_worker  # noqa: E402, F401

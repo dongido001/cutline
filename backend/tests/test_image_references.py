@@ -20,6 +20,20 @@ def png(color='red'):
     return buffer.getvalue()
 
 
+def test_automatic_reference_never_uses_another_room_with_a_shared_compound_name(setup):
+    from backend.image_references import default_visual_reference, location_establishing_shot
+    db, client, project, shots = setup
+    shots[0].scene.location = "COMPOUND COURTYARD"
+    kitchen = Scene(script_version=shots[0].scene.script_version, order_index=1, title="Dinner", location="@COMPOUND_KITCHEN")
+    shots[2].scene = kitchen
+    db.add(kitchen)
+    db.commit()
+    assert location_establishing_shot(shots[2]) is None
+    assert default_visual_reference(shots[2], '16:9') is None
+    kitchen.location = "EXT. COMPOUND COURTYARD - NIGHT"
+    assert location_establishing_shot(shots[2]).id == shots[0].id
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'data_dir', tmp_path)
@@ -259,7 +273,7 @@ def test_no_placeholder_for_visual_reference(monkeypatch):
         media.generate_storyboard_image('room', 'room', 'wide', '16:9', references=[media.VisualReferenceImage('image/png', png())])
 
 
-def test_face_reference_attachment_failure_falls_back_to_prompt_likeness(monkeypatch, tmp_path):
+def test_face_reference_attachment_failure_does_not_drop_identity(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, 'data_dir', tmp_path)
     monkeypatch.setattr(settings, 'image_providers', 'chatgpt_web')
     monkeypatch.setattr(media, 'image_provider_statuses', lambda: [{'id': 'chatgpt_web', 'available': True}])
@@ -270,15 +284,13 @@ def test_face_reference_attachment_failure_falls_back_to_prompt_likeness(monkeyp
             raise RuntimeError('ChatGPT did not finish uploading the face reference image(s)')
         return png(), 'test', {}
     monkeypatch.setattr(media, '_request_provider_image', request)
-    filename, mime, provider = media.generate_storyboard_image(
-        'A portrait of Gabe', 'Room', 'Close-up', '16:9',
-        references=[media.FaceReferenceImage('GABE', 'image/png', png())],
-    )
-    assert provider == 'chatgpt_web'
-    assert len(calls) == 2
+    with pytest.raises(RuntimeError, match='ChatGPT did not finish uploading'):
+        media.generate_storyboard_image(
+            'A portrait of Gabe', 'Room', 'Close-up', '16:9',
+            references=[media.FaceReferenceImage('GABE', 'image/png', png())],
+        )
+    assert len(calls) == 1
     assert calls[0] == {'provider': 'chatgpt_web', 'has_refs': True}
-    assert calls[1] == {'provider': 'chatgpt_web', 'has_refs': False}
-    assert (tmp_path / 'media' / filename).exists()
 
 
 def test_upload_shot_image_and_followup_edit_take(setup, monkeypatch):

@@ -496,7 +496,9 @@ def validate_timeline(
         if item.kind == "video" and item.source_out_ms is not None:
             if item.source_out_ms <= item.source_in_ms:
                 raise ValueError(f"{item.label} has an invalid trim range")
-            if item.duration_ms != item.source_out_ms - item.source_in_ms:
+            if item.loop and item.duration_ms > item.source_out_ms - item.source_in_ms:
+                pass
+            elif item.duration_ms != item.source_out_ms - item.source_in_ms:
                 if abs(item.duration_ms - (item.source_out_ms - item.source_in_ms)) <= 2:
                     item.duration_ms = item.source_out_ms - item.source_in_ms
                 else:

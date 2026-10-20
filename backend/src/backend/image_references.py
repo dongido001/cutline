@@ -11,6 +11,7 @@ from sqlalchemy import select
 from .models import Job, Shot, ShotImageReference, ShotTake
 from .schemas import ShotImageReferenceRead
 from .settings import settings
+from .cast import location_key
 
 _STILL_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
@@ -265,21 +266,84 @@ def default_visual_reference(shot, aspect: str) -> dict | None:
             return snapshot
 
     source = previous_shot(shot)
-    if not source:
-        return None
-    source_still, source_kind = _shot_still_for_aspect(source, aspect)
-    if source_still is not None:
-        return _still_snapshot(source, source_still, source_kind, aspect)
-    source_other_still, source_other_kind = _shot_still_for_aspect(source, other_aspect)
-    if source_other_still is not None:
-        return _still_snapshot(
-            source,
-            source_other_still,
-            source_other_kind,
-            aspect,
-            source_aspect_ratio=other_aspect,
-        )
+    if source and getattr(source, "scene_id", None) == getattr(shot, "scene_id", None):
+        source_still, source_kind = _shot_still_for_aspect(source, aspect)
+        if source_still is not None:
+            return _still_snapshot(source, source_still, source_kind, aspect)
+        source_other_still, source_other_kind = _shot_still_for_aspect(source, other_aspect)
+        if source_other_still is not None:
+            return _still_snapshot(
+                source,
+                source_other_still,
+                source_other_kind,
+                aspect,
+                source_aspect_ratio=other_aspect,
+            )
+
+    est = location_establishing_shot(shot)
+    if est:
+        est_still, est_kind = _shot_still_for_aspect(est, aspect)
+        if est_still is not None:
+            return _still_snapshot(est, est_still, est_kind, aspect)
+        est_other_still, est_other_kind = _shot_still_for_aspect(est, other_aspect)
+        if est_other_still is not None:
+            return _still_snapshot(
+                est,
+                est_other_still,
+                est_other_kind,
+                aspect,
+                source_aspect_ratio=other_aspect,
+            )
+
+    if source and location_key(source.scene.location) and location_key(source.scene.location) == location_key(shot.scene.location):
+        source_still, source_kind = _shot_still_for_aspect(source, aspect)
+        if source_still is not None:
+            return _still_snapshot(source, source_still, source_kind, aspect)
+        source_other_still, source_other_kind = _shot_still_for_aspect(source, other_aspect)
+        if source_other_still is not None:
+            return _still_snapshot(
+                source,
+                source_other_still,
+                source_other_kind,
+                aspect,
+                source_aspect_ratio=other_aspect,
+            )
     return None
+
+
+def location_establishing_shot(shot) -> Shot | None:
+    """Find the canonical establishing shot for the location of `shot`."""
+    if not shot or not getattr(shot, "scene", None) or not getattr(shot.scene, "script_version", None):
+        return None
+    loc = (shot.scene.location or "").strip()
+    if not loc:
+        return None
+
+    loc_clean = location_key(loc)
+    if not loc_clean:
+        return None
+
+    earlier = earlier_shots(shot)
+    if not earlier:
+        return None
+
+    def matches_loc(s: Shot) -> bool:
+        if not s.scene or not s.scene.location:
+            return False
+        return location_key(s.scene.location) == loc_clean
+
+    candidates = [s for s in earlier if matches_loc(s) and (s.image or getattr(s, "takes", None))]
+    if not candidates:
+        return None
+
+    wide_est = next(
+        (s for s in candidates if any(k in (s.framing or "").lower() for k in ("wide", "establishing", "master"))),
+        None,
+    )
+    if wide_est:
+        return wide_est
+
+    return candidates[0]
 
 
 def media_sources(shot):

@@ -1,5 +1,7 @@
 import logging
 import base64
+import subprocess
+import sys
 
 logger = logging.getLogger(__name__)
 import hashlib
@@ -17,6 +19,18 @@ import time
 import httpx
 
 from .settings import settings
+
+
+def _auto_sync_gemini_cookies() -> bool:
+    sync_script = Path(__file__).resolve().parents[3] / "bridges" / "sync_gemini_cookies.py"
+    if not sync_script.is_file():
+        return False
+    try:
+        res = subprocess.run([sys.executable, str(sync_script)], capture_output=True, text=True, timeout=30)
+        return "Done. Changed: True" in res.stdout
+    except Exception as exc:
+        logger.warning("Auto-sync of Gemini cookies failed: %s", exc)
+        return False
 
 
 class ImagePolicyError(RuntimeError):
@@ -42,6 +56,13 @@ class VisualReferenceImage:
 
 
 IMAGE_REFERENCE_PROVIDERS = {"chatgpt_web", "gemini_web"}
+
+
+def normalize_conversation_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    cleaned = str(url).strip()
+    return re.sub(r"(https?://gemini\.google\.com/app/)c_([a-zA-Z0-9]+)", r"\1\2", cleaned)
 
 
 def prepare_visual_reference_prompt(
@@ -105,7 +126,7 @@ def _assert_safe_image_url(url: str) -> None:
 
 def prepare_image_prompt(prompt: str, aspect_ratio: str) -> str:
     """Remove contradictory output geometry and add supported age clarity."""
-    cleaned = _ASPECT_INSTRUCTION.sub("", prompt)
+    cleaned = _ASPECT_INSTRUCTION.sub(" ", prompt)
     cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
     cleaned = re.sub(r"[,;]\s*[,;]", ",", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.;")
@@ -126,15 +147,24 @@ def prepare_face_reference_prompt(prompt: str, references: Sequence[FaceReferenc
         return prompt
 
     chars_with_3d: list[str] = []
+    prop_names: list[str] = []
+    scene_names: list[str] = []
     other_chars: list[str] = []
     for ref in face_refs:
         v_type = getattr(ref, "view_type", "main")
+        name = ref.character_name
         if v_type == "3d_view":
-            if ref.character_name not in chars_with_3d:
-                chars_with_3d.append(ref.character_name)
+            if name not in chars_with_3d:
+                chars_with_3d.append(name)
+        elif v_type == "prop":
+            if name not in prop_names:
+                prop_names.append(name)
+        elif v_type == "scene":
+            if name not in scene_names:
+                scene_names.append(name)
         else:
-            if ref.character_name not in other_chars:
-                other_chars.append(ref.character_name)
+            if name not in other_chars:
+                other_chars.append(name)
 
     other_chars = [name for name in other_chars if name not in chars_with_3d]
 
@@ -144,14 +174,31 @@ def prepare_face_reference_prompt(prompt: str, references: Sequence[FaceReferenc
         parts.append(
             f"Character 3D turnaround reference sheet(s) (multi-angle turnaround showing face, hairstyle, body build, and canonical wardrobe) are attached for: {named_3d}. "
             "Preserve each character's exact face, hairstyle, clothing/wardrobe, body build, and proportions as depicted in their 3D turnaround sheet. "
-            "Do not alter their wardrobe, colors, or facial structure."
+            "Do not alter their wardrobe, colors, or facial structure. "
+            "Use the turnaround sheet for identity and wardrobe only, never for pose: take body pose, arm and "
+            "hand placement, and expression from this shot's description, and do not copy the sheet's neutral "
+            "standing pose or hands-in-pockets stance unless the shot asks for it."
         )
     if other_chars:
         named_other = ", ".join(other_chars)
         parts.append(
             f"Identity references are attached for: {named_other}. "
             "Preserve each named character's exact face and likeness from their reference image(s). "
-            "Do not invent a different face."
+            "Do not invent a different face. Take pose and hand placement from this shot's description, not from the reference image."
+        )
+    if prop_names:
+        named_props = ", ".join(prop_names)
+        parts.append(
+            f"Prop object references are attached for: {named_props}. "
+            "Preserve each prop's exact shape, proportions, materials, colors, and surface details from its reference image. "
+            "Do not invent a different object."
+        )
+    if scene_names:
+        named_scenes = ", ".join(scene_names)
+        parts.append(
+            f"Scene/set environment references are attached for: {named_scenes}. "
+            "Preserve architecture, layout, key furniture and materials from the reference image(s). Apply the shot's lighting and time of day. "
+            "Do not invent a different location."
         )
 
     instruction = " ".join(parts)
@@ -206,12 +253,12 @@ def image_provider_statuses() -> list[dict]:
             configured = bool(settings.chatgpt_web_api_key)
             capability_url = f"{base_url.rstrip('/')}/provider/capabilities"
         else:
-            base_url = settings.gemini_web_base_url
+            base_url = settings.gemini_web_image_base_url
             model = settings.gemini_web_image_model
             headers = _gemini_headers()
             label = "Gemini Web"
             configured = True
-            capability_url = None
+            capability_url = f"{base_url.rstrip('/')}/provider/capabilities"
         connected = False
         image_generation = False
         verified = False
@@ -219,6 +266,10 @@ def image_provider_statuses() -> list[dict]:
         if configured:
             try:
                 models = httpx.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=2)
+                if not models.is_success and provider == "gemini_web":
+                    if _auto_sync_gemini_cookies():
+                        time.sleep(2)
+                        models = httpx.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=2)
                 connected = models.is_success
                 image_generation = connected
                 verified = connected if not capability_url else False
@@ -274,11 +325,15 @@ def _reference_payload(references: Sequence[FaceReferenceImage | VisualReference
         if isinstance(ref, VisualReferenceImage):
             item["reference_type"] = ref.reference_type
         else:
-            item["reference_type"] = (
-                "character_3d"
-                if getattr(ref, "view_type", "main") == "3d_view"
-                else "face_identity"
-            )
+            v_type = getattr(ref, "view_type", "main") or "main"
+            if v_type == "3d_view":
+                item["reference_type"] = "character_3d"
+            elif v_type == "prop":
+                item["reference_type"] = "prop_object"
+            elif v_type == "scene":
+                item["reference_type"] = "scene_environment"
+            else:
+                item["reference_type"] = "face_identity"
         payload.append(item)
     return payload
 
@@ -287,6 +342,8 @@ def _decode_provider_image(payload: dict, provider: str) -> tuple[bytes, dict]:
     try:
         encoded = payload["data"][0]["b64_json"]
         metadata = payload.get("provider_metadata") or {}
+        if "conversation_url" in metadata:
+            metadata["conversation_url"] = normalize_conversation_url(metadata["conversation_url"])
         return base64.b64decode(encoded, validate=True), metadata
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise RuntimeError(f"{provider} returned an invalid image response") from exc
@@ -307,86 +364,6 @@ def _download_image_bytes(url: str, headers: dict | None = None) -> bytes:
     return response.content
 
 
-def _request_gemini_with_references(
-    prompt: str,
-    aspect_ratio: str,
-    references: Sequence[FaceReferenceImage | VisualReferenceImage],
-    progress: Callable[[dict], None] | None = None,
-) -> tuple[bytes, str, dict]:
-    base_url = settings.gemini_web_base_url
-    model = settings.gemini_web_image_model
-    size = "1344x768" if aspect_ratio == "16:9" else "768x1344"
-    content: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                f"Generate exactly one image in {size} format. "
-                "Return the generated image itself, not a text description. "
-                f"{prompt}"
-            ),
-        }
-    ]
-    for ref in references:
-        data, mime = _optimize_reference_bytes(ref.data, ref.mime_type)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
-                },
-            }
-        )
-    if progress:
-        progress({"provider": "gemini_web", "phase": "submitting"})
-    response = httpx.post(
-        f"{base_url.rstrip('/')}/chat/completions",
-        headers=_gemini_headers(),
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": content}],
-            "n": 1,
-        },
-        timeout=httpx.Timeout(settings.image_provider_timeout_seconds, connect=3),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    # Prefer portable b64 when the bridge returns OpenAI image shape via tool/extensions.
-    if isinstance(payload.get("data"), list) and payload["data"] and payload["data"][0].get("b64_json"):
-        image, metadata = _decode_provider_image(payload, "gemini_web")
-        return image, model, metadata
-    try:
-        message = payload["choices"][0]["message"]
-        content_text = message.get("content") or ""
-        if isinstance(content_text, list):
-            parts = []
-            for part in content_text:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    parts.append(str(part.get("text") or ""))
-                elif isinstance(part, dict) and part.get("type") == "image_url":
-                    url = ((part.get("image_url") or {}).get("url") or "")
-                    if url.startswith("data:") and "," in url:
-                        encoded = url.split(",", 1)[1]
-                        return base64.b64decode(encoded), model, {}
-                    if url.startswith("http"):
-                        if progress:
-                            progress({"provider": "gemini_web", "phase": "downloading"})
-                        return _download_image_bytes(url), model, {}
-                elif isinstance(part, str):
-                    parts.append(part)
-            content_text = "\n".join(parts)
-        if isinstance(content_text, str) and content_text.startswith("data:") and "," in content_text:
-            encoded = content_text.split(",", 1)[1]
-            return base64.b64decode(encoded), model, {}
-        image_url = _extract_image_url(str(content_text))
-        if not image_url:
-            raise RuntimeError("gemini_web chat response did not include a generated image")
-        if progress:
-            progress({"provider": "gemini_web", "phase": "downloading"})
-        return _download_image_bytes(image_url), model, {}
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise RuntimeError("gemini_web returned an invalid multimodal image response") from exc
-
-
 def _request_provider_image(
     provider: str,
     prompt: str,
@@ -402,9 +379,7 @@ def _request_provider_image(
         model = settings.chatgpt_web_model
         headers = {"Authorization": f"Bearer {settings.chatgpt_web_api_key}"}
     elif provider == "gemini_web":
-        if references:
-            return _request_gemini_with_references(prompt, aspect_ratio, references, progress)
-        base_url = settings.gemini_web_base_url
+        base_url = settings.gemini_web_image_base_url
         model = settings.gemini_web_image_model
         headers = _gemini_headers()
     else:
@@ -412,23 +387,27 @@ def _request_provider_image(
     request_id = str(uuid.uuid4())
     request_headers = {**headers, "X-Request-ID": request_id}
     payload: dict = {"model": model, "prompt": prompt, "size": size, "n": 1, "response_format": "b64_json"}
-    if references and provider == "chatgpt_web":
+    if references and provider in IMAGE_REFERENCE_PROVIDERS:
         payload["reference_images"] = _reference_payload(references)
-    if conversation_url and provider == "chatgpt_web":
-        payload["conversation_url"] = conversation_url
-    if provider == "chatgpt_web":
-        # The browser bridge can legitimately take up to 300 seconds to finish
-        # rendering and extracting an image. Do not time out its HTTP request
-        # earlier and silently fall through to another provider while it is still
-        # generating the requested frame.
-        provider_timeout = max(settings.image_provider_timeout_seconds, 330)
+    if conversation_url:
+        c_url = str(conversation_url).strip()
+        if provider == "gemini_web" and "gemini.google.com" in c_url:
+            payload["conversation_url"] = c_url
+        elif provider == "chatgpt_web" and ("chatgpt.com" in c_url or "openai.com" in c_url):
+            payload["conversation_url"] = c_url
+
+    # The browser bridges (ChatGPT and Gemini) can take up to 300 seconds to finish
+    # attaching files, rendering, and extracting an image. Poll status during generation.
+    provider_timeout = max(settings.image_provider_timeout_seconds, 330)
+    response = None
+    for attempt in range(3):
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 httpx.post,
                 f"{base_url.rstrip('/')}/images/generations",
                 headers=request_headers,
                 json=payload,
-                timeout=httpx.Timeout(provider_timeout, connect=3),
+                timeout=httpx.Timeout(provider_timeout, connect=5),
             )
             last_phase = None
             while not future.done():
@@ -439,21 +418,35 @@ def _request_provider_image(
                         timeout=2,
                     )
                     operation = status_response.json() if status_response.is_success else {}
+                    if "conversation_url" in operation:
+                        operation["conversation_url"] = normalize_conversation_url(operation["conversation_url"])
                     if operation.get("phase") != last_phase and progress:
                         progress({"provider": provider, **operation})
                     last_phase = operation.get("phase", last_phase)
                 except (httpx.HTTPError, ValueError):
                     pass
                 time.sleep(0.75)
-            response = future.result()
-    else:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/images/generations",
-            headers=request_headers,
-            json=payload,
-            timeout=httpx.Timeout(settings.image_provider_timeout_seconds, connect=3),
-        )
-    response.raise_for_status()
+            try:
+                response = future.result()
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                err_text = ""
+                try:
+                    err_text = exc.response.text.lower()
+                except Exception:
+                    pass
+                if attempt < 2 and (
+                    (exc.response.status_code == 500 and "client not initialized" in err_text)
+                    or (provider == "gemini_web" and exc.response.status_code in (401, 403, 500) and attempt == 0 and _auto_sync_gemini_cookies())
+                ):
+                    logger.warning("%s error %s; retrying attempt %d/3...", provider, exc, attempt + 2)
+                    time.sleep(2)
+                    continue
+                raise
+
+    if response is None:
+        raise RuntimeError(f"{provider} failed to return a response")
     image, metadata = _decode_provider_image(response.json(), provider)
     return image, model, metadata
 
@@ -526,14 +519,15 @@ def generate_storyboard_image(
             (settings.media_dir / filename).write_bytes(image)
             return filename, mime_type, provider
         except httpx.TimeoutException:
-            failure = f"{label}: timed out after {settings.image_provider_timeout_seconds}s"
+            failure = f"{label}: timed out after {max(settings.image_provider_timeout_seconds, 330)}s"
             failures.append(failure)
             if progress:
                 progress({"provider": provider, "phase": "failed", "error": failure})
         except httpx.HTTPStatusError as exc:
             detail = ""
             try:
-                detail = str(exc.response.json().get("detail") or "")
+                body = exc.response.json()
+                detail = str(body.get("detail") or (body.get("error") if isinstance(body.get("error"), str) else (body.get("error") or {}).get("message")) or "")
             except (ValueError, AttributeError):
                 pass
             if exc.response.status_code == 422 and "content_policy_refusal" in detail:
@@ -545,7 +539,7 @@ def generate_storyboard_image(
                 if progress:
                     progress({"provider": provider, "phase": "failed", "error": failure, "failure_category": "content_policy_refusal"})
                 raise ImagePolicyError(failure) from exc
-            failure = f"{label}: HTTP {exc.response.status_code}"
+            failure = f"{label}: HTTP {exc.response.status_code} ({detail})" if detail else f"{label}: HTTP {exc.response.status_code}"
             failures.append(failure)
             if progress:
                 progress({"provider": provider, "phase": "failed", "error": failure})
@@ -554,38 +548,6 @@ def generate_storyboard_image(
             failures.append(failure)
             if progress:
                 progress({"provider": provider, "phase": "failed", "error": failure})
-    if references and not is_followup_edit:
-        for provider in providers:
-            status = statuses.get(provider, {})
-            if not status.get("available"):
-                continue
-            label = status.get("label", provider)
-            logger.warning(
-                "All reference-based attempts failed; retrying %s without binary attachments (conversation_url=%s).",
-                label,
-                bool(conversation_url),
-            )
-            if progress:
-                progress({"provider": provider, "phase": "submitting", "message": f"{label}: Retrying without file attachments..."})
-            try:
-                retry_kwargs = {"conversation_url": conversation_url} if conversation_url else {}
-                image, _model, metadata = _request_provider_image(
-                    provider,
-                    base_prompt,
-                    aspect_ratio,
-                    progress,
-                    references=[],
-                    **retry_kwargs,
-                )
-                if progress:
-                    progress({"provider": provider, "phase": "saving", **metadata})
-                extension, mime_type = _image_format(image)
-                filename = f"generated-{uuid.uuid4()}{extension}"
-                (settings.media_dir / filename).write_bytes(image)
-                return filename, mime_type, provider
-            except Exception as retry_exc:
-                logger.warning("Retry without references on %s failed: %s", label, retry_exc)
-                break
     raise RuntimeError("Image generation failed. " + "; ".join(failures) + ". Refresh bridge sessions or upload an image manually.")
 
 
@@ -598,7 +560,7 @@ def generate_storyboard_chatgpt_dual(
     conversation_url: str | None = None,
 ) -> tuple[tuple[str, str], tuple[str, str], str]:
     references = list(references or [])
-    cleaned = _ASPECT_INSTRUCTION.sub("", prompt)
+    cleaned = _ASPECT_INSTRUCTION.sub(" ", prompt)
     cleaned = re.sub(r"\s+([,.;])", r"\1", cleaned)
     cleaned = re.sub(r"[,;]\s*[,;]", ",", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.;")
@@ -663,6 +625,8 @@ def generate_storyboard_chatgpt_dual(
                     timeout=2,
                 )
                 operation = status_response.json() if status_response.is_success else {}
+                if "conversation_url" in operation:
+                    operation["conversation_url"] = normalize_conversation_url(operation["conversation_url"])
                 if operation.get("phase") != last_phase and progress:
                     progress({"provider": provider, **operation})
                 last_phase = operation.get("phase", last_phase)
@@ -674,6 +638,8 @@ def generate_storyboard_chatgpt_dual(
     response.raise_for_status()
     resp_json = response.json()
     metadata = resp_json.get("provider_metadata") or {}
+    if "conversation_url" in metadata:
+        metadata["conversation_url"] = normalize_conversation_url(metadata["conversation_url"])
     data_items = resp_json.get("data") or []
     if not data_items:
         raise RuntimeError("ChatGPT Web did not return any image data")

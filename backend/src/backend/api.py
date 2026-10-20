@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 import html as html_lib
 import json
+import subprocess
+import uuid
 from contextlib import asynccontextmanager
 from copy import deepcopy
 
@@ -14,6 +16,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from .cast import is_usable_reference_image, sync_project_cast
 from .continuity import get_or_create_shot_snapshot
+from .conversations import delete_project_conversation
 from .database import Base, engine, get_db
 from .final_cut import invalidate_final_cut
 from .media import (
@@ -32,12 +35,24 @@ from .video import (
     get_active_flowkit_preset,
     set_flowkit_model_preset,
     video_provider_status,
+    video_provider_statuses,
+    set_video_provider,
 )
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
-from .models import Character, CharacterReference, Compilation, DeepReviewRun, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, Suggestion, TimelineAsset, PublishRecord, now
+from .models import Character, CharacterReference, Compilation, DeepReviewRun, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, StemSeparation, LibraryAudio, Suggestion, TimelineAsset, PublishRecord, ReleaseKit, now
+from .stems import separator_statuses, set_stem_separator
 from .schemas import (
+    LibraryAudioCreate,
+    LibraryAudioRead,
+    StemSeparationCreate,
+    StemSeparationRead,
+    StemSeparationStarted,
+    StemSeparatorStatus,
+    StemSeparatorUpdate,
+    VideoProviderSelect,
+    TimelineAssetRead,
     CompilationCreate,
     CompilationRead,
     CompilationUpdate,
@@ -58,6 +73,7 @@ from .schemas import (
     FlowModelUpdateRequest,
     JobRead,
     JobQueueItemRead,
+    ImageProviderOrderUpdate,
     ImageProviderStatus,
     ProjectTimelineRead,
     ProjectVariantExportRead,
@@ -68,6 +84,12 @@ from .schemas import (
     ProjectSummary,
     ProviderStatus,
     PublishCreate,
+    ReleaseKitCoverCreate,
+    ReleaseKitFrameCreate,
+    ReleaseKitPromoteFrame,
+    ReleaseKitSuggest,
+    ReleaseKitSuggestHooks,
+    ReleaseKitUpdate,
     PublishPlanRead,
     PublishRecordRead,
     SceneRead,
@@ -113,8 +135,12 @@ from .tasks import (
     enqueue_shot_clip,
     enqueue_shot_lipsync,
     enqueue_shot_image,
+    enqueue_stem_separation,
     enqueue_publish_project,
+    enqueue_release_copy,
+    release_cover_worker,
 )
+from . import release_kit
 from .queue_admin import job_matches_queue
 from .system_guard import require_local_system
 from .timeline import append_missing_shots, ensure_compilation_timeline, ensure_timeline, initial_document, latest_shots, promote_available_clips, rebuild_compilation_timeline, timeline_duration, validate_timeline
@@ -298,6 +324,20 @@ def set_flow_video_model(payload: FlowModelUpdateRequest) -> ProviderStatus:
     return video_provider()
 
 
+@app.get("/api/video-providers")
+def get_video_providers() -> list[dict]:
+    return video_provider_statuses()
+
+
+@app.post("/api/video-providers/selected", response_model=ProviderStatus)
+def select_video_provider(payload: VideoProviderSelect) -> ProviderStatus:
+    try:
+        set_video_provider(payload.provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return video_provider()
+
+
 
 @app.post("/api/video-provider/reset-flow-session")
 def reset_flow_session(
@@ -339,6 +379,153 @@ def audio_provider() -> ProviderStatus:
 @app.get("/api/image-providers", response_model=list[ImageProviderStatus])
 def image_providers() -> list[dict]:
     return image_provider_statuses()
+
+
+@app.post("/api/image-providers/order", response_model=list[ImageProviderStatus])
+def set_image_provider_order(payload: ImageProviderOrderUpdate) -> list[dict]:
+    enabled = settings.enabled_image_providers
+    unknown = [item for item in payload.order if item not in enabled]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Image provider not enabled: {', '.join(unknown)}")
+    order = list(dict.fromkeys(payload.order))
+    order += [item for item in enabled if item not in order]
+    settings.image_provider_order_path.write_text(json.dumps({"order": order}, indent=2))
+    return image_provider_statuses()
+
+
+@app.get("/api/stem-separators", response_model=list[StemSeparatorStatus])
+def stem_separators() -> list[dict]:
+    return separator_statuses()
+
+
+@app.post("/api/stem-separators/selected", response_model=list[StemSeparatorStatus])
+def select_stem_separator(payload: StemSeparatorUpdate) -> list[dict]:
+    set_stem_separator(payload.provider)
+    return separator_statuses()
+
+
+def _stem_separation_read(db: Session, separation: StemSeparation) -> dict:
+    data = StemSeparationRead.model_validate(separation).model_dump()
+    for key in ("music", "voice"):
+        asset_id = getattr(separation, f"{key}_asset_id")
+        asset = db.get(TimelineAsset, asset_id) if asset_id else None
+        data[f"{key}_asset"] = TimelineAssetRead.model_validate(asset).model_dump() if asset else None
+    return data
+
+
+@app.post("/api/projects/{project_id}/stem-separations", response_model=StemSeparationStarted, status_code=201)
+def start_stem_separation(project_id: str, payload: StemSeparationCreate, db: Session = Depends(get_db)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source = payload.source
+    if source.kind == "asset":
+        asset = db.get(TimelineAsset, source.ref_id)
+        if not asset or asset.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Timeline asset not found")
+        if not (asset.mime_type or "").lower().startswith(("audio/", "video/")):
+            raise HTTPException(status_code=422, detail="Only audio or video clips can be separated")
+    elif source.kind in {"shot_clip", "shot_audio"}:
+        shot = db.get(Shot, source.ref_id)
+        if not shot or shot.scene.script_version.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Shot not found")
+    else:
+        raise HTTPException(status_code=422, detail="Only audio or video clips can be separated")
+    provider = payload.provider or settings.stem_separator
+    job = Job(project_id=project.id, episode_id=payload.episode_id, kind="stem_separation", provider=provider, message="Queued for music separation")
+    db.add(job)
+    db.flush()
+    separation = StemSeparation(
+        project_id=project.id,
+        job_id=job.id,
+        provider=provider,
+        source_kind=source.kind,
+        source_ref_id=source.ref_id,
+        label=(payload.label or "Clip").strip() or "Clip",
+        source_in_ms=payload.source_in_ms,
+        duration_ms=payload.duration_ms,
+    )
+    db.add(separation)
+    db.commit()
+    task = enqueue_stem_separation(separation.id)
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return {"separation": _stem_separation_read(db, separation), "job": job}
+
+
+@app.get("/api/stem-separations/{separation_id}", response_model=StemSeparationRead)
+def get_stem_separation(separation_id: str, db: Session = Depends(get_db)) -> dict:
+    separation = db.get(StemSeparation, separation_id)
+    if not separation:
+        raise HTTPException(status_code=404, detail="Separation not found")
+    return _stem_separation_read(db, separation)
+
+
+@app.get("/api/library-audio", response_model=list[LibraryAudioRead])
+def list_library_audio(db: Session = Depends(get_db)) -> list[LibraryAudio]:
+    return list(db.scalars(select(LibraryAudio).order_by(LibraryAudio.created_at.desc())))
+
+
+@app.post("/api/projects/{project_id}/library-audio", response_model=LibraryAudioRead, status_code=201)
+def save_library_audio(project_id: str, payload: LibraryAudioCreate, db: Session = Depends(get_db)) -> LibraryAudio:
+    from .final_cut import probe_duration_ms
+    from .timeline_render import _has_audio, resolve_audio_source
+
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    source = payload.source
+    if source.kind == "asset":
+        asset = db.get(TimelineAsset, source.ref_id)
+        if not asset or asset.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Timeline asset not found")
+    elif source.kind in {"shot_clip", "shot_audio"}:
+        shot = db.get(Shot, source.ref_id)
+        if not shot or shot.scene.script_version.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Shot not found")
+    else:
+        raise HTTPException(status_code=422, detail="Only audio or video clips can be saved")
+    try:
+        path = resolve_audio_source(source, project, db, project.aspect_ratio)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not _has_audio(path):
+        raise HTTPException(status_code=422, detail="This clip has no sound to save")
+    filename = f"library-{uuid.uuid4()}.m4a"
+    destination = settings.media_dir / filename
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-ss", f"{payload.source_in_ms / 1000:.3f}", "-t", f"{payload.duration_ms / 1000:.3f}",
+            "-i", str(path), "-vn", "-ac", "2", "-ar", "48000", "-c:a", "aac", "-b:a", "256k",
+            str(destination),
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not destination.is_file():
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Could not save the audio: {result.stderr.strip()[-300:]}")
+    item = LibraryAudio(
+        label=payload.label.strip(),
+        filename=filename,
+        mime_type="audio/mp4",
+        duration_ms=probe_duration_ms(destination) or payload.duration_ms,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.delete("/api/library-audio/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_library_audio(item_id: str, db: Session = Depends(get_db)) -> None:
+    item = db.get(LibraryAudio, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Library audio not found")
+    (settings.media_dir / item.filename).unlink(missing_ok=True)
+    db.delete(item)
+    db.commit()
 
 
 @app.post("/api/demo-project", response_model=ProjectSummary, status_code=201)
@@ -1540,6 +1727,7 @@ def queue_shot_image(
             db, project, shot, target_aspect,
             refresh=payload.refresh_continuity,
             character_ids=requested_ids,
+            require_cast_references=True,
         )
     except RuntimeError as exc:
         message = str(exc)
@@ -2834,6 +3022,11 @@ async def upload_shot_clip(
     return shot
 
 
+@app.delete("/api/projects/{project_id}/conversation", status_code=204)
+def delete_linked_conversation(project_id: str, conversation_url: str = Body(embed=True), db: Session = Depends(get_db)) -> None:
+    delete_project_conversation(db, project_id, conversation_url)
+
+
 @app.delete("/api/shots/{shot_id}/clip", status_code=status.HTTP_204_NO_CONTENT)
 def delete_shot_clip(shot_id: str, aspect_ratio: str | None = None, db: Session = Depends(get_db)) -> None:
     shot = db.get(Shot, shot_id)
@@ -2984,10 +3177,11 @@ def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_
     scene = db.get(Scene, scene_id)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
-    scene.set_notes = payload.set_notes
-    scene.lighting_notes = payload.lighting_notes
-    scene.wardrobe_notes = payload.wardrobe_notes
-    scene.props_notes = payload.props_notes
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(scene, field, value.strip())
+    for shot in scene.shots:
+        shot.continuity_snapshot = None
     db.commit()
     db.refresh(scene)
     return scene
@@ -3589,13 +3783,14 @@ def project_publish_plan(
     project_id: str,
     variant: str = "landscape",
     episode_id: str | None = None,
+    compilation_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     try:
-        return build_publish_plan(project, variant, db, episode_id=episode_id)
+        return build_publish_plan(project, variant, db, episode_id=episode_id, compilation_id=compilation_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -3616,17 +3811,32 @@ def queue_publish(
     project_id: str,
     payload: PublishCreate,
     episode_id: str | None = None,
+    compilation_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> Job:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     data = payload.model_dump(mode="json")
+    if compilation_id:
+        compilation = db.get(Compilation, compilation_id)
+        if not compilation or compilation.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Compilation not found")
+        data["compilation_id"] = compilation_id
+        episode_id = None
     if episode_id:
         data["episode_id"] = episode_id
+    if payload.cover_id:
+        kit = db.get(ReleaseKit, payload.release_kit_id) if payload.release_kit_id else None
+        if not kit or kit.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Release kit not found")
+        try:
+            data["cover_filename"] = release_kit.thumbnail_for_upload(kit, payload.cover_id).name
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         validate_publish_request(data)
-        plan = build_publish_plan(project, payload.variant, db, episode_id=episode_id)
+        plan = build_publish_plan(project, payload.variant, db, episode_id=episode_id, compilation_id=compilation_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     available_ids = {item["id"] for group in ("final", "scenes", "shots") for item in plan[group] if item.get("ready")}
@@ -3639,6 +3849,7 @@ def queue_publish(
     job = Job(
         project_id=project.id,
         episode_id=episode_id,
+        compilation_id=compilation_id,
         kind="publish",
         message="Queued publish",
         attempts=[data],
@@ -3658,7 +3869,12 @@ def queue_publish(
         selected_asset_ids=payload.selected_asset_ids,
         scheduled_at=payload.scheduled_at,
         made_for_kids=payload.made_for_kids,
-        options={**payload.platform_options, "schedule_interval_hours": payload.schedule_interval_hours},
+        options={
+            **payload.platform_options,
+            "schedule_interval_hours": payload.schedule_interval_hours,
+            **({"release_kit_id": payload.release_kit_id, "cover_id": payload.cover_id} if payload.cover_id else {}),
+            **({"compilation_id": compilation_id} if compilation_id else {}),
+        },
     )
     db.add(record)
     db.flush()
@@ -3669,6 +3885,213 @@ def queue_publish(
     db.commit()
     db.refresh(job)
     return job
+
+
+def _release_kit_or_404(db: Session, kit_id: str) -> ReleaseKit:
+    kit = db.get(ReleaseKit, kit_id)
+    if not kit:
+        raise HTTPException(status_code=404, detail="Release kit not found")
+    return kit
+
+
+def _release_kit_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get("/api/projects/{project_id}/release-kit")
+def get_release_kit(
+    project_id: str,
+    variant: str = "landscape",
+    episode_id: str | None = None,
+    compilation_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        kit = release_kit.get_or_create_kit(db, project, variant, episode_id, compilation_id)
+    except (LookupError, ValueError) as exc:
+        raise _release_kit_error(exc) from exc
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.get("/api/projects/{project_id}/release-kits")
+def list_release_kits(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    if not db.get(Project, project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    kits = db.scalars(
+        select(ReleaseKit).where(ReleaseKit.project_id == project_id).order_by(ReleaseKit.updated_at.desc())
+    ).all()
+    return [release_kit.serialize_kit(db, kit) for kit in kits]
+
+
+@app.patch("/api/release-kits/{kit_id}")
+def update_release_kit(kit_id: str, payload: ReleaseKitUpdate, db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    try:
+        release_kit.update_kit(kit, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.post("/api/release-kits/{kit_id}/frames", status_code=status.HTTP_201_CREATED)
+def add_release_kit_frame(kit_id: str, payload: ReleaseKitFrameCreate, db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    project = db.get(Project, kit.project_id)
+    try:
+        release_kit.capture_frame(db, project, kit, payload.source, payload.source_ms, payload.timeline_ms, payload.label)
+    except (LookupError, ValueError, RuntimeError) as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.delete("/api/release-kits/{kit_id}/frames/{frame_id}")
+def delete_release_kit_frame(kit_id: str, frame_id: str, db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    try:
+        release_kit.delete_frame(kit, frame_id)
+    except LookupError as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.post("/api/release-kits/{kit_id}/frames/auto-import")
+def auto_import_release_kit_frames(kit_id: str, db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    try:
+        release_kit.auto_import_shot_frames(db, kit)
+    except Exception as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.post("/api/release-kits/{kit_id}/frames/{frame_id}/promote")
+def promote_release_kit_frame(
+    kit_id: str,
+    frame_id: str,
+    payload: ReleaseKitPromoteFrame | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    headline = payload.headline if payload else None
+    style = payload.style if payload else "punch"
+    try:
+        release_kit.promote_frame_to_cover(kit, frame_id, headline=headline, style=style)
+    except (LookupError, ValueError, RuntimeError) as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.post("/api/release-kits/{kit_id}/suggest-hooks")
+def suggest_release_kit_hooks(
+    kit_id: str,
+    payload: ReleaseKitSuggestHooks,
+    db: Session = Depends(get_db),
+) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    context = release_kit.build_copy_context(db, kit)
+    prompt_text = (payload.prompt or kit.brief or "").strip()
+    hooks = release_kit.suggest_thumbnail_hooks(prompt_text, context)
+    return {"hooks": hooks}
+
+
+@app.post("/api/release-kits/{kit_id}/suggest", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+def suggest_release_copy(kit_id: str, payload: ReleaseKitSuggest, db: Session = Depends(get_db)) -> Job:
+    kit = _release_kit_or_404(db, kit_id)
+    project = db.get(Project, kit.project_id)
+    provider = release_kit.resolve_copy_provider(db, project, payload.provider)
+    ensure_project_job_capacity(db, project.id, "release_copy")
+    job = Job(
+        project_id=project.id,
+        episode_id=kit.episode_id,
+        compilation_id=kit.compilation_id,
+        kind="release_copy",
+        message="Queued title & description suggestions",
+        provider=provider,
+        attempts=[{"release_kit_id": kit.id, "provider": provider}],
+    )
+    db.add(job)
+    db.commit()
+    task = enqueue_release_copy(provider, kit.id, job.id)
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.post("/api/release-kits/{kit_id}/covers", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+def generate_release_cover(kit_id: str, payload: ReleaseKitCoverCreate, db: Session = Depends(get_db)) -> Job:
+    kit = _release_kit_or_404(db, kit_id)
+    ensure_project_job_capacity(db, kit.project_id, "release_cover")
+    try:
+        cover = release_kit.start_cover(kit, payload.idea_id, payload.headline, payload.prompt, payload.provider)
+    except (LookupError, ValueError) as exc:
+        raise _release_kit_error(exc) from exc
+    job = Job(
+        project_id=kit.project_id,
+        episode_id=kit.episode_id,
+        compilation_id=kit.compilation_id,
+        kind="release_cover",
+        message="Queued cover",
+        provider=payload.provider,
+        attempts=[{"release_kit_id": kit.id, "cover_id": cover["id"]}],
+    )
+    db.add(job)
+    db.flush()
+    kit.covers = [{**item, "job_id": job.id} if item["id"] == cover["id"] else item for item in kit.covers]
+    db.commit()
+    task = release_cover_worker(kit.id, job.id, cover["id"])
+    job.task_id = task.id
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.post("/api/release-kits/{kit_id}/covers/upload", status_code=status.HTTP_201_CREATED)
+async def upload_release_cover(kit_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    data = await file.read(20 * 1024 * 1024 + 1)
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Cover images must be under 20 MB")
+    try:
+        release_kit.import_cover(kit, data, file.filename or "")
+    except ValueError as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
+
+
+@app.delete("/api/release-kits/{kit_id}/covers/{cover_id}")
+def delete_release_cover(kit_id: str, cover_id: str, db: Session = Depends(get_db)) -> dict:
+    kit = _release_kit_or_404(db, kit_id)
+    cover = next((item for item in kit.covers or [] if item["id"] == cover_id), None)
+    if cover and cover.get("status") == "generating" and cover.get("job_id"):
+        job = db.get(Job, cover["job_id"])
+        if job and job.status in {"queued", "running"}:
+            revoke_job_task(job)
+            mark_job_cancelled(job)
+    try:
+        release_kit.delete_cover(kit, cover_id)
+    except LookupError as exc:
+        raise _release_kit_error(exc) from exc
+    db.commit()
+    db.refresh(kit)
+    return release_kit.serialize_kit(db, kit)
 
 
 @app.delete(
@@ -3702,6 +4125,31 @@ def delete_final_cut(
 @app.get("/api/timeline/luts")
 def get_timeline_luts() -> list[dict]:
     return list_lut_presets()
+
+
+@app.get("/api/timeline/luts/{lut_id}/cube")
+def get_timeline_lut_cube(lut_id: str, strength: float = 1.0):
+    """Serve a strength-baked .cube for WebGL preview (same files FFmpeg uses)."""
+    from fastapi.responses import FileResponse
+
+    from .luts import get_lut_cube_path
+
+    path = get_lut_cube_path(lut_id, strength)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="LUT not found")
+    return FileResponse(
+        path,
+        media_type="text/plain; charset=utf-8",
+        filename=path.name,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/api/timeline/layouts")
+def get_timeline_layouts() -> dict:
+    from .layout_templates import public_catalog
+
+    return public_catalog()
 
 
 @app.get("/api/projects/{project_id}/timeline", response_model=ProjectTimelineRead)

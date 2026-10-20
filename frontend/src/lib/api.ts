@@ -188,80 +188,54 @@ export function videoColorBoostFilter(strength?: number | null): string {
   return `contrast(${contrast}) saturate(${saturate}) brightness(${brightness})`
 }
 
+/** Identity baselines for CSS filter strength blending (s=0 → no look). */
+const LUT_CSS_IDENTITY: Record<string, number> = {
+  saturate: 1,
+  contrast: 1,
+  brightness: 1,
+  sepia: 0,
+  grayscale: 0,
+  invert: 0,
+  'hue-rotate': 0,
+  opacity: 1,
+}
+
+let lutCssById: Record<string, string> = {}
+
+/** Scale a full-strength CSS filter string toward identity by `strength` (0–1). */
+export function scaleLutCssFilter(cssFilter: string, strength: number): string {
+  const s = Math.max(0, Math.min(1, strength))
+  if (s < 0.001) return ''
+  if (s >= 0.999) return cssFilter.trim()
+  return cssFilter
+    .trim()
+    .replace(/([a-z-]+)\(([-+]?[\d.]+)(deg|%)?\)/gi, (_m, name: string, raw: string, unit = '') => {
+      const key = String(name).toLowerCase()
+      const target = Number(raw)
+      if (!Number.isFinite(target)) return `${name}(${raw}${unit})`
+      const identity = LUT_CSS_IDENTITY[key] ?? 0
+      const out = identity + (target - identity) * s
+      const decimals = unit === 'deg' ? 1 : 3
+      return `${name}(${out.toFixed(decimals)}${unit})`
+    })
+}
+
+/** Keep preview CSS in sync when `/api/timeline/luts` loads (or falls back to defaults). */
+export function registerLutPresets(presets: LUTPreset[]): void {
+  const next: Record<string, string> = {}
+  for (const preset of presets) {
+    if (preset?.id && preset.css_filter) next[preset.id] = preset.css_filter
+  }
+  lutCssById = next
+}
+
 export function lutCssFilter(lutId?: string | null, strength?: number | null): string {
   if (!lutId || lutId === 'none') return ''
   const s = Math.max(0, Math.min(1, typeof strength === 'number' ? strength : 1))
   if (s < 0.001) return ''
-
-  switch (lutId) {
-    case 'vibrant_gaming': {
-      const sat = (1 + 0.4 * s).toFixed(3)
-      const con = (1 + 0.15 * s).toFixed(3)
-      const bri = (1 + 0.02 * s).toFixed(3)
-      return `saturate(${sat}) contrast(${con}) brightness(${bri})`
-    }
-    case 'warzone_crisp': {
-      const con = (1 + 0.22 * s).toFixed(3)
-      const sat = (1 + 0.2 * s).toFixed(3)
-      const bri = (1 - 0.02 * s).toFixed(3)
-      return `contrast(${con}) saturate(${sat}) brightness(${bri})`
-    }
-    case 'teal_orange': {
-      const con = (1 + 0.18 * s).toFixed(3)
-      const sat = (1 + 0.25 * s).toFixed(3)
-      const sep = (0.2 * s).toFixed(3)
-      const hue = (-15 * s).toFixed(1)
-      return `contrast(${con}) saturate(${sat}) sepia(${sep}) hue-rotate(${hue}deg)`
-    }
-    case 'cyberpunk_neon': {
-      const con = (1 + 0.25 * s).toFixed(3)
-      const sat = (1 + 0.5 * s).toFixed(3)
-      const hue = (18 * s).toFixed(1)
-      return `contrast(${con}) saturate(${sat}) hue-rotate(${hue}deg)`
-    }
-    case 'warm_sunshine': {
-      const sep = (0.22 * s).toFixed(3)
-      const sat = (1 + 0.28 * s).toFixed(3)
-      const con = (1 + 0.08 * s).toFixed(3)
-      const bri = (1 + 0.03 * s).toFixed(3)
-      return `sepia(${sep}) saturate(${sat}) contrast(${con}) brightness(${bri})`
-    }
-    case 'cold_tactical': {
-      const sat = (1 - 0.25 * s).toFixed(3)
-      const con = (1 + 0.2 * s).toFixed(3)
-      const hue = (-10 * s).toFixed(1)
-      const bri = (1 - 0.03 * s).toFixed(3)
-      return `saturate(${sat}) contrast(${con}) hue-rotate(${hue}deg) brightness(${bri})`
-    }
-    case 'high_contrast_pop': {
-      const con = (1 + 0.35 * s).toFixed(3)
-      const sat = (1 + 0.2 * s).toFixed(3)
-      return `contrast(${con}) saturate(${sat})`
-    }
-    case 'sunset_glow': {
-      const sep = (0.25 * s).toFixed(3)
-      const sat = (1 + 0.35 * s).toFixed(3)
-      const hue = (-25 * s).toFixed(1)
-      const con = (1 + 0.12 * s).toFixed(3)
-      return `sepia(${sep}) saturate(${sat}) hue-rotate(${hue}deg) contrast(${con})`
-    }
-    case 'retro_arcade': {
-      const con = (1 + 0.2 * s).toFixed(3)
-      const sat = (1 + 0.3 * s).toFixed(3)
-      const sep = (0.15 * s).toFixed(3)
-      const hue = (10 * s).toFixed(1)
-      return `contrast(${con}) saturate(${sat}) sepia(${sep}) hue-rotate(${hue}deg)`
-    }
-    case 'night_vision_stealth': {
-      const hue = (65 * s).toFixed(1)
-      const sat = (1 + 0.6 * s).toFixed(3)
-      const con = (1 + 0.25 * s).toFixed(3)
-      const bri = (1 - 0.05 * s).toFixed(3)
-      return `hue-rotate(${hue}deg) saturate(${sat}) contrast(${con}) brightness(${bri})`
-    }
-    default:
-      return ''
-  }
+  const css = lutCssById[lutId] || DEFAULT_LUT_PRESETS.find((p) => p.id === lutId)?.css_filter
+  if (!css) return ''
+  return scaleLutCssFilter(css, s)
 }
 
 export interface ShotContinuityFrame {
@@ -621,6 +595,99 @@ export interface PublishCreate {
   schedule_interval_hours?: number | null
   made_for_kids: boolean
   platform_options?: Record<string, Record<string, unknown>>
+  release_kit_id?: string | null
+  cover_id?: string | null
+}
+
+export type ReleaseCopyProvider = 'chatgpt_web' | 'gemini_web' | 'ollama' | 'compatible' | 'mock'
+export type ReleaseCoverProvider = 'chatgpt_web' | 'gemini_web'
+
+export interface ReleaseKitFrame {
+  id: string
+  filename: string
+  url: string
+  timeline_ms: number
+  source_ms: number
+  label: string
+  created_at: string
+}
+
+export interface ReleaseKitTitleOption {
+  id: string
+  text: string
+  angle: string
+  custom: boolean
+}
+
+export interface ReleaseKitCoverIdea {
+  id: string
+  concept: string
+  headline: string
+  prompt: string
+}
+
+export interface ReleaseKitCover {
+  id: string
+  idea_id: string | null
+  concept: string
+  headline: string
+  prompt: string
+  provider: string | null
+  status: 'generating' | 'ready' | 'failed'
+  filename: string | null
+  url: string | null
+  error: string | null
+  job_id: string | null
+  created_at: string
+}
+
+export interface ReleaseKit {
+  id: string
+  project_id: string
+  episode_id: string | null
+  compilation_id: string | null
+  variant: OutputVariant
+  scope_label: string
+  brief: string
+  frames: ReleaseKitFrame[]
+  title_options: ReleaseKitTitleOption[]
+  selected_title_id: string | null
+  description: string
+  tags: string[]
+  cover_ideas: ReleaseKitCoverIdea[]
+  covers: ReleaseKitCover[]
+  selected_cover_id: string | null
+  copy_provider: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A visual clip on the primary track, as the release kit scrubber needs it. */
+export interface ReleaseFrameSegment {
+  id: string
+  start_ms: number
+  duration_ms: number
+  source: TimelineSource
+  source_in_ms: number
+  label: string
+  url: string
+  mime_type: string
+}
+
+export interface ReleaseKitScope {
+  variant: OutputVariant
+  episodeId?: string | null
+  compilationId?: string | null
+}
+
+export interface ReleaseKitUpdate {
+  brief?: string
+  title_options?: Array<Partial<ReleaseKitTitleOption> & { text: string }>
+  selected_title_id?: string | null
+  description?: string
+  tags?: string[]
+  cover_ideas?: Array<Partial<ReleaseKitCoverIdea>>
+  selected_cover_id?: string | null
 }
 
 export interface ProjectVariantExport extends ProjectFinalCut {
@@ -650,7 +717,15 @@ export interface TimelineGeometry {
   offset_y?: number
   lut?: string
   lut_strength?: number
+  frame_style?: FrameStyle
+  /** Corner radius as a fraction of the output frame width (0..0.25). */
+  frame_radius?: number
+  /** Border thickness as a fraction of the output frame width (0..0.04). */
+  frame_width?: number
+  frame_color?: string
 }
+
+export type FrameStyle = 'none' | 'solid' | 'double' | 'dashed' | 'glow' | 'neon'
 
 export interface LUTPreset {
   id: string
@@ -729,9 +804,81 @@ export const DEFAULT_LUT_PRESETS: LUTPreset[] = [
     label: 'Night Vision / Stealth',
     description: 'Tactical phosphor green monochrome with high silhouette clarity',
     category: 'Gaming',
-    css_filter: 'hue-rotate(65deg) saturate(1.6) contrast(1.25) brightness(0.95)',
+    css_filter: 'grayscale(1) brightness(0.95) contrast(1.25) sepia(1) hue-rotate(70deg) saturate(2.8)',
+  },
+  {
+    id: 'bleach_bypass',
+    label: 'Bleach Bypass',
+    description: 'Gritty action silver-retention: hard contrast, drained chroma',
+    category: 'Cinematic',
+    css_filter: 'saturate(0.55) contrast(1.35) brightness(0.98)',
+  },
+  {
+    id: 'noir_bw',
+    label: 'Noir B&W',
+    description: 'Classic high-contrast black and white with crushed shadows',
+    category: 'Cinematic',
+    css_filter: 'grayscale(1) contrast(1.35) brightness(0.98)',
+  },
+  {
+    id: 'vhs_tape',
+    label: 'VHS Tape',
+    description: 'Lifted blacks, soft contrast, and nostalgic magenta/cyan drift',
+    category: 'Creative',
+    css_filter: 'contrast(0.92) saturate(1.12) sepia(0.18) hue-rotate(-8deg) brightness(1.04)',
+  },
+  {
+    id: 'soft_pastel',
+    label: 'Soft Pastel',
+    description: 'Dreamy lifted shadows and gentle desaturated pastel wash',
+    category: 'Atmospheric',
+    css_filter: 'saturate(0.85) contrast(0.92) brightness(1.06) sepia(0.08)',
+  },
+  {
+    id: 'matrix_code',
+    label: 'Matrix Code',
+    description: 'Digital green bias with residual color — hacker / sim aesthetic',
+    category: 'Gaming',
+    css_filter: 'grayscale(0.35) sepia(0.45) hue-rotate(70deg) saturate(1.8) contrast(1.18)',
+  },
+  {
+    id: 'horror_sickly',
+    label: 'Horror Sickly',
+    description: 'Uneasy yellow-green cast with drained warmth for dread',
+    category: 'Creative',
+    css_filter: 'saturate(0.7) contrast(1.15) sepia(0.2) hue-rotate(35deg) brightness(0.96)',
+  },
+  {
+    id: 'documentary_natural',
+    label: 'Documentary Natural',
+    description: 'Slightly restrained chroma and gentle contrast for interview/doc cuts',
+    category: 'Social',
+    css_filter: 'saturate(0.88) contrast(1.06) brightness(1.01)',
+  },
+  {
+    id: 'crimson_ember',
+    label: 'Crimson Ember',
+    description: 'Deep ember reds and smoky shadows for intense trailers',
+    category: 'Atmospheric',
+    css_filter: 'sepia(0.28) saturate(1.3) hue-rotate(-18deg) contrast(1.16) brightness(0.97)',
+  },
+  {
+    id: 'ice_blue_hour',
+    label: 'Ice Blue Hour',
+    description: 'Cold twilight blues with restrained warmth — night city / snow',
+    category: 'Atmospheric',
+    css_filter: 'saturate(0.9) contrast(1.12) hue-rotate(-18deg) brightness(0.98)',
+  },
+  {
+    id: 'anime_punch',
+    label: 'Anime Punch',
+    description: 'Cel-shaded saturation and hard midtone snap for stylized games',
+    category: 'Gaming',
+    css_filter: 'saturate(1.55) contrast(1.28) brightness(1.02)',
   },
 ]
+
+registerLutPresets(DEFAULT_LUT_PRESETS)
 
 export interface TimelineSource {
   kind: 'shot_clip' | 'shot_image' | 'shot_audio' | 'asset'
@@ -748,7 +895,17 @@ export interface TimelinePrimaryItem {
   source_out_ms: number | null
   text: string
   mute_audio?: boolean
+  loop?: boolean
+  transition?: TimelineTransition | null
   variant: Partial<Record<OutputVariant, TimelineGeometry>>
+}
+
+export type TimelineTransitionKind =
+  | 'cut' | 'fade' | 'dissolve' | 'fadeblack' | 'fadewhite' | 'wipeleft' | 'wiperight' | 'slideleft' | 'slideright'
+
+export interface TimelineTransition {
+  kind: TimelineTransitionKind
+  duration_ms: number
 }
 
 export interface TimelineVideoOverlay {
@@ -757,6 +914,8 @@ export interface TimelineVideoOverlay {
   source: TimelineSource
   start_ms: number
   duration_ms: number
+  /** Editor row on its track; kept until the clip is dragged up or down. */
+  lane?: number | null
   source_in_ms: number
   opacity: number
   volume: number
@@ -769,6 +928,8 @@ export interface TimelineImageOverlay {
   source: TimelineSource
   start_ms: number
   duration_ms: number
+  /** Editor row on its track; kept until the clip is dragged up or down. */
+  lane?: number | null
   opacity: number
   variant: Partial<Record<OutputVariant, TimelineGeometry>>
 }
@@ -791,9 +952,36 @@ export interface TimelineAudioOverlay {
   source: TimelineSource
   start_ms: number
   duration_ms: number
+  /** Editor row on its track; kept until the clip is dragged up or down. */
+  lane?: number | null
   source_in_ms: number
   volume: number
   mute_audio?: boolean
+  /** Repeat from source_in_ms when the clip outlasts the file; unset means on. */
+  loop?: boolean
+}
+
+export interface TimelineCanvasLayout {
+  template: string
+  matte: 'solid' | 'blur' | 'gradient' | 'duotone'
+  matte_color: string
+  matte_color_b: string
+  top_text: string
+  bottom_text: string
+  brand_text: string
+  accent_bar: boolean
+  accent_color: string
+}
+
+export interface LayoutTemplatePreset {
+  id: string
+  label: string
+  blurb: string
+  family: 'shorts' | 'landscape'
+  video: { x: number; y: number; w: number; h: number }
+  default_matte: TimelineCanvasLayout['matte']
+  slots: Record<string, string>
+  accent_bar?: boolean
 }
 
 export interface TimelineDocument {
@@ -803,6 +991,8 @@ export interface TimelineDocument {
   image_overlays: TimelineImageOverlay[]
   text_overlays: TimelineTextOverlay[]
   audio_overlays?: TimelineAudioOverlay[]
+  layout?: TimelineCanvasLayout
+  default_transition?: TimelineTransition | null
 }
 
 export interface TimelineAsset {
@@ -811,6 +1001,61 @@ export interface TimelineAsset {
   mime_type: string
   label: string
   created_at: string
+}
+
+export type StemSeparatorId = 'lalal' | 'demucs' | 'uvr'
+
+export interface StemSeparatorStatus {
+  id: StemSeparatorId
+  label: string
+  configured: boolean
+  available: boolean
+  selected: boolean
+  detail: string
+}
+
+export interface LibraryAudio {
+  id: string
+  label: string
+  url: string
+  mime_type: string
+  duration_ms: number
+  created_at: string
+}
+
+export interface LibraryAudioRequest {
+  source: TimelineSource
+  source_in_ms: number
+  duration_ms: number
+  label: string
+}
+
+export interface StemSeparation {
+  id: string
+  project_id: string
+  job_id: string | null
+  provider: StemSeparatorId
+  source_kind: TimelineSource['kind']
+  source_ref_id: string
+  label: string
+  source_in_ms: number
+  duration_ms: number
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  music_asset_id: string | null
+  voice_asset_id: string | null
+  music_asset: TimelineAsset | null
+  voice_asset: TimelineAsset | null
+  error: string | null
+  created_at: string
+}
+
+export interface StemSeparationRequest {
+  source: TimelineSource
+  source_in_ms: number
+  duration_ms: number
+  provider?: StemSeparatorId
+  label?: string
+  episode_id?: string | null
 }
 
 export interface ProjectTimeline {
@@ -924,6 +1169,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+function sanitizeTransition(transition: TimelineTransition | null | undefined): TimelineTransition | null {
+  if (!transition) return null
+  const duration = Number.isFinite(transition.duration_ms) ? Math.round(transition.duration_ms) : 500
+  return { kind: transition.kind, duration_ms: Math.max(100, Math.min(2000, duration)) }
+}
+
 export const api = {
   scriptHistory: (versionId: string) => request<ScriptHistory>(`/api/script-versions/${versionId}/history`),
   scriptVersion: (versionId: string) => request<ScriptVersion>(`/api/script-versions/${versionId}`),
@@ -933,7 +1184,50 @@ export const api = {
     }) }),
   providers: () => request<ProviderStatus[]>('/api/providers'),
   imageProviders: () => request<ImageProviderStatus[]>('/api/image-providers'),
+  setImageProviderOrder: (order: string[]) =>
+    request<ImageProviderStatus[]>('/api/image-providers/order', {
+      method: 'POST',
+      body: JSON.stringify({ order }),
+    }),
+  stemSeparators: () => request<StemSeparatorStatus[]>('/api/stem-separators'),
+  setStemSeparator: (provider: StemSeparatorId) =>
+    request<StemSeparatorStatus[]>('/api/stem-separators/selected', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
+  startStemSeparation: (projectId: string, payload: StemSeparationRequest) =>
+    request<{ separation: StemSeparation, job: Job }>(`/api/projects/${projectId}/stem-separations`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  stemSeparation: (separationId: string) => request<StemSeparation>(`/api/stem-separations/${separationId}`),
+  libraryAudio: () => request<LibraryAudio[]>('/api/library-audio'),
+  saveLibraryAudio: (projectId: string, payload: LibraryAudioRequest) =>
+    request<LibraryAudio>(`/api/projects/${projectId}/library-audio`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteLibraryAudio: (id: string) => request<void>(`/api/library-audio/${id}`, { method: 'DELETE' }),
   videoProvider: () => request<ProviderStatus>('/api/video-provider'),
+  videoProviders: () =>
+    request<
+      Array<{
+        id: string
+        label: string
+        configured: boolean
+        available: boolean
+        detail: string
+        selected: boolean
+        model?: string
+        active_preset?: string
+        presets?: Array<{ id: string; label: string; short_label: string; credit_note: string }>
+      }>
+    >('/api/video-providers'),
+  selectVideoProvider: (provider: string) =>
+    request<ProviderStatus>('/api/video-providers/selected', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
   setFlowVideoModel: (preset: string) =>
     request<ProviderStatus>('/api/video-provider/flow-model', {
       method: 'POST',
@@ -983,7 +1277,7 @@ export const api = {
     }),
   updateScene: (
     id: string,
-    input: { set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
+    input: { location?: string; set_notes?: string; lighting_notes?: string; wardrobe_notes?: string; props_notes?: string },
   ) => request<Scene>(`/api/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   lipsyncShot: (shotId: string, aspectRatio?: AspectRatio) =>
     request<Job>(`/api/shots/${shotId}/lipsync${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, {
@@ -1018,6 +1312,8 @@ export const api = {
   updateProject: (id: string, input: ProjectUpdateInput) =>
     request<ProjectSummary>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: 'DELETE' }),
+  deleteConversation: (projectId: string, conversationUrl: string) =>
+    request<void>(`/api/projects/${projectId}/conversation`, { method: 'DELETE', body: JSON.stringify({ conversation_url: conversationUrl }) }),
   episodes: (projectId: string) => request<EpisodeSummary[]>(`/api/projects/${projectId}/episodes`),
   createEpisode: (projectId: string, input: EpisodeCreate) =>
     request<Job>(`/api/projects/${projectId}/episodes`, { method: 'POST', body: JSON.stringify(input) }),
@@ -1258,6 +1554,7 @@ export const api = {
       source_in_ms: Math.round(item.source_in_ms || 0),
       source_out_ms: item.source_out_ms != null ? Math.round(item.source_out_ms) : null,
       mute_audio: Boolean(item.mute_audio),
+      transition: sanitizeTransition(item.transition),
     })
     const sanitizeOverlay = <T extends { start_ms: number; duration_ms: number }>(overlay: T): T => ({
       ...overlay,
@@ -1288,6 +1585,7 @@ export const api = {
       image_overlays: (timeline.document.image_overlays || []).map(sanitizeOverlay),
       text_overlays: (timeline.document.text_overlays || []).map(sanitizeOverlay),
       audio_overlays: (timeline.document.audio_overlays || []).map(sanitizeAudioOverlay),
+      default_transition: sanitizeTransition(timeline.document.default_transition),
     }
     const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
     return request<ProjectTimeline>(`/api/projects/${id}/timeline${qs}`, {
@@ -1300,6 +1598,8 @@ export const api = {
     })
   },
   getTimelineLuts: () => request<LUTPreset[]>('/api/timeline/luts'),
+  getTimelineLayouts: () =>
+    request<{ shorts: LayoutTemplatePreset[]; landscape: LayoutTemplatePreset[] }>('/api/timeline/layouts'),
   resetTimeline: (id: string, episodeId?: string) => {
     const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
     return request<ProjectTimeline>(`/api/projects/${id}/timeline/reset${qs}`, { method: 'POST' })
@@ -1330,16 +1630,62 @@ export const api = {
     return request<void>(`/api/projects/${id}/timeline/assets/${assetId}${suffix}`, { method: 'DELETE' })
   },
   publishProviders: () => request<PublishProviderStatus[]>('/api/publish/providers'),
-  publishPlan: (id: string, variant: OutputVariant = 'landscape', episodeId?: string) => {
+  publishPlan: (id: string, variant: OutputVariant = 'landscape', episodeId?: string, compilationId?: string) => {
     const qs = new URLSearchParams({ variant })
-    if (episodeId) qs.set('episode_id', episodeId)
+    if (compilationId) qs.set('compilation_id', compilationId)
+    else if (episodeId) qs.set('episode_id', episodeId)
     return request<PublishPlan>(`/api/projects/${id}/publish/plan?${qs.toString()}`)
   },
   publishes: (id: string) => request<PublishRecord[]>(`/api/projects/${id}/publishes`),
-  publishProject: (id: string, input: PublishCreate, episodeId?: string) => {
-    const qs = episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+  publishProject: (id: string, input: PublishCreate, episodeId?: string, compilationId?: string) => {
+    const qs = compilationId
+      ? `?compilation_id=${encodeURIComponent(compilationId)}`
+      : episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
     return request<Job>(`/api/projects/${id}/publish${qs}`, { method: 'POST', body: JSON.stringify(input) })
   },
+  releaseKit: (projectId: string, scope: ReleaseKitScope) => {
+    const qs = new URLSearchParams({ variant: scope.variant })
+    if (scope.compilationId) qs.set('compilation_id', scope.compilationId)
+    else if (scope.episodeId) qs.set('episode_id', scope.episodeId)
+    return request<ReleaseKit>(`/api/projects/${projectId}/release-kit?${qs.toString()}`)
+  },
+  releaseKits: (projectId: string) => request<ReleaseKit[]>(`/api/projects/${projectId}/release-kits`),
+  updateReleaseKit: (kitId: string, input: ReleaseKitUpdate) =>
+    request<ReleaseKit>(`/api/release-kits/${kitId}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  addReleaseKitFrame: (
+    kitId: string,
+    input: { source: TimelineSource; source_ms: number; timeline_ms: number; label?: string },
+  ) => request<ReleaseKit>(`/api/release-kits/${kitId}/frames`, { method: 'POST', body: JSON.stringify(input) }),
+  deleteReleaseKitFrame: (kitId: string, frameId: string) =>
+    request<ReleaseKit>(`/api/release-kits/${kitId}/frames/${frameId}`, { method: 'DELETE' }),
+  suggestReleaseCopy: (kitId: string, provider?: ReleaseCopyProvider | null) =>
+    request<Job>(`/api/release-kits/${kitId}/suggest`, { method: 'POST', body: JSON.stringify({ provider: provider || null }) }),
+  generateReleaseCover: (
+    kitId: string,
+    input: { idea_id?: string | null; headline?: string | null; prompt?: string | null; provider?: ReleaseCoverProvider | null },
+  ) => request<Job>(`/api/release-kits/${kitId}/covers`, { method: 'POST', body: JSON.stringify(input) }),
+  uploadReleaseCover: (kitId: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<ReleaseKit>(`/api/release-kits/${kitId}/covers/upload`, { method: 'POST', body })
+  },
+  deleteReleaseCover: (kitId: string, coverId: string) =>
+    request<ReleaseKit>(`/api/release-kits/${kitId}/covers/${coverId}`, { method: 'DELETE' }),
+  promoteReleaseKitFrame: (
+    kitId: string,
+    frameId: string,
+    input?: { headline?: string | null; style?: 'natural' | 'punch' | 'vivid' | 'drama' | 'warm' },
+  ) => request<ReleaseKit>(`/api/release-kits/${kitId}/frames/${frameId}/promote`, {
+    method: 'POST',
+    body: JSON.stringify(input || {}),
+  }),
+  autoImportReleaseKitFrames: (kitId: string) =>
+    request<ReleaseKit>(`/api/release-kits/${kitId}/frames/auto-import`, { method: 'POST' }),
+  suggestReleaseKitHooks: (kitId: string, prompt?: string | null) =>
+    request<{ hooks: Array<{ headline: string; secondary: string; full: string; tag: string }> }>(
+      `/api/release-kits/${kitId}/suggest-hooks`,
+      { method: 'POST', body: JSON.stringify({ prompt: prompt || null }) },
+    ),
   decide: (id: string, decision: 'accepted' | 'rejected') =>
     request<Suggestion>(`/api/suggestions/${id}/decision`, {
       method: 'POST',
@@ -1376,6 +1722,7 @@ export const api = {
       source_in_ms: Math.round(item.source_in_ms || 0),
       source_out_ms: item.source_out_ms != null ? Math.round(item.source_out_ms) : null,
       mute_audio: Boolean(item.mute_audio),
+      transition: sanitizeTransition(item.transition),
     })
     const sanitizeOverlay = <T extends { start_ms: number; duration_ms: number }>(overlay: T): T => ({
       ...overlay,
@@ -1406,6 +1753,7 @@ export const api = {
       image_overlays: (timeline.document.image_overlays || []).map(sanitizeOverlay),
       text_overlays: (timeline.document.text_overlays || []).map(sanitizeOverlay),
       audio_overlays: (timeline.document.audio_overlays || []).map(sanitizeAudioOverlay),
+      default_transition: sanitizeTransition(timeline.document.default_transition),
     }
     return request<ProjectTimeline>(`/api/compilations/${compilationId}/timeline`, {
       method: 'PUT',

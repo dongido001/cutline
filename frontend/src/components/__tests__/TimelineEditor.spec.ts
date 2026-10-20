@@ -29,6 +29,8 @@ vi.mock('@/lib/api', async () => {
       saveTimeline: vi.fn<typeof actual.api.saveTimeline>(),
       resetTimeline: vi.fn<typeof actual.api.resetTimeline>(),
       uploadTimelineAsset: vi.fn<typeof actual.api.uploadTimelineAsset>(),
+      releaseKit: vi.fn<typeof actual.api.releaseKit>(),
+      addReleaseKitFrame: vi.fn<typeof actual.api.addReleaseKitFrame>(),
     },
   }
 })
@@ -129,6 +131,7 @@ function mountEditor() {
       plugins: [pinia],
       stubs: {
         PublishPanel: true,
+        ReleaseKitPanel: true,
       },
     },
   })
@@ -288,6 +291,8 @@ describe('TimelineEditor state persistence', () => {
 
     const trackNames = wrapper.findAll('.track-row > strong').map((el) => el.text())
     expect(trackNames).toEqual(['PRIMARY', 'VIDEO', 'IMAGE', 'TEXT', 'AUDIO'])
+    expect(wrapper.find('.audio-track-row .empty-track-cta').exists()).toBe(true)
+    expect(wrapper.find('.audio-track-row label[title="Upload audio file to AUDIO track"]').exists()).toBe(true)
 
     // Add shot audio onto AUDIO track from Add media & text menu
     await wrapper.get('button[title="Add shot audio onto AUDIO track"]').trigger('click')
@@ -307,13 +312,24 @@ describe('TimelineEditor state persistence', () => {
     await wrapper.get('button[title="Duplicate this audio clip (Ctrl+D)"]').trigger('click')
     expect(wrapper.findAll('.overlay-block.audio')).toHaveLength(2)
 
+    // The duplicate starts after the original, so both share one lane
+    const laneTops = () => wrapper.findAll('.overlay-block.audio').map((el) => (el.element as HTMLElement).style.top)
+    expect(new Set(laneTops()).size).toBe(1)
+
+    // A second clip at the same playhead overlaps the first and stacks into its own lane
+    await wrapper.get('button[title="Add shot audio onto AUDIO track"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.overlay-block.audio')).toHaveLength(3)
+    expect(new Set(laneTops()).size).toBe(2)
+    expect((wrapper.get('.audio-track-row').element as HTMLElement).style.minHeight).toBe('70px')
+
     wrapper.unmount()
     await flushPromises()
 
     expect(api.saveTimeline).toHaveBeenCalled()
     const calls = vi.mocked(api.saveTimeline).mock.calls
     const lastSaved = calls[calls.length - 1]?.[1]
-    expect(lastSaved?.document.audio_overlays).toHaveLength(2)
+    expect(lastSaved?.document.audio_overlays).toHaveLength(3)
     expect(lastSaved?.document.audio_overlays?.[0]?.mute_audio).toBe(true)
   })
 
@@ -526,6 +542,10 @@ describe('TimelineEditor state persistence', () => {
 
     // 6. Select the VIDEO layer and apply a crop region preset ('Left ½'), verifying clip-path updates
     await wrapper.get('.overlay-block.video').trigger('click')
+    await flushPromises()
+    // Selecting an overlay keeps the playhead where it is, so seek into the layer to make its preview render
+    await wrapper.get('.timeline-input').setValue('500')
+    await wrapper.get('.timeline-input').trigger('input')
     await flushPromises()
     const leftHalfBtn = wrapper.findAll('.quick-dur-buttons button').find((b) => b.text() === 'Left ½')
     expect(leftHalfBtn).toBeDefined()
@@ -808,7 +828,439 @@ describe('TimelineEditor state persistence', () => {
 
     wrapper.unmount()
   })
+
+  it('grabs the frame under the playhead into the release kit for the current scope', async () => {
+    vi.mocked(api.releaseKit).mockResolvedValue({ id: 'kit-1', frames: [] } as never)
+    vi.mocked(api.addReleaseKitFrame).mockResolvedValue({ id: 'kit-1', frames: [{ id: 'f1' }] } as never)
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const playheadInput = wrapper.get('.timeline-input')
+    await playheadInput.setValue('2750')
+    await playheadInput.trigger('input')
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="Add frame to release kit"]').trigger('click')
+    await flushPromises()
+
+    expect(api.releaseKit).toHaveBeenCalledWith('proj-1', { variant: 'landscape', episodeId: 'ep-1', compilationId: null })
+    expect(api.addReleaseKitFrame).toHaveBeenCalledWith('kit-1', {
+      source: { kind: 'shot_clip', ref_id: 'shot-2' },
+      source_ms: 750,
+      timeline_ms: 2750,
+      label: 'Shot 2',
+    })
+    expect(wrapper.get('.preview-frame-notice').text()).toContain('(1/8)')
+
+    await wrapper.get('.preview-frame-notice button').trigger('click')
+    expect(mockRouterReplace).toHaveBeenLastCalledWith({ query: { kit: '1' } })
+    wrapper.unmount()
+  })
+  function mockTrackRects() {
+    return vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const isPrimary = this.classList.contains('track-content') && Boolean(this.closest('.primary-track'))
+      const top = isPrimary ? 0 : 100
+      return { left: 0, right: 1000, width: 1000, top, bottom: top + 60, height: 60, x: 0, y: top, toJSON: () => ({}) } as DOMRect
+    })
+  }
+
+  function pointer(type: string, clientX: number, clientY: number, target: EventTarget = window) {
+    const event = new MouseEvent(type, { clientX, clientY, button: 0, bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'pointerId', { value: 1 })
+    target.dispatchEvent(event)
+  }
+
+  it('keeps overlay clips on their row unless dragged up or down', async () => {
+    const asset = { id: 'snd', url: '/media/snd.wav', mime_type: 'audio/wav', label: 'Sound', created_at: '' }
+    vi.mocked(api.timeline).mockImplementation(async () => {
+      const tl = makeTimeline()
+      tl.assets = [asset]
+      tl.document.audio_overlays = (['A', 'B', 'C'] as const).map((label, index) => ({
+        id: `aud-${label}`, label, source: { kind: 'asset', ref_id: 'snd' },
+        start_ms: [0, 500, 1600][index]!, duration_ms: 1000, source_in_ms: 0, volume: 1,
+      }))
+      return tl
+    })
+    const rects = mockTrackRects()
+    const wrapper = mountEditor()
+    await flushPromises()
+    const block = (label: string) => wrapper.findAll('.overlay-block.audio').find((b) => b.get('.overlay-label').text() === label)!
+    const rows = () => Object.fromEntries(['A', 'B', 'C'].map((label) => [label, (Number.parseInt((block(label).element as HTMLElement).style.top) - 5) / 32]))
+    const drag = async (label: string, from: [number, number], to: [number, number]) => {
+      pointer('pointerdown', from[0], from[1], block(label).element)
+      pointer('pointermove', to[0], to[1])
+      pointer('pointerup', to[0], to[1])
+      await flushPromises()
+    }
+    expect(rows()).toEqual({ A: 0, B: 1, C: 0 })
+
+    await drag('A', [100, 110], [700, 112])
+    expect(rows()).toEqual({ A: 0, B: 1, C: 0 })
+
+    await drag('C', [400, 110], [400, 147])
+    expect(rows()).toEqual({ A: 0, B: 1, C: 1 })
+
+    await drag('B', [150, 142], [390, 142])
+    expect(rows()).toEqual({ A: 0, B: 2, C: 1 })
+
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    await flushPromises()
+    expect(rows()).toEqual({ A: 0, B: 1, C: 1 })
+
+    rects.mockRestore()
+    wrapper.unmount()
+    await flushPromises()
+    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1].document.audio_overlays
+    expect(saved?.map((item) => [item.label, item.lane])).toEqual([['A', 0], ['B', 1], ['C', 1]])
+  })
+
+  it('drops an image overlay from the IMAGE track between two primary videos', async () => {
+    vi.mocked(api.timeline).mockImplementationOnce(async () => {
+      const tl = makeTimeline()
+      tl.document.image_overlays = [{ id: 'ov-1', source: { kind: 'shot_image', ref_id: 'shot-1' }, start_ms: 0, duration_ms: 1500, opacity: 1, variant: {} }]
+      return tl
+    })
+    const rects = mockTrackRects()
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    pointer('pointerdown', 50, 120, wrapper.get('.overlay-block.image').element)
+    pointer('pointermove', 400, 30)
+    await flushPromises()
+    expect(wrapper.find('.image-drop-marker').exists()).toBe(true)
+    pointer('pointerup', 400, 30)
+    await flushPromises()
+
+    const blocks = wrapper.findAll('.primary-track .timeline-block')
+    expect(blocks.map((block) => block.classes().find((cls) => ['video', 'image', 'title'].includes(cls)))).toEqual(['video', 'image', 'video'])
+    expect(blocks[1]!.text()).toContain('1.5s')
+    expect(wrapper.findAll('.overlay-block.image')).toHaveLength(0)
+    expect(wrapper.find('.image-drop-marker').exists()).toBe(false)
+    rects.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('drops a secondary video layer onto the PRIMARY track, keeping its trim', async () => {
+    vi.mocked(api.timeline).mockImplementationOnce(async () => {
+      const tl = makeTimeline()
+      tl.document.video_overlays = [{ id: 'vo-1', label: 'B-roll', source: { kind: 'shot_clip', ref_id: 'shot-2' }, start_ms: 500, duration_ms: 1200, source_in_ms: 300, opacity: 1, volume: 1, mute_audio: true, variant: {} }]
+      return tl
+    })
+    const rects = mockTrackRects()
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    pointer('pointerdown', 150, 120, wrapper.get('.overlay-block.video').element)
+    pointer('pointermove', 990, 30)
+    await flushPromises()
+    expect(wrapper.find('.image-drop-marker').exists()).toBe(true)
+    pointer('pointerup', 990, 30)
+    await flushPromises()
+
+    const blocks = wrapper.findAll('.primary-track .timeline-block')
+    expect(blocks).toHaveLength(3)
+    expect(blocks[2]!.classes()).toContain('video')
+    expect(blocks[2]!.text()).toContain('B-roll')
+    expect(blocks[2]!.text()).toContain('1.2s')
+    expect(blocks[2]!.find('.block-muted-icon').exists()).toBe(true)
+    expect(wrapper.findAll('.overlay-block.video')).toHaveLength(0)
+    rects.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('loops a primary video when stretched past its trim, and trims again when shortened', async () => {
+    vi.mocked(api.saveTimeline).mockClear()
+    const rects = mockTrackRects()
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const handle = () => wrapper.findAll('.primary-track .timeline-block')[0]!.get('.primary-resize-handle').element
+    pointer('pointerdown', 400, 30, handle())
+    pointer('pointermove', 600, 30)
+    pointer('pointerup', 600, 30)
+    await flushPromises()
+
+    let first = wrapper.findAll('.primary-track .timeline-block')[0]!
+    expect(first.text()).toContain('3.0s')
+    expect(first.find('.block-loop-icon').exists()).toBe(true)
+
+    pointer('pointerdown', 600, 30, handle())
+    pointer('pointermove', 300, 30)
+    pointer('pointerup', 300, 30)
+    await flushPromises()
+
+    first = wrapper.findAll('.primary-track .timeline-block')[0]!
+    expect(first.find('.block-loop-icon').exists()).toBe(false)
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    await flushPromises()
+    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1]
+    expect(saved?.document.primary[0]).toMatchObject({ loop: false, source_in_ms: 0 })
+    expect(saved!.document.primary[0]!.source_out_ms).toBe(saved!.document.primary[0]!.duration_ms)
+    rects.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('stretches a primary image by dragging its end handle', async () => {
+    vi.mocked(api.timeline).mockImplementationOnce(async () => {
+      const tl = makeTimeline()
+      tl.document.primary.splice(1, 0, { id: 'still-1', kind: 'image', label: 'Still', source: { kind: 'shot_image', ref_id: 'shot-1' }, duration_ms: 2000, source_in_ms: 0, source_out_ms: null, text: '', variant: {} })
+      return tl
+    })
+    const rects = mockTrackRects()
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    const still = wrapper.findAll('.primary-track .timeline-block')[1]!
+    pointer('pointerdown', 600, 30, still.get('.primary-resize-handle').element)
+    pointer('pointermove', 700, 30)
+    pointer('pointerup', 700, 30)
+    await flushPromises()
+
+    expect(wrapper.findAll('.primary-track .timeline-block')[1]!.text()).toContain('2.7s')
+    rects.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('opens on the shot passed from Produce and reports the selected shot back', async () => {
+    mockRoute.query = { episode: 'ep-1', shot: 'shot-2' }
+    const wrapper = mountEditor()
+    const store = useStudioStore()
+    await flushPromises()
+
+    const blocks = wrapper.findAll('.primary-track .timeline-block')
+    expect(blocks[1]!.classes()).toContain('selected')
+    expect(store.focusShotId).toBe('shot-2')
+    expect(mockRouterReplace).toHaveBeenCalledWith({ query: { episode: 'ep-1' } })
+
+    await blocks[0]!.trigger('click')
+    expect(store.focusShotId).toBe('shot-1')
+    wrapper.unmount()
+  })
+
+  it('separates music from a primary clip onto the AUDIO track and mutes the original in one undo step', async () => {
+    const music = { id: 'music-1', url: '/media/stem-m.m4a', mime_type: 'audio/mp4', label: 'Shot 2 music (Demucs)', created_at: '' }
+    const voice = { id: 'voice-1', url: '/media/stem-v.m4a', mime_type: 'audio/mp4', label: 'Shot 2 voice (Demucs)', created_at: '' }
+    vi.spyOn(api, 'stemSeparators').mockResolvedValue([
+      { id: 'lalal', label: 'LALAL.AI', configured: true, available: true, selected: false, detail: '' },
+      { id: 'demucs', label: 'Demucs', configured: true, available: true, selected: true, detail: '' },
+      { id: 'uvr', label: 'UVR (audio-separator)', configured: false, available: false, selected: false, detail: '' },
+    ])
+    const start = vi.spyOn(api, 'startStemSeparation').mockResolvedValue({
+      separation: { id: 'sep-1' } as never,
+      job: { id: 'job-9', status: 'queued' } as never,
+    })
+    vi.spyOn(api, 'stemSeparation').mockResolvedValue({ id: 'sep-1', status: 'completed', music_asset: music, voice_asset: voice } as never)
+    const wrapper = mountEditor()
+    const store = useStudioStore()
+    store.watchJob = vi.fn().mockImplementation(async (_id: string, onUpdate: (job: unknown) => void) => {
+      onUpdate({ status: 'running', message: 'Separating with Demucs' })
+      return { id: 'job-9', status: 'completed', message: 'done' }
+    }) as never
+    await flushPromises()
+    vi.mocked(api.timeline).mockImplementation(async () => ({ ...makeTimeline(), assets: [music, voice] }))
+
+    await wrapper.findAll('.primary-track .timeline-block')[1]!.trigger('click')
+    await flushPromises()
+    const controls = wrapper.get('.stem-separation-controls')
+    expect((controls.get('select').element as HTMLSelectElement).value).toBe('demucs')
+    expect(controls.findAll('option').map((option) => option.attributes('disabled') !== undefined)).toEqual([false, false, true])
+    await controls.get('input[type="checkbox"]').setValue(true)
+    await controls.get('button').trigger('click')
+    await flushPromises()
+
+    expect(start).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+      source: { kind: 'shot_clip', ref_id: 'shot-2' },
+      source_in_ms: 0,
+      duration_ms: 3000,
+      provider: 'demucs',
+      label: 'Shot 2',
+      episode_id: 'ep-1',
+    }))
+    expect(store.watchJob).toHaveBeenCalledWith('job-9', expect.any(Function), { reloadOnComplete: false })
+    const vm = wrapper.vm as unknown as { timeline: ProjectTimeline }
+    const audio = vm.timeline.document.audio_overlays!
+    expect(audio.map((item) => [item.source.ref_id, item.start_ms, item.duration_ms, item.label])).toEqual([
+      ['music-1', 2000, 3000, 'Shot 2 music (Demucs)'],
+      ['voice-1', 2000, 3000, 'Shot 2 voice (Demucs)'],
+    ])
+    expect(vm.timeline.document.primary[1]!.mute_audio).toBe(true)
+    expect(wrapper.text()).toContain('Music from Demucs added to the AUDIO track')
+
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    expect(vm.timeline.document.audio_overlays).toEqual([])
+    expect(vm.timeline.document.primary[1]!.mute_audio).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('saves a clip\'s trimmed audio to the library, then adds a library item to the AUDIO track', async () => {
+    const saved = { id: 'lib-1', label: 'Theme', url: '/media/library-1.m4a', mime_type: 'audio/mp4', duration_ms: 3000, created_at: '' }
+    const save = vi.spyOn(api, 'saveLibraryAudio').mockResolvedValue(saved)
+    vi.spyOn(api, 'libraryAudio').mockResolvedValue([saved])
+    vi.spyOn(api, 'stemSeparators').mockResolvedValue([])
+    const libraryAsset = { id: 'asset-lib', url: saved.url, mime_type: 'audio/mp4', label: 'Theme', created_at: '' }
+    const upload = vi.spyOn(api, 'uploadTimelineAsset').mockImplementation(async () => ({ ...makeTimeline(), assets: [libraryAsset] }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: async () => new Blob(['a'], { type: 'audio/mp4' }) }))
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    // Save: the clip's used range (not the whole file) goes to the library under the chosen name
+    await wrapper.findAll('.primary-track .timeline-block')[1]!.trigger('click')
+    await flushPromises()
+    await wrapper.get('.save-to-library .library-btn').trigger('click')
+    await wrapper.get('input[aria-label="Library name"]').setValue('Theme')
+    await wrapper.get('.library-name-form').trigger('submit')
+    await flushPromises()
+    expect(save).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+      source: { kind: 'shot_clip', ref_id: 'shot-2' },
+      source_in_ms: 0,
+      duration_ms: 3000,
+      label: 'Theme',
+    }))
+    expect(wrapper.text()).toContain('Saved “Theme” to the audio library')
+
+    // Add: open the library from the AUDIO track header and add at the playhead
+    await wrapper.get('button[aria-label="Open audio library"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.audio-library-panel').text()).toContain('Theme')
+    await wrapper.get('.audio-library-panel .add-btn').trigger('click')
+    await flushPromises()
+
+    expect(upload).toHaveBeenCalled()
+    const vm = wrapper.vm as unknown as { timeline: ProjectTimeline }
+    const audio = vm.timeline.document.audio_overlays!
+    expect(audio.map((item) => [item.source.ref_id, item.duration_ms, item.label])).toEqual([['asset-lib', 3000, 'Theme']])
+    expect(wrapper.find('.audio-library-panel').exists()).toBe(false)
+
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
+
+  it('dismisses the transition popover outside or with Escape, but keeps inside clicks open', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    await wrapper.get('.transition-marker').trigger('click')
+    await wrapper.get('.transition-popover').trigger('pointerdown')
+    expect(wrapper.find('.transition-popover').exists()).toBe(true)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(wrapper.find('.transition-popover').exists()).toBe(false)
+    await wrapper.get('.transition-marker').trigger('click')
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await flushPromises()
+    expect(wrapper.find('.transition-popover').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the dragged transition length across playback redraws and commits one undo step', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    await wrapper.get('select[aria-label="Default transition"]').setValue('dissolve')
+    await wrapper.get('.transition-marker').trigger('click')
+    const slider = wrapper.get<HTMLInputElement>('.transition-popover input[type="range"]')
+    const vm = wrapper.vm as unknown as { playheadMs: number; playing: boolean }
+    vm.playing = true
+    slider.element.value = '1.4'
+    await slider.trigger('input')
+    vm.playheadMs = 600
+    await flushPromises()
+    expect(slider.element.value).toBe('1.4')
+    expect(wrapper.get('.transition-popover label').text()).toContain('1.4s')
+    await slider.trigger('change')
+    expect(wrapper.get('.transition-marker').attributes('title')).toBe('Grain dissolve · 1.4s')
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    expect(wrapper.get('.transition-marker').attributes('title')).toBe('Grain dissolve · 0.5s (default)')
+    vm.playing = false
+    wrapper.unmount()
+  })
+
+  it('sets a default transition and a per-cut override, reflects them on the join marker, and undoes', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    const marker = () => wrapper.get('.primary-track .transition-marker')
+    expect(wrapper.findAll('.primary-track .transition-marker')).toHaveLength(1)
+    expect(marker().classes()).not.toContain('active')
+
+    await wrapper.get('select[aria-label="Default transition"]').setValue('dissolve')
+    expect(marker().classes()).toContain('active')
+    expect(marker().classes()).not.toContain('overridden')
+    expect(marker().attributes('title')).toBe('Grain dissolve · 0.5s (default)')
+
+    await marker().trigger('click')
+    await wrapper.get('.transition-popover select').setValue('wipeleft')
+    await wrapper.get('.transition-popover input[type="range"]').setValue('1.2')
+    expect(marker().classes()).toContain('overridden')
+    expect(marker().attributes('title')).toBe('Wipe left · 1.2s')
+
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    expect(marker().attributes('title')).toBe('Wipe left · 0.5s')
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    expect(marker().attributes('title')).toBe('Grain dissolve · 0.5s (default)')
+    await wrapper.get('button[title^="Redo"]').trigger('click')
+    await wrapper.get('button[title^="Redo"]').trigger('click')
+
+    wrapper.unmount()
+    await flushPromises()
+    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1]
+    expect(saved?.document.default_transition).toEqual({ kind: 'dissolve', duration_ms: 500 })
+    expect(saved?.document.primary[1]?.transition).toEqual({ kind: 'wipeleft', duration_ms: 1200 })
+    expect(saved?.document.primary[0]?.transition ?? null).toBeNull()
+  })
+
+  it('loops an audio clip that outlasts its file in the preview, and the loop can be turned off and undone', async () => {
+    const players: FakeAudio[] = []
+    class FakeAudio extends EventTarget {
+      dataset: Record<string, string> = {}
+      preload = ''
+      paused = true
+      muted = false
+      volume = 1
+      currentTime = 0
+      duration = Number.NaN
+      private url = ''
+      constructor() {
+        super()
+        players.push(this)
+      }
+      get src() { return this.url }
+      set src(value: string) {
+        this.url = value
+        this.duration = 1
+        queueMicrotask(() => this.dispatchEvent(new Event('loadedmetadata')))
+      }
+      play() { this.paused = false; return Promise.resolve() }
+      pause() { this.paused = true }
+    }
+    vi.stubGlobal('Audio', FakeAudio)
+    const beep = { id: 'beep', url: '/media/beep.wav', mime_type: 'audio/wav', label: 'Beep', created_at: '' }
+    vi.mocked(api.timeline).mockImplementation(async () => {
+      const tl = makeTimeline()
+      tl.assets = [beep]
+      tl.document.audio_overlays = [{ id: 'aud-1', label: 'Beep', source: { kind: 'asset', ref_id: 'beep' }, start_ms: 0, duration_ms: 3000, source_in_ms: 0, volume: 1 }]
+      return tl
+    })
+    const wrapper = mountEditor()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { playheadMs: number; syncAudioOverlays: () => void }
+    vm.syncAudioOverlays()
+    await flushPromises()
+
+    expect(wrapper.find('.overlay-block.audio .overlay-loop-icon').exists()).toBe(true)
+    vm.playheadMs = 2300
+    vm.syncAudioOverlays()
+    expect(players[0]!.currentTime).toBeCloseTo(0.3)
+
+    await wrapper.get('.overlay-block.audio').trigger('click')
+    await wrapper.get('input[aria-label="Loop audio"]').trigger('change')
+    expect(wrapper.find('.overlay-block.audio .overlay-loop-icon').exists()).toBe(false)
+    vm.syncAudioOverlays()
+    expect(players[0]!.currentTime).toBeCloseTo(2.3)
+
+    await wrapper.get('button[title^="Undo"]').trigger('click')
+    expect(wrapper.find('.overlay-block.audio .overlay-loop-icon').exists()).toBe(true)
+    await wrapper.get('button[title^="Redo"]').trigger('click')
+    wrapper.unmount()
+    await flushPromises()
+    expect(vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1].document.audio_overlays?.[0]?.loop).toBe(false)
+    vi.unstubAllGlobals()
+  })
 })
-
-
-

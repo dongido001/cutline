@@ -529,3 +529,15 @@ def test_get_timeline_luts_endpoint(tmp_path, monkeypatch) -> None:
         assert "css_filter" in p
 
 
+def test_get_timeline_lut_cube_endpoint(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    client = TestClient(app)
+    missing = client.get("/api/timeline/luts/not_a_real_lut/cube")
+    assert missing.status_code == 404
+    res = client.get("/api/timeline/luts/noir_bw/cube", params={"strength": 0.75})
+    assert res.status_code == 200
+    body = res.text
+    assert "LUT_3D_SIZE 17" in body
+    assert "DOMAIN_MIN" in body
+
+

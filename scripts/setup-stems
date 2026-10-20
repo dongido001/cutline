@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Installs the local music separators (Demucs and UVR models via audio-separator)
+# into bridges/stems/.venv and downloads their models.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STEMS="$ROOT/bridges/stems"
+VENV="$STEMS/.venv"
+MODELS="$STEMS/models"
+DEMUCS_MODEL="${MOVIE_DEMUCS_MODEL:-htdemucs}"
+UVR_MODEL="${MOVIE_UVR_MODEL:-model_bs_roformer_ep_317_sdr_12.9755.ckpt}"
+
+command -v uv >/dev/null || { echo "uv is required: https://docs.astral.sh/uv/" >&2; exit 1; }
+command -v ffmpeg >/dev/null || { echo "ffmpeg is required" >&2; exit 1; }
+
+mkdir -p "$STEMS" "$MODELS"
+[ -x "$VENV/bin/python" ] || uv venv --python 3.11 "$VENV"
+
+# torchaudio >= 2.9 routes save() through torchcodec, which Demucs 4 does not expect.
+uv pip install --python "$VENV/bin/python" \
+  "torch>=2.3,<2.9" "torchaudio>=2.3,<2.9" \
+  "demucs==4.0.1" "audio-separator[cpu]>=0.30" "soundfile"
+
+echo "Downloading Demucs model $DEMUCS_MODEL"
+"$VENV/bin/python" -c "from demucs.pretrained import get_model; get_model('$DEMUCS_MODEL')"
+
+echo "Downloading UVR model $UVR_MODEL"
+"$VENV/bin/audio-separator" --download_model_only \
+  --model_filename "$UVR_MODEL" --model_file_dir "$MODELS"
+
+echo "Music separators ready in $VENV"

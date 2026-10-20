@@ -1,6 +1,37 @@
-from backend.cast import cast_portrait_prompt, match_character_ids, sync_project_cast
+from backend.cast import (
+    cast_portrait_prompt,
+    element_mention_slug,
+    extract_mention_element_ids,
+    match_character_ids,
+    prompt_element_details,
+    prompt_element_title,
+    shot_mentioned_names,
+    sync_project_cast,
+    sync_project_elements,
+)
 from backend.models import Character, Project, Scene, ScriptVersion, Shot
 from backend.screenplay_parser import parse_character_consistency, parse_structured_screenplay
+
+
+def test_sync_keeps_rooms_separate_and_reuses_location_across_time_changes(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from backend.database import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'sets.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        project = Project(title="Compound")
+        version = ScriptVersion(project=project, source_text="test")
+        for index, location in enumerate(["INT. COMPOUND KITCHEN - DAY", "@COMPOUND_KITCHEN", "INT. COMPOUND PARLOUR - NIGHT", "COMPOUND COURTYARD", "Unspecified"]):
+            db.add(Scene(script_version=version, order_index=index, title=f"Beat {index}", location=location,
+                         set_notes="Fixed doors and furniture", lighting_notes="Red evening light", action="MAYA enters"))
+        db.add(project)
+        db.commit()
+        sets = [item for item in sync_project_elements(project, db) if item.kind == "scene"]
+        assert {item.name for item in sets} == {"COMPOUND KITCHEN", "COMPOUND PARLOUR", "COMPOUND COURTYARD"}
+        assert all(item.notes == "Fixed doors and furniture" for item in sets)
+        assert len([item for item in sync_project_elements(project, db) if item.kind == "scene"]) == 3
 
 
 def test_cast_portrait_prompt_locks_face() -> None:
@@ -15,6 +46,79 @@ def test_cast_portrait_prompt_locks_face() -> None:
     assert "identity reference" in prompt.lower()
     assert "mole on left cheek" in prompt
     assert "neutral" in prompt.lower() or "plain" in prompt.lower()
+
+
+def test_prop_prompt_resolves_at_tag_to_natural_language() -> None:
+    prop = Character(
+        id="prop-1",
+        project_id="p",
+        kind="prop",
+        name="@BISCUIT_PACK — BRIGHT RED",
+        notes="@BISCUIT_PACK — bright red sealed biscuit packet",
+    )
+    prompt = cast_portrait_prompt(prop, look="prop", has_attached_reference=False)
+    assert "@BISCUIT_PACK" not in prompt
+    assert "BISCUIT PACK" in prompt or "biscuit pack" in prompt.lower()
+    assert "bright red sealed biscuit packet" in prompt
+    assert "attached image" not in prompt.lower()
+
+    with_seed = cast_portrait_prompt(prop, look="prop", has_attached_reference=True)
+    assert "attached image is the prop identity reference" in with_seed.lower()
+
+
+def test_element_mention_slug_and_details() -> None:
+    assert element_mention_slug("@BISCUIT_PACK — BRIGHT RED") == "BISCUIT_PACK"
+    assert prompt_element_title("@BISCUIT_PACK — BRIGHT RED") == "BISCUIT PACK"
+    assert (
+        prompt_element_details(
+            "@BISCUIT_PACK — bright red sealed biscuit packet",
+            "BISCUIT PACK",
+            kind="prop",
+        )
+        == "bright red sealed biscuit packet"
+    )
+
+
+def test_extract_mention_matches_prop_slug() -> None:
+    prop = Character(id="p1", project_id="proj", kind="prop", name="BISCUIT PACK", notes="red packet")
+    scene = Character(id="s1", project_id="proj", kind="scene", name="KITCHEN", notes="warm set")
+    ids = extract_mention_element_ids([prop, scene], "Hero holds @BISCUIT_PACK in the @KITCHEN")
+    assert ids == ["p1", "s1"]
+
+
+def test_sync_project_elements_strips_at_from_prop_names(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from backend.database import Base
+    from backend.settings import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    (tmp_path / "media").mkdir(parents=True, exist_ok=True)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'cast.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    project = Project(title="Props", status="shot_plan", aspect_ratio="16:9")
+    version = ScriptVersion(project=project, source_text="test")
+    scene = Scene(
+        script_version=version,
+        order_index=0,
+        title="INT. KITCHEN - DAY",
+        location="INT. KITCHEN - DAY",
+        props_notes="@BISCUIT_PACK — bright red sealed biscuit packet; Brass Compass",
+    )
+    session.add(project)
+    session.commit()
+
+    elements = sync_project_elements(project, session)
+    props = [e for e in elements if e.kind == "prop"]
+    by_name = {e.name: e for e in props}
+    assert "BISCUIT PACK" in by_name
+    assert by_name["BISCUIT PACK"].notes == "bright red sealed biscuit packet"
+    assert not by_name["BISCUIT PACK"].name.startswith("@")
+    assert "BRASS COMPASS" in by_name
+    session.close()
 
 
 CAST_SCRIPT = """THE POOR MAN SHE CHOSE
@@ -318,5 +422,61 @@ Video prompt: Amara looks.
 
         # Shot 3 has no Cast line -> falls back to automatic detection (Amara tagged from action/dialogue)
         assert shot3.character_ids == [by_name["AMARA"]]
+    finally:
+        session.close()
+
+
+def test_match_character_ids_ignores_title_and_location_tags() -> None:
+    characters = [
+        Character(id="1", project_id="p", name="GABE", notes=""),
+        Character(id="2", project_id="p", name="EDUARDO", notes=""),
+        Character(id="3", project_id="p", name="MAYA", notes=""),
+        Character(id="4", project_id="p", name="OFFICE ASSISTANT", notes=""),
+    ]
+    shot = {
+        "title": "NOT FOR MAYA",
+        "action": "@EDUARDO remains screen-RIGHT. @GABE remains screen-LEFT.",
+        "dialogue": [{"character": "EDUARDO", "text": "For Maya Santos?"}],
+        "image_prompt": "Medium two-shot inside @DE_LEON_OFFICE. @GABE faces @EDUARDO.",
+        "video_prompt": '@EDUARDO asks, "For Maya Santos?"',
+    }
+    names, haystack = shot_mentioned_names(shot)
+
+    assert match_character_ids(characters, names, haystack) == ["1", "2"]
+
+
+def test_sync_project_cast_reads_each_episodes_own_cast_lines() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from backend.database import Base
+    from backend.models import Episode
+
+    def script(title: str, cast: str) -> str:
+        return (
+            "SHOW\n\nCharacter consistency\n\nGABE — 29-year-old man.\nMAYA — 27-year-old woman.\n\n"
+            f"SHOT 1 - {title}\nScene: ROOM\nTime: 00:00-00:06\nFraming: Medium\nCast: {cast}\n\n"
+            "Action:\nGabe and Maya talk.\n\nSound: Room tone.\nImage prompt: Gabe and Maya.\nVideo prompt: They talk.\n"
+        )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    try:
+        project = Project(title="Series", status="shot_plan")
+        ep1 = Episode(project=project, episode_number=1, title="One")
+        ep2 = Episode(project=project, episode_number=2, title="Two")
+        v1 = ScriptVersion(project=project, episode=ep1, version_number=1, source_text=script("FIRST", "Gabe"), status="review")
+        v2 = ScriptVersion(project=project, episode=ep2, version_number=2, source_text=script("SECOND", "Maya"), status="review")
+        shot1 = Shot(scene=Scene(script_version=v1, order_index=0, title="ROOM"), order_index=0, title="FIRST", action="Gabe and Maya talk.")
+        shot2 = Shot(scene=Scene(script_version=v2, order_index=0, title="ROOM"), order_index=0, title="SECOND", action="Gabe and Maya talk.")
+        session.add(project)
+        session.commit()
+
+        characters = sync_project_cast(project, session, source_text=v2.source_text, tag_shots=True)
+        session.commit()
+        by_name = {c.name: c.id for c in characters}
+
+        assert shot1.character_ids == [by_name["GABE"]]
+        assert shot2.character_ids == [by_name["MAYA"]]
     finally:
         session.close()
