@@ -541,3 +541,32 @@ def test_get_timeline_lut_cube_endpoint(tmp_path, monkeypatch) -> None:
     assert "DOMAIN_MIN" in body
 
 
+
+
+def test_delete_shot_cleans_all_episode_timeline_variants(tmp_path):
+    from backend.api import delete_shot
+    from backend.models import Episode, ProjectTimeline
+    engine = create_engine(f"sqlite:///{tmp_path / 'delete-all.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        project = Project(title='Series')
+        episode1 = Episode(project=project, episode_number=1, title="First")
+        episode2 = Episode(project=project, episode_number=2, title="Second")
+        version = ScriptVersion(project=project, episode=episode2, source_text='script')
+        scene = Scene(script_version=version, order_index=0, title='Room')
+        deleted = Shot(scene=scene, order_index=0, title='Deleted')
+        kept = Shot(scene=scene, order_index=1, title='Kept')
+        db.add(project)
+        db.flush()
+        def document():
+            return {'version': 1, 'primary': [
+                {'id': shot.id, 'kind': 'image', 'label': shot.title, 'source': {'kind': 'shot_image', 'ref_id': shot.id}, 'duration_ms': 5000}
+                for shot in [deleted, kept]]}
+        timelines = [ProjectTimeline(project=project, episode=ep, document=document(), shorts_document=document(), revision=1) for ep in [episode1, episode2]]
+        db.add_all(timelines)
+        db.commit()
+        delete_shot(deleted.id, db)
+        for timeline in timelines:
+            for data in [timeline.document, timeline.shorts_document]:
+                assert [item['source']['ref_id'] for item in data['primary']] == [kept.id]
+            assert timeline.revision > 1

@@ -13,6 +13,18 @@ from backend.models import Character, Project, Scene, ScriptVersion, Shot
 from backend.screenplay_parser import parse_character_consistency, parse_structured_screenplay
 
 
+def test_cast_inference_includes_people_declared_only_in_framing():
+    characters = [
+        Character(id="amaka", project_id="p", name="AMAKA"),
+        Character(id="tobi", project_id="p", name="TOBI"),
+    ]
+    fields = dict(framing="Medium two-shot of AMAKA and TOBI at the table.",
+                  action="They exchange a glance.", dialogue=[])
+    for shot in (fields, Shot(scene_id="s", order_index=0, **fields)):
+        names, text = shot_mentioned_names(shot)
+        assert match_character_ids(characters, names, text) == ["amaka", "tobi"]
+
+
 def test_sync_keeps_rooms_separate_and_reuses_location_across_time_changes(tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session

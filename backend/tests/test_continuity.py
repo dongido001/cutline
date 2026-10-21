@@ -433,3 +433,25 @@ def test_episode_timecodes_become_clip_relative() -> None:
     )
     assert _clip_relative_timecodes("The lights flicker at 02:54.", shot) == "The lights flicker at 4 seconds into the clip."
     assert _clip_relative_timecodes("Recall the storm at 01:10.", shot) == "Recall the storm at 01:10."
+
+
+def test_cast_continuity_flags_missing_person_and_accepts_explicit_coverage():
+    from backend.continuity import cast_continuity_warnings
+    project = Project(title='Film')
+    project.characters = [Character(id='a', name='AMAKA', kind='character'), Character(id='b', name='MR. BAMIDELE', kind='character')]
+    version = ScriptVersion(project=project)
+    scene = Scene(script_version=version, order_index=0)
+    first = Shot(scene=scene, order_index=0, character_ids=['a'], action='Amaka waits.')
+    shot = Shot(scene=scene, order_index=1, character_ids=['b'], framing='Medium shot of the landlord.')
+    assert 'AMAKA' in cast_continuity_warnings(shot)[0]
+    shot.image_prompt = 'AMAKA remains off camera beside the table.'
+    assert cast_continuity_warnings(shot) == []
+    shot.image_prompt = ''
+    first.action = 'AMAKA leaves the courtyard.'
+    assert cast_continuity_warnings(shot) == []
+    first.action = 'Amaka waits.'
+    shot.character_ids = ['a', 'b']
+    assert cast_continuity_warnings(shot) == []
+    other_scene = Scene(script_version=version, order_index=1)
+    other = Shot(scene=other_scene, order_index=0, character_ids=['b'])
+    assert cast_continuity_warnings(other) == []

@@ -70,6 +70,7 @@ export interface ShotContinuityCharacter {
 }
 
 export interface ShotContinuityStatus {
+  cast_warnings?: string[]
   snapshot: ContinuitySnapshot | null
   characters: ShotContinuityCharacter[]
   missing_character_references: string[]
@@ -1161,7 +1162,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const message = typeof detail === 'string'
       ? detail
       : Array.isArray(detail)
-        ? detail.map((item: { msg?: string }) => item.msg || JSON.stringify(item)).join('; ')
+        ? detail
+            .map((item: { msg?: string; loc?: (string | number)[] }) => {
+              const field = Array.isArray(item.loc) && item.loc.length > 0 ? `${item.loc[item.loc.length - 1]}: ` : ''
+              return `${field}${item.msg || JSON.stringify(item)}`
+            })
+            .join('; ')
         : (detail ? JSON.stringify(detail) : response.statusText)
     throw new Error(message || 'Request failed')
   }

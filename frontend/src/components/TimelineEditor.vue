@@ -1073,6 +1073,94 @@ function applyCropPreset(geom: TimelineGeometry, preset: 'full' | 'center-box' |
   })
 }
 
+function applyFocalPreset(geom: TimelineGeometry, focalX: number) {
+  mutate(() => {
+    geom.focal_x = Math.max(0, Math.min(1, Math.round(focalX * 100) / 100))
+  })
+}
+
+const isReframingActivePrimary = computed(() => {
+  if (!activeItem.value || !activeMedia.value) return false
+  if (activeGeometry.value.fit === 'contain') return false
+  return targetAspect.value === '9:16' || (activeGeometry.value.zoom ?? 1) > 1.01 || !activeMedia.value.native
+})
+
+const isDraggingPrimaryReframe = ref(false)
+let reframeStartX = 0
+let reframeStartY = 0
+let reframeStartFocalX = 0.5
+let reframeStartFocalY = 0.5
+let reframeWindowWidth = 1
+let reframeWindowHeight = 1
+
+function onPrimaryReframePointerDown(event: PointerEvent) {
+  if (!isReframingActivePrimary.value || !activeItem.value) return
+  if (event.button !== 0) return // only primary mouse button
+
+  // Prevent native browser dragging of video/image and text selection
+  event.preventDefault()
+
+  const target = (event.currentTarget as HTMLElement | null) ?? programMonitor.value
+  const rect = target?.getBoundingClientRect()
+  if (!rect || rect.width <= 0 || rect.height <= 0) return
+
+  // Select the active primary clip if not already selected so inspector coordinates stay in sync
+  if (selectedKind.value !== 'primary' || selectedId.value !== activeItem.value.id) {
+    selectedKind.value = 'primary'
+    selectedId.value = activeItem.value.id
+    selectedEntries.value = [{ kind: 'primary', id: activeItem.value.id }]
+  }
+
+  // Ensure activeItem.variant[variant.value] exists and is attached to document
+  const geom = geometryFor(activeItem.value)
+  captureInspectorSnapshot()
+
+  isDraggingPrimaryReframe.value = true
+  reframeStartX = event.clientX
+  reframeStartY = event.clientY
+  reframeWindowWidth = rect.width
+  reframeWindowHeight = rect.height
+  reframeStartFocalX = Number.isFinite(geom.focal_x) ? (geom.focal_x ?? 0.5) : 0.5
+  reframeStartFocalY = Number.isFinite(geom.focal_y) ? (geom.focal_y ?? 0.5) : 0.5
+
+  const onWindowPointerMove = (moveEv: PointerEvent) => {
+    if (!isDraggingPrimaryReframe.value || !activeItem.value) return
+    moveEv.preventDefault()
+
+    const currentGeom = geometryFor(activeItem.value)
+    const deltaX = moveEv.clientX - reframeStartX
+    const deltaY = moveEv.clientY - reframeStartY
+
+    // In 9:16 frame with 16:9 media:
+    // Video width is 3.16x window width, overflow is 2.16x.
+    // Scale factor 1 / 2.16 ≈ 0.463 gives exact 1:1 cursor tracking.
+    const normalizedDeltaX = (deltaX / reframeWindowWidth) * 0.463
+    const nextFocalX = Math.max(0, Math.min(1, Math.round((reframeStartFocalX - normalizedDeltaX) * 1000) / 1000))
+    currentGeom.focal_x = nextFocalX
+
+    const zoom = Math.max(1, Number(currentGeom.zoom ?? 1) || 1)
+    if (zoom > 1.01 || targetAspect.value === '16:9') {
+      const normalizedDeltaY = (deltaY / reframeWindowHeight) * (targetAspect.value === '16:9' ? 0.463 : 0.463 / zoom)
+      const nextFocalY = Math.max(0, Math.min(1, Math.round((reframeStartFocalY - normalizedDeltaY) * 1000) / 1000))
+      currentGeom.focal_y = nextFocalY
+    }
+  }
+
+  const onWindowPointerUp = () => {
+    window.removeEventListener('pointermove', onWindowPointerMove)
+    window.removeEventListener('pointerup', onWindowPointerUp)
+    window.removeEventListener('pointercancel', onWindowPointerUp)
+    if (isDraggingPrimaryReframe.value) {
+      isDraggingPrimaryReframe.value = false
+      commitInspectorEdit()
+    }
+  }
+
+  window.addEventListener('pointermove', onWindowPointerMove, { passive: false })
+  window.addEventListener('pointerup', onWindowPointerUp)
+  window.addEventListener('pointercancel', onWindowPointerUp)
+}
+
 function shotMedia(shot: Shot, mediaType: 'image' | 'clip') {
   const nativeVariant = shot.media_variants.find((item) => item.media_type === mediaType && item.aspect_ratio === targetAspect.value)
   const legacy = mediaType === 'clip' ? shot.clip : shot.image
@@ -4484,7 +4572,14 @@ onBeforeUnmount(() => {
               :style="layoutMatteStyle()"
               aria-hidden="true"
             ></div>
-            <div class="preview-primary-window" :style="primaryWindowStyle">
+            <div
+              class="preview-primary-window"
+              :class="{ 'can-reframe': isReframingActivePrimary, 'is-dragging': isDraggingPrimaryReframe }"
+              :style="primaryWindowStyle"
+              :title="isReframingActivePrimary ? 'Drag horizontally to adjust 9:16 crop framing' : undefined"
+              @pointerdown="onPrimaryReframePointerDown"
+              @dragstart.prevent
+            >
               <video
                 v-if="activeMedia?.mime_type.startsWith('video')"
                 ref="previewVideo"
@@ -4495,6 +4590,7 @@ onBeforeUnmount(() => {
                 :muted="isMuted || Boolean(activeItem?.mute_audio)"
                 playsinline
                 preload="auto"
+                draggable="false"
                 @loadedmetadata="handleLoadedMetadata"
               ></video>
               <img
@@ -4505,6 +4601,7 @@ onBeforeUnmount(() => {
                 :src="activeMedia.url"
                 :style="activeMediaStyle"
                 alt=""
+                draggable="false"
                 @load="syncLutGlPreview"
               />
               <div v-else-if="activeItem?.kind === 'title'" class="preview-title" :style="activeMediaStyle">{{ activeItem.text }}</div>
@@ -4516,6 +4613,11 @@ onBeforeUnmount(() => {
                 :style="lutCanvasStyle"
                 aria-hidden="true"
               ></canvas>
+              <div
+                v-if="isReframingActivePrimary"
+                class="preview-reframe-overlay"
+                aria-hidden="true"
+              ></div>
             </div>
             <div
               v-if="primaryBorderStyle && activeItem"
@@ -4584,6 +4686,10 @@ onBeforeUnmount(() => {
             </template>
             <span class="source-badge">{{ activeBadge }}</span>
             <div v-if="variant === 'shorts'" class="shorts-safe-area" title="Shorts safe zone"></div>
+            <div v-if="isDraggingPrimaryReframe && activeItem" class="reframe-hud-badge" role="status">
+              <span>Pan X</span>
+              <strong>{{ Math.round((geometryFor(activeItem).focal_x ?? 0.5) * 100) }}%</strong>
+            </div>
           </section>
           <div class="preview-controls">
             <div class="transport-cluster">
@@ -4632,7 +4738,7 @@ onBeforeUnmount(() => {
               <em>#{{ activeIndex + 1 }}</em> {{ activeItem.label }}
             </span>
             <span v-if="frameNotice" class="preview-frame-notice" role="status">{{ frameNotice }} · <button type="button" @click="openReleaseKit()">Open kit</button></span>
-            <span v-else class="preview-shortcut">Space play · ←/→ step · S split</span>
+            <span v-else class="preview-shortcut">{{ isReframingActivePrimary ? 'Drag preview to reframe · Space play' : 'Space play · ←/→ step · S split' }}</span>
           </div>
         </div>
         <aside class="timeline-inspector" @focusin="captureInspectorSnapshot" @pointerdown="captureInspectorSnapshot">
@@ -4977,7 +5083,7 @@ onBeforeUnmount(() => {
                   <div class="framing-grid-2col">
                     <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
-                        <span>Focus X</span>
+                        <span>Focus X (Pan)</span>
                         <b>{{ Math.round((geometryFor(selectedPrimary).focal_x ?? 0.5) * 100) }}%</b>
                       </span>
                       <input
@@ -5007,6 +5113,11 @@ onBeforeUnmount(() => {
                         @change="commitInspectorEdit"
                       />
                     </label>
+                  </div>
+                  <div class="quick-dur-buttons focal-preset-grid">
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((geometryFor(selectedPrimary).focal_x ?? 0.5) - 0.15) < 0.05 }" @click="applyFocalPreset(geometryFor(selectedPrimary), 0.15)"><span>Left</span></button>
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((geometryFor(selectedPrimary).focal_x ?? 0.5) - 0.5) < 0.05 }" @click="applyFocalPreset(geometryFor(selectedPrimary), 0.5)"><span>Center</span></button>
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((geometryFor(selectedPrimary).focal_x ?? 0.5) - 0.85) < 0.05 }" @click="applyFocalPreset(geometryFor(selectedPrimary), 0.85)"><span>Right</span></button>
                   </div>
                 </div>
 
@@ -5272,7 +5383,7 @@ onBeforeUnmount(() => {
                   <div class="framing-grid-2col">
                     <label class="framing-slider-field bipolar">
                       <span class="framing-field-head">
-                        <span>Focus X</span>
+                        <span>Focus X (Pan)</span>
                         <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) * 100) }}%</b>
                       </span>
                       <input
@@ -5302,6 +5413,11 @@ onBeforeUnmount(() => {
                         @change="commitInspectorEdit"
                       />
                     </label>
+                  </div>
+                  <div class="quick-dur-buttons focal-preset-grid">
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) - 0.15) < 0.05 }" @click="applyFocalPreset(videoOverlayGeometryFor(selectedVideo), 0.15)"><span>Left</span></button>
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) - 0.5) < 0.05 }" @click="applyFocalPreset(videoOverlayGeometryFor(selectedVideo), 0.5)"><span>Center</span></button>
+                    <button type="button" class="quick-dur-btn focal-preset-btn" :class="{ active: Math.abs((videoOverlayGeometryFor(selectedVideo).focal_x ?? 0.5) - 0.85) < 0.05 }" @click="applyFocalPreset(videoOverlayGeometryFor(selectedVideo), 0.85)"><span>Right</span></button>
                   </div>
                 </div>
 
@@ -6543,6 +6659,8 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .program-monitor .preview-primary-window {
@@ -6551,6 +6669,32 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.program-monitor .preview-primary-window.can-reframe {
+  cursor: grab;
+}
+
+.program-monitor .preview-primary-window.can-reframe:active,
+.program-monitor .preview-primary-window.is-dragging {
+  cursor: grabbing !important;
+}
+
+.program-monitor .preview-primary-window .preview-reframe-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.program-monitor .preview-primary-window.is-dragging .preview-reframe-overlay {
+  cursor: grabbing !important;
 }
 
 .program-monitor .preview-media-border {
@@ -6603,6 +6747,34 @@ onBeforeUnmount(() => {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.program-monitor .reframe-hud-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(10, 12, 14, 0.9);
+  border: 1px solid rgba(57, 208, 255, 0.45);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.program-monitor .reframe-hud-badge strong {
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
 }
 
 .program-monitor.has-layout {
@@ -7746,6 +7918,40 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   min-width: 0;
 }
 
+.focal-preset-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px !important;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.focal-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px !important;
+  font-size: 11px !important;
+  font-weight: 600;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--fill-muted);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.focal-preset-btn:hover {
+  background: var(--fill-muted-hover);
+  color: var(--text-primary);
+}
+
+.focal-preset-btn.active {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
 .crop-preset-btn {
   display: inline-flex;
   align-items: center;
@@ -8640,7 +8846,7 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
 .transition-marker {
   position: absolute;
   top: 50%;
-  z-index: 8;
+  z-index: 5;
   width: 16px;
   height: 16px;
   padding: 0;

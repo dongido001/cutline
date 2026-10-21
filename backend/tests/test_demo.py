@@ -35,7 +35,7 @@ def test_demo_is_independent_and_loads_optional_media(tmp_path, monkeypatch):
             assert project.id != first_id
             assert project.status == "shot_plan"
             assert len(project.episodes) == 1
-            assert len(project.characters) == 3
+            assert len([c for c in project.characters if (getattr(c, "kind", None) or "character") == "character"]) == 3
             scenes = project.versions[0].scenes
             assert len(scenes) == 8
             assert sum(len(scene.shots) for scene in scenes) == 16

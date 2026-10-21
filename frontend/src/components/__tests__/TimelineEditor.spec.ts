@@ -910,8 +910,9 @@ describe('TimelineEditor state persistence', () => {
     rects.mockRestore()
     wrapper.unmount()
     await flushPromises()
-    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1].document.audio_overlays
-    expect(saved?.map((item) => [item.label, item.lane])).toEqual([['A', 0], ['B', 1], ['C', 1]])
+    const calls = vi.mocked(api.saveTimeline).mock.calls
+    const saved = calls[calls.length - 1]?.[1].document.audio_overlays
+    expect(saved?.map((item: any) => [item.label, item.lane])).toEqual([['A', 0], ['B', 1], ['C', 1]])
   })
 
   it('drops an image overlay from the IMAGE track between two primary videos', async () => {
@@ -993,7 +994,8 @@ describe('TimelineEditor state persistence', () => {
     expect(first.find('.block-loop-icon').exists()).toBe(false)
     await new Promise((resolve) => setTimeout(resolve, 900))
     await flushPromises()
-    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1]
+    const calls = vi.mocked(api.saveTimeline).mock.calls
+    const saved = calls[calls.length - 1]?.[1]
     expect(saved?.document.primary[0]).toMatchObject({ loop: false, source_in_ms: 0 })
     expect(saved!.document.primary[0]!.source_out_ms).toBe(saved!.document.primary[0]!.duration_ms)
     rects.mockRestore()
@@ -1200,7 +1202,8 @@ describe('TimelineEditor state persistence', () => {
 
     wrapper.unmount()
     await flushPromises()
-    const saved = vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1]
+    const calls = vi.mocked(api.saveTimeline).mock.calls
+    const saved = calls[calls.length - 1]?.[1]
     expect(saved?.document.default_transition).toEqual({ kind: 'dissolve', duration_ms: 500 })
     expect(saved?.document.primary[1]?.transition).toEqual({ kind: 'wipeleft', duration_ms: 1200 })
     expect(saved?.document.primary[0]?.transition ?? null).toBeNull()
@@ -1260,7 +1263,70 @@ describe('TimelineEditor state persistence', () => {
     await wrapper.get('button[title^="Redo"]').trigger('click')
     wrapper.unmount()
     await flushPromises()
-    expect(vi.mocked(api.saveTimeline).mock.calls.at(-1)?.[1].document.audio_overlays?.[0]?.loop).toBe(false)
+    const calls = vi.mocked(api.saveTimeline).mock.calls
+    expect(calls[calls.length - 1]?.[1].document.audio_overlays?.[0]?.loop).toBe(false)
     vi.unstubAllGlobals()
+  })
+
+  it('supports dragging horizontally in 9:16 Shorts mode to reframe widescreen video and adjusts focal_x', async () => {
+    vi.mocked(api.timeline).mockImplementation(async () => {
+      const tl = makeTimeline()
+      return tl
+    })
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    // Switch to Shorts 9:16
+    const shortsBtn = wrapper.findAll('.variant-toggle button').find((b) => b.text().includes('Shorts'))
+    expect(shortsBtn?.exists()).toBe(true)
+    await shortsBtn?.trigger('click')
+    await flushPromises()
+
+    const previewWindow = wrapper.find('.preview-primary-window')
+    expect(previewWindow.exists()).toBe(true)
+    expect(previewWindow.classes()).toContain('can-reframe')
+
+    // Mock getBoundingClientRect
+    vi.spyOn(previewWindow.element, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 100,
+      right: 300,
+      bottom: 450,
+      width: 200,
+      height: 350,
+      x: 100,
+      y: 100,
+      toJSON: () => {},
+    })
+
+    // Pointer down at x=200
+    const downEvent = new MouseEvent('pointerdown', { clientX: 200, clientY: 200, button: 0 }) as unknown as PointerEvent
+    previewWindow.element.dispatchEvent(downEvent)
+    await flushPromises()
+
+    // Drag left by 50px (simulates dragging camera right to show right character)
+    const moveEvent = new MouseEvent('pointermove', { clientX: 150, clientY: 200 }) as unknown as PointerEvent
+    window.dispatchEvent(moveEvent)
+    await flushPromises()
+
+    const vm = wrapper.vm as any
+    const shotGeom = vm.geometryFor(vm.primary[0])
+    // DeltaX = -50, normalizedDelta = (-50 / 200) * 0.463 = -0.11575
+    // nextFocalX = 0.5 - (-0.11575) ≈ 0.616
+    expect(shotGeom.focal_x).toBeGreaterThan(0.55)
+
+    // Pointer up commits edit
+    const upEvent = new MouseEvent('pointerup', { clientX: 150, clientY: 200 }) as unknown as PointerEvent
+    window.dispatchEvent(upEvent)
+    await flushPromises()
+
+    // Verify Inspector focal preset button also works
+    const leftPresetBtn = wrapper.findAll('.focal-preset-btn').find((b) => b.text().includes('Left'))
+    expect(leftPresetBtn?.exists()).toBe(true)
+    await leftPresetBtn?.trigger('click')
+    await flushPromises()
+    expect(shotGeom.focal_x).toBeCloseTo(0.15)
+
+    wrapper.unmount()
   })
 })

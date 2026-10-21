@@ -185,6 +185,8 @@ Dialogue and sound:
 
 Cast, references and props:
 - Declare Cast: [visible character names separated by commas] or Cast: None for every shot. Use plain canonical names without @ in Cast and dialogue cues.
+- Track who remains physically present through each continuous scene. A new speaker or arrival does not remove existing people. In medium, wide or group coverage, retain established people in Cast and both prompts until a staged exit or justified change of coverage. Specify their positions and silent reactions. Widen a two-shot to group coverage when another person joins.
+- For deliberate solo close-ups, list only the visible person in Cast and explicitly place the established listeners off camera. Keep scene presence distinct from visible cast; do not add someone merely because dialogue mentions their name.
 - Keep character names identical across the character bible, Cast and dialogue. Verify off-screen speaker/cast routing after import.
 - Put each character on one contiguous line under Character consistency:. Put physical identity and age first, wardrobe second, then an explicit Voice: description with accent, register, texture and delivery.
 - Define Location, Set, Lighting, Wardrobe and Props in the preamble. These are continuity instructions; reference assets must still exist and be assigned in Cutline.
@@ -874,7 +876,7 @@ function defaultCharacterIdsForShot(shot: Shot | null | undefined): string[] {
   const dialogueNames = new Set(
     shot.dialogue.map((line) => line.character.trim().toLowerCase()).filter(Boolean),
   )
-  const prompt = `${shot.image_prompt} ${shot.action} ${shot.video_prompt}`.toLowerCase()
+  const prompt = `${shot.framing} ${shot.image_prompt} ${shot.action} ${shot.video_prompt}`.toLowerCase()
   return castCharacters.value
     .filter((character) => {
       const name = character.name.trim().toLowerCase()
@@ -3395,6 +3397,7 @@ function formatRenderedAt(value: string) {
                   </div>
                 </div>
 
+                <p v-for="warning in selectedShot?.continuity?.cast_warnings ?? []" :key="warning" class="form-error" role="status">{{ warning }}</p>
                 <div v-if="castCharacters.length" class="cast-chip-row">
                   <button
                     v-for="character in visibleCastCharacters"

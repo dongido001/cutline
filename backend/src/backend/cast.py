@@ -299,11 +299,13 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
         action = shot.action or ""
         image_prompt = shot.image_prompt or ""
         video_prompt = shot.video_prompt or ""
+        framing = shot.framing or ""
     else:
         dialogue = shot.get("dialogue") or []
         action = str(shot.get("action") or "")
         image_prompt = str(shot.get("image_prompt") or "")
         video_prompt = str(shot.get("video_prompt") or "")
+        framing = str(shot.get("framing") or "")
 
     names: list[str] = []
     seen: set[str] = set()
@@ -318,6 +320,7 @@ def shot_mentioned_names(shot: Shot | dict[str, Any]) -> tuple[list[str], str]:
 
     visual_text = "\n".join(
         (
+            QUOTED_SPEECH_RE.sub(" ", framing),
             QUOTED_SPEECH_RE.sub(" ", action),
             QUOTED_SPEECH_RE.sub(" ", image_prompt),
             QUOTED_SPEECH_RE.sub(" ", video_prompt),
@@ -790,7 +793,7 @@ def load_cast_references(
                     reference_id=ref.id, character_id=character.id,
                     view_type=v_type,
                 ))
-        if not usable and kind == "character":
+        if not usable and kind in ("character", "scene"):
             missing.append(character.name)
         if max_per_character and max_per_character > 0:
             usable = usable[:max_per_character]

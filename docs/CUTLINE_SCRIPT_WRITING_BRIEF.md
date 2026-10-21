@@ -51,6 +51,8 @@ Image prompt: A single opening frame, with the characters, starting pose, object
 Video prompt: From that opening frame, describe one manageable action, performance, camera behavior and end state. MAYA says, "Exact spoken words." TUNDE listens silently with lips closed. State relevant audio behavior.
 ```
 
+Track who remains physically present across each continuous scene. New speakers and arrivals do not remove existing people. Medium, wide and group shots must retain established people in Cast, framing, and both prompts until an exit or justified coverage change. Widen a two-shot when another person joins. For deliberate solo close-ups, tag only the visible person and explicitly keep listeners off camera. Dialogue mentioning a person does not establish their presence.
+
 Repeat the shot fields for every shot. Use `Dialogue: None` when there is no speech and explicitly say `No spoken dialogue` in its video prompt. Use `Cast: None` for a genuinely empty shot. Use stable uppercase character names in cast declarations and dialogue cues; avoid switching between full names, nicknames, pronouns and role names as speaker identifiers. Put each character on its own line in Character consistency, with no bullet. Keep the list contiguous. Put physical identity and wardrobe first: Cutline can use the first two sentences as a compact visual profile. End with an explicit `Voice:` description.
 
 The title, genre and aspect-ratio lines are useful context, but the aspect ratio must also be selected in the Cutline project. The metadata does not configure the whole production automatically. Import only one episode per document; use Cutline's New Episode workflow for subsequent episodes.

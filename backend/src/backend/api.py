@@ -1543,15 +1543,16 @@ def delete_shot(shot_id: str, db: Session = Depends(get_db)) -> None:
         if frame.filename:
             files_to_delete.append(frame.filename)
 
-    if project.timeline:
+    for timeline in db.scalars(select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)):
         for doc_attr in ("document", "shorts_document"):
-            raw_doc = getattr(project.timeline, doc_attr)
+            raw_doc = getattr(timeline, doc_attr)
             if not raw_doc:
                 continue
             document = TimelineDocument.model_validate(raw_doc)
             orig_primary_len = len(document.primary)
             orig_video_overlay_len = len(document.video_overlays)
             orig_image_overlay_len = len(document.image_overlays)
+            orig_audio_overlay_len = len(document.audio_overlays)
             document.primary = [
                 item for item in document.primary
                 if not (item.source and item.source.ref_id == shot_id)
@@ -1564,13 +1565,18 @@ def delete_shot(shot_id: str, db: Session = Depends(get_db)) -> None:
                 overlay for overlay in document.image_overlays
                 if not (overlay.source and overlay.source.ref_id == shot_id)
             ]
+            document.audio_overlays = [
+                overlay for overlay in document.audio_overlays
+                if not (overlay.source and overlay.source.ref_id == shot_id)
+            ]
             if (
                 len(document.primary) != orig_primary_len
                 or len(document.video_overlays) != orig_video_overlay_len
                 or len(document.image_overlays) != orig_image_overlay_len
+                or len(document.audio_overlays) != orig_audio_overlay_len
             ):
-                setattr(project.timeline, doc_attr, document.model_dump(mode="json"))
-                project.timeline.revision += 1
+                setattr(timeline, doc_attr, document.model_dump(mode="json"))
+                timeline.revision += 1
 
     invalidate_final_cut(project, db)
     scene_id = scene.id

@@ -217,6 +217,7 @@ class CharacterContinuityStatus(BaseModel):
 
 
 class ShotContinuityStatus(BaseModel):
+    cast_warnings: list[str] = []
     snapshot: dict[str, Any] | None = None
     characters: list[CharacterContinuityStatus] = []
     missing_character_references: list[str] = []
@@ -271,7 +272,7 @@ class ShotCreate(BaseModel):
         if isinstance(value, (int, float)):
             return round(value)
         return value
-    framing: str = Field(default="Medium", min_length=1, max_length=200)
+    framing: str = Field(default="Medium", min_length=1, max_length=1000)
     image_prompt: str = Field(default="", max_length=8000)
     video_prompt: str = Field(default="", max_length=8000)
     title_card_text: str = Field(default="", max_length=500)
@@ -280,7 +281,7 @@ class ShotCreate(BaseModel):
 
 
 class ShotUpdate(BaseModel):
-    framing: str = Field(min_length=1, max_length=200)
+    framing: str = Field(min_length=1, max_length=1000)
     duration_ms: int = Field(ge=1000, le=3_600_000)
 
     @field_validator("duration_ms", mode="before")

@@ -250,6 +250,9 @@ def _image_prompt(
             constraints.append(
                 f"Character identity references: {', '.join(people)}. Preserve each canonical face and identity."
             )
+            constraints.append(
+                f"Camera coverage framing: Camera is tightly cropped and angled to frame ONLY {', '.join(people)}; all other scene participants and unoccupied location areas remain off-camera outside the frame."
+            )
         if props:
             constraints.append(
                 f"Prop object references: {', '.join(props)}. Preserve each prop's shape, materials, and colors."
@@ -824,18 +827,25 @@ def _speaker_position_lock(snapshot: dict[str, Any], shot: Shot | None = None) -
         for name in names
     }
     sources = [
+        _text(shot.framing if shot is not None else snapshot.get("framing")),
         _text(shot.action if shot is not None else snapshot.get("action")),
         _text(getattr(shot, "image_prompt", "") if shot is not None else snapshot.get("image_prompt")),
     ]
     positions: dict[str, str] = {}
     for source in sources:
         for match in _SCREEN_POSITION_RE.finditer(source):
-            window_start = max(0, match.start() - 60)
+            window_start = max(0, match.start() - 90)
             window = source[window_start:match.start()]
-            window = re.split(r"[.;!?]", window)[-1]
+            protected = re.sub(r"\b(MR|MRS|MS|DR|PROF|JR|SR)\.", r"\1 ", window, flags=re.I)
+            clause = re.split(r"[.;!?]", protected)[-1]
             nearest: tuple[int, str] | None = None
             for name, pattern in name_patterns.items():
-                for name_match in pattern.finditer(window):
+                plain_name = re.sub(r"\b(MR|MRS|MS|DR|PROF|JR|SR)\.", r"\1", name, flags=re.I)
+                plain_pattern = re.compile(
+                    r"@?\b" + r"[\s_]".join(map(re.escape, plain_name.split())) + r"\b",
+                    re.IGNORECASE,
+                )
+                for name_match in (*pattern.finditer(window), *plain_pattern.finditer(clause)):
                     if nearest is None or name_match.start() > nearest[0]:
                         nearest = (name_match.start(), name)
             if nearest is None:
@@ -969,6 +979,36 @@ def video_continuity_prompt(
     return "\n\n".join([sanitized_video_prompt.strip(), *package]).strip()
 
 
+def cast_continuity_warnings(shot: Shot) -> list[str]:
+    """Flag unexplained omissions; never silently add people to a composition."""
+    people = {c.id: c.name for c in shot.scene.script_version.project.characters if c.kind == "character"}
+    established: set[str] = set()
+    for previous in sorted(shot.scene.shots, key=lambda item: item.order_index):
+        if previous.order_index >= shot.order_index:
+            break
+        established.update(set(previous.character_ids or []) & people.keys())
+        for character_id in list(established):
+            name = re.escape(people[character_id])
+            if re.search(rf"\b{name}\s+(?:exits|leaves|walks out|steps out)\b", previous.action or "", re.I):
+                established.remove(character_id)
+    text = "\n".join([shot.framing or "", shot.action or "", shot.image_prompt or "", shot.video_prompt or ""])
+    protected_text = re.sub(r"\b(MR|MRS|MS|DR|PROF|JR|SR)\.", r"\1", text, flags=re.I)
+    unexplained = []
+    for character_id in sorted(established - set(shot.character_ids or []), key=lambda item: people[item]):
+        name = people[character_id]
+        plain_name = re.sub(r"\b(MR|MRS|MS|DR|PROF|JR|SR)\.", r"\1", name, flags=re.I)
+        if re.search(
+            rf"\b(?:{re.escape(name)}|{re.escape(plain_name)})\b[^.!?\n]{{0,100}}\b(?:off[- ]camera|off[- ]screen|outside (?:the )?frame|exits|leaves)\b",
+            protected_text,
+            re.I,
+        ):
+            continue
+        unexplained.append(name)
+    if not unexplained:
+        return []
+    return [f"Earlier in this scene: {', '.join(unexplained)}. They are not tagged here. Include them in the cast and composition, or explicitly describe their exit or off-camera position."]
+
+
 def shot_continuity_status(shot: Shot) -> dict[str, Any]:
     snapshot = shot.continuity_snapshot
     scene = snapshot.get("scene") if snapshot else _scene_package(shot.scene)
@@ -1017,4 +1057,5 @@ def shot_continuity_status(shot: Shot) -> dict[str, Any]:
         "missing_character_references": missing_names,
         "missing_fields": missing_fields,
         "ready": not missing_names,
+        "cast_warnings": cast_continuity_warnings(shot),
     }

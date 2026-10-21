@@ -1284,14 +1284,17 @@ def _resolve_video_cast_references(
             .options(selectinload(Character.references))
         ).all()
     )
+    by_id = {char.id: char for char in all_chars}
     mention_ids = extract_mention_element_ids(
         all_chars, shot.video_prompt, shot.image_prompt, shot.action
     )
-    tagged_ids = list(
-        dict.fromkeys(
+    tagged_ids = [
+        cid
+        for cid in dict.fromkeys(
             [str(cid) for cid in (shot.character_ids or []) if cid] + mention_ids
         )
-    )
+        if cid in by_id and (getattr(by_id[cid], "kind", None) or "character") == "character"
+    ]
     if not tagged_ids:
         return [], []
 
@@ -1308,7 +1311,6 @@ def _resolve_video_cast_references(
             if missing_ids:
                 candidate_ids = missing_ids
 
-    by_id = {char.id: char for char in all_chars}
     ref_paths: list[Path] = []
     char_names: list[str] = []
     for cid in candidate_ids:
