@@ -279,6 +279,7 @@ class ServiceDefinition:
             proc = subprocess.Popen(
                 [str(worker_bin)],
                 cwd=str(BACKEND_ROOT),
+                stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,

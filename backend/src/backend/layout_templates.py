@@ -22,6 +22,15 @@ SHORTS_TEMPLATES: dict[str, TemplateDef] = {
         "video": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
         "default_matte": "solid",
     },
+    "boxed": {
+        "id": "boxed",
+        "label": "Boxed (Letterbox)",
+        "blurb": "Entire 16:9 video boxed in center · top & bottom matte",
+        "family": "shorts",
+        "video": {"x": 0.0, "y": 0.3418, "w": 1.0, "h": 0.3164},
+        "default_matte": "solid",
+        "slots": {"top": "hook", "bottom": "caption"},
+    },
     "center_stage": {
         "id": "center_stage",
         "label": "Center stage",

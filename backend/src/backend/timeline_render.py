@@ -198,11 +198,11 @@ def _edge_crop_fractions(geometry: TimelineVariantGeometry) -> tuple[float, floa
     return c_top, c_bottom, c_left, c_right
 
 
-def _video_filter(width: int, height: int, geometry: TimelineVariantGeometry) -> str:
+def _video_filter(width: int, height: int, geometry: TimelineVariantGeometry, pad_color: str = "black") -> str:
     if geometry.fit == "contain":
         base = (
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={pad_color}"
         )
         if geometry.zoom > 1.001:
             scaled_w = max(width, round(width * geometry.zoom))
@@ -302,11 +302,15 @@ def _normalize_primary(
     use_layout = not is_full_bleed(template)
 
     command = ["ffmpeg", "-y"]
+    decoder_flags = _input_video_decoder_flags(media.path) if media else []
     if looping:
+        command.extend(decoder_flags)
         command.extend(["-stream_loop", "-1", "-i", str(media.path)])
     elif media.is_clip:
+        command.extend(decoder_flags)
         command.extend(["-i", str(media.path)])
     else:
+        command.extend(decoder_flags)
         command.extend(["-loop", "1", "-i", str(media.path)])
     command.extend(["-f", "lavfi", "-t", str(duration), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
 
@@ -351,8 +355,9 @@ def _normalize_primary(
             f"pad={frame_w}:{frame_h}:{dst_x0}:{dst_y0}:color=black"
         )
 
+    pad_color = _hex_to_ffmpeg_color(canvas.matte_color, default="black")
     fg_chain = (
-        f"{trim_chain}{_video_filter(frame_w, frame_h, geometry)}"
+        f"{trim_chain}{_video_filter(frame_w, frame_h, geometry, pad_color=pad_color)}"
         f"{boost_chain}{lut_chain}{edge_crop_chain},setsar=1,fps=30,"
         f"tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration}"
     )
@@ -847,6 +852,36 @@ def _input_count(command: list[str]) -> int:
     return sum(1 for flag in command if flag == "-i")
 
 
+def _input_video_decoder_flags(path: Path) -> list[str]:
+    suffix = path.suffix.lower()
+    if suffix in (".webm", ".mkv"):
+        try:
+            res = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name",
+                    "-of", "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode == 0 and res.stdout:
+                data = json.loads(res.stdout)
+                streams = data.get("streams", [])
+                if streams:
+                    codec = streams[0].get("codec_name")
+                    if codec == "vp9":
+                        return ["-c:v", "libvpx-vp9"]
+                    if codec == "vp8":
+                        return ["-c:v", "libvpx"]
+        except Exception:
+            return ["-c:v", "libvpx-vp9"]
+        return ["-c:v", "libvpx-vp9"]
+    return []
+
+
 def _overlay_position(position: str, width: int, height: int, overlay_width: int) -> tuple[str, str]:
     margin_x = round(width * 0.08)
     margin_y = round(height * 0.08)
@@ -871,15 +906,43 @@ def _compute_overlay_layout(
     off_y = round(height * max(-1.0, min(1.0, float(getattr(geometry, "offset_y", 0.0) or 0.0))))
 
     if position == "full-frame":
-        scale_chain = _video_filter(width, height, geometry)
+        if getattr(geometry, "fit", "cover") == "contain":
+            src_w, src_h = _probe_dimensions(media_path)
+            aspect = max(0.1, src_w / max(1, src_h))
+            if width / aspect <= height:
+                el_w = width
+                el_h = max(16, (round(width / aspect) // 2) * 2)
+            else:
+                el_h = height
+                el_w = max(16, (round(height * aspect) // 2) * 2)
+            final_x = off_x + (width - el_w) // 2
+            final_y = off_y + (height - el_h) // 2
+            scale_chain = f"scale={el_w}:{el_h}"
+            if has_edge_crop:
+                crop_x = round(el_w * c_left)
+                crop_y = round(el_h * c_top)
+                crop_w = max(16, (round(el_w * (1.0 - c_left - c_right)) // 2) * 2)
+                crop_h = max(16, (round(el_h * (1.0 - c_top - c_bottom)) // 2) * 2)
+                scale_chain = f"{scale_chain},crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+                return scale_chain, str(final_x + crop_x), str(final_y + crop_y), crop_w, crop_h
+            return scale_chain, str(final_x), str(final_y), el_w, el_h
+
+        zoom = max(1.0, float(getattr(geometry, "zoom", 1.0) or 1.0))
+        fx = float(getattr(geometry, "focal_x", 0.5) or 0.5)
+        fy = float(getattr(geometry, "focal_y", 0.5) or 0.5)
+        scaled_w = max(16, (round(width * zoom) // 2) * 2)
+        scaled_h = max(16, (round(height * zoom) // 2) * 2)
+        final_x = off_x - round((scaled_w - width) * fx)
+        final_y = off_y - round((scaled_h - height) * fy)
+        scale_chain = f"scale={scaled_w}:{scaled_h}"
         if has_edge_crop:
-            crop_x = round(width * c_left)
-            crop_y = round(height * c_top)
-            crop_w = max(16, (round(width * (1.0 - c_left - c_right)) // 2) * 2)
-            crop_h = max(16, (round(height * (1.0 - c_top - c_bottom)) // 2) * 2)
+            crop_x = round(scaled_w * c_left)
+            crop_y = round(scaled_h * c_top)
+            crop_w = max(16, (round(scaled_w * (1.0 - c_left - c_right)) // 2) * 2)
+            crop_h = max(16, (round(scaled_h * (1.0 - c_top - c_bottom)) // 2) * 2)
             scale_chain = f"{scale_chain},crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
-            return scale_chain, str(crop_x + off_x), str(crop_y + off_y), crop_w, crop_h
-        return scale_chain, str(off_x), str(off_y), width, height
+            return scale_chain, str(final_x + crop_x), str(final_y + crop_y), crop_w, crop_h
+        return scale_chain, str(final_x), str(final_y), scaled_w, scaled_h
 
     src_w, src_h = _probe_dimensions(media_path)
     aspect = max(0.1, src_w / max(1, src_h))
@@ -999,19 +1062,22 @@ def _composite_overlays(
         if not media.native and variant not in overlay.variant:
             geometry = geometry.model_copy(update={"fit": "cover", "zoom": 1})
         if media.is_clip:
-            command.extend(["-i", str(media.path)])
+            decoder_flags = _input_video_decoder_flags(media.path)
+            command.extend([*decoder_flags, "-i", str(media.path)])
             input_idx = 1 + len(specs)
             specs.append(("video", overlay, media.path, geometry, media.color_boost_strength))
             if (not getattr(overlay, "mute_audio", False)) and getattr(overlay, "volume", 1.0) > 0 and _has_audio(media.path):
                 audio_specs.append((input_idx, overlay, media.path))
         else:
-            command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
+            decoder_flags = _input_video_decoder_flags(media.path)
+            command.extend([*decoder_flags, "-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
             specs.append(("image", overlay, media.path, geometry, 0.0))
 
     for overlay in document.image_overlays:
         geometry = _geometry(overlay, variant)
         media = resolve_source(overlay.source, project, db, desired_aspect, geometry)
-        command.extend(["-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
+        decoder_flags = _input_video_decoder_flags(media.path)
+        command.extend([*decoder_flags, "-loop", "1", "-t", str(total_seconds), "-i", str(media.path)])
         specs.append(("image", overlay, media.path, geometry, 0.0))
     for index, overlay in enumerate(document.text_overlays):
         geometry = _geometry(overlay, variant)

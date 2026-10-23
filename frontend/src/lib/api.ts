@@ -139,6 +139,27 @@ export interface Shot {
   media_variants: ShotMediaVariant[]
   conversation_url?: string | null
   takes?: ShotTake[]
+  notes?: ShotNote[]
+  unresolved_note_count?: number
+}
+
+export interface ShotNoteAttachment {
+  id: string
+  original_name: string
+  mime_type: string
+  size_bytes: number
+  url: string
+  created_at: string
+}
+
+export interface ShotNote {
+  id: string
+  shot_id: string
+  body: string
+  resolved: boolean
+  attachments: ShotNoteAttachment[]
+  created_at: string
+  updated_at: string
 }
 
 export interface ShotTake {
@@ -413,6 +434,7 @@ export interface ProjectSummary {
   episode_label: string
   created_at: string
   updated_at: string
+  unresolved_note_count?: number
 }
 
 export interface CompilationSummary {
@@ -421,6 +443,8 @@ export interface CompilationSummary {
   title: string
   description?: string | null
   episode_ids: string[]
+  episode_id?: string | null
+  shot_ids?: string[]
   settings: Record<string, any>
   created_at: string
   updated_at: string
@@ -431,7 +455,9 @@ export interface CompilationSummary {
 export interface CompilationCreateInput {
   title: string
   description?: string | null
-  episode_ids: string[]
+  episode_ids?: string[]
+  episode_id?: string | null
+  shot_ids?: string[]
   settings?: Record<string, any>
 }
 
@@ -439,6 +465,8 @@ export interface CompilationUpdateInput {
   title?: string
   description?: string | null
   episode_ids?: string[]
+  episode_id?: string | null
+  shot_ids?: string[]
   settings?: Record<string, any>
 }
 
@@ -1313,6 +1341,22 @@ export const api = {
       method: 'POST',
     }),
   projects: () => request<ProjectSummary[]>('/api/projects'),
+  shotNotes: (shotId: string) => request<ShotNote[]>(`/api/shots/${shotId}/notes`),
+  createShotNote: (shotId: string, bodyText: string, files: File[] = []) => {
+    const body = new FormData()
+    body.append('body', bodyText)
+    files.forEach((file) => body.append('files', file))
+    return request<ShotNote>(`/api/shots/${shotId}/notes`, { method: 'POST', body })
+  },
+  updateShotNote: (noteId: string, input: { body?: string; resolved?: boolean }) =>
+    request<ShotNote>(`/api/shot-notes/${noteId}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  addShotNoteAttachments: (noteId: string, files: File[]) => {
+    const body = new FormData()
+    files.forEach((file) => body.append('files', file))
+    return request<ShotNote>(`/api/shot-notes/${noteId}/attachments`, { method: 'POST', body })
+  },
+  deleteShotNoteAttachment: (attachmentId: string) => request<void>(`/api/shot-note-attachments/${attachmentId}`, { method: 'DELETE' }),
+  deleteShotNote: (noteId: string) => request<void>(`/api/shot-notes/${noteId}`, { method: 'DELETE' }),
   project: (id: string, episodeId?: string) =>
     request<ProjectDetail>(`/api/projects/${id}${episodeId ? `?episode_id=${encodeURIComponent(episodeId)}` : ''}`),
   updateProject: (id: string, input: ProjectUpdateInput) =>
@@ -1721,6 +1765,8 @@ export const api = {
     request<ProjectTimeline>(`/api/compilations/${compilationId}/timeline?edit=${edit}`),
   compilationShots: (compilationId: string) =>
     request<Shot[]>(`/api/compilations/${compilationId}/shots`),
+  episodeShots: (projectId: string, episodeId: string) =>
+    request<Shot[]>(`/api/projects/${projectId}/episodes/${episodeId}/shots`),
   saveCompilationTimeline: (compilationId: string, timeline: ProjectTimeline, edit: OutputVariant = 'landscape') => {
     const sanitizePrimary = (item: TimelinePrimaryItem): TimelinePrimaryItem => ({
       ...item,

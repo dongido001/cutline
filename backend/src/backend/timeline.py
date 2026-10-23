@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .final_cut import probe_duration_ms
-from .models import Compilation, Episode, Project, ProjectTimeline, Scene, ScriptVersion, Shot, TimelineAsset
+from .models import Compilation, Episode, Project, ProjectTimeline, Scene, ScriptVersion, Shot, ShotNote, TimelineAsset
 from .schemas import TimelineDocument, TimelinePrimaryItem, TimelineSource, TimelineTextOverlay
 from .settings import settings
 
@@ -30,6 +30,10 @@ def latest_script_version(
         selectinload(ScriptVersion.scenes)
         .selectinload(Scene.shots)
         .selectinload(Shot.media_variants),
+        selectinload(ScriptVersion.scenes)
+        .selectinload(Scene.shots)
+        .selectinload(Shot.notes)
+        .selectinload(ShotNote.attachments),
         *extra_options,
     )
 
@@ -237,6 +241,88 @@ def _concat_episode_timelines(
     ).model_dump(mode="json")
 
 
+def _build_shot_compilation_timeline(
+    project: Project,
+    db: Session,
+    episode_id: str | None,
+    shot_ids: list[str],
+    prefer_shorts: bool = False,
+) -> dict:
+    """Build a compilation timeline document from specific shot IDs."""
+    primary: list[dict] = []
+    source_items_by_ref: dict[str, dict] = {}
+
+    if episode_id:
+        ep_timeline = ensure_timeline(project, db, episode_id=episode_id)
+        doc = (ep_timeline.shorts_document if prefer_shorts else ep_timeline.document) or ep_timeline.document
+        if not doc:
+            doc = initial_document(project, db, episode_id=episode_id)
+        for item in doc.get("primary", []):
+            ref_id = item.get("source", {}).get("ref_id") if item.get("source") else None
+            if ref_id and ref_id not in source_items_by_ref:
+                source_items_by_ref[ref_id] = item
+
+    shots_stmt = (
+        select(Shot)
+        .where(Shot.id.in_(shot_ids))
+        .options(
+            selectinload(Shot.media_variants),
+            selectinload(Shot.takes),
+            selectinload(Shot.image_references),
+        )
+    )
+    shots_map = {s.id: s for s in db.scalars(shots_stmt).all()}
+
+    for sid in shot_ids:
+        shot = shots_map.get(sid)
+        if not shot:
+            continue
+        if sid in source_items_by_ref:
+            item_copy = deepcopy(source_items_by_ref[sid])
+            item_copy["id"] = _id()
+            primary.append(item_copy)
+            continue
+
+        has_clip = any(v.media_type == "clip" for v in (shot.media_variants or [])) or bool(shot.clip)
+        source_kind = "shot_clip" if has_clip else "shot_image"
+        dur = shot.duration_ms if shot.duration_ms and shot.duration_ms > 0 else 3000
+        primary.append(
+            {
+                "id": _id(),
+                "kind": "video" if has_clip else "image",
+                "label": shot.title or f"Shot {shot.order_index + 1}",
+                "source": {"kind": source_kind, "ref_id": shot.id},
+                "duration_ms": dur,
+                "source_in_ms": 0,
+                "source_out_ms": dur,
+                "text": "",
+                "variant": {
+                    "landscape": {
+                        "fit": "cover",
+                        "focal_x": 0.5,
+                        "focal_y": 0.5,
+                        "zoom": 1,
+                    },
+                    "shorts": {
+                        "fit": "cover",
+                        "focal_x": 0.5,
+                        "focal_y": 0.5,
+                        "zoom": 1,
+                    },
+                },
+            }
+        )
+
+    return TimelineDocument(
+        version=1,
+        primary=primary,
+        video_overlays=[],
+        image_overlays=[],
+        text_overlays=[],
+        audio_overlays=[],
+    ).model_dump(mode="json")
+
+
 def ensure_compilation_timeline(db: Session, compilation: Compilation) -> ProjectTimeline:
     timeline = db.scalar(
         select(ProjectTimeline).where(
@@ -251,12 +337,20 @@ def ensure_compilation_timeline(db: Session, compilation: Compilation) -> Projec
     if not project:
         raise ValueError("Project not found for compilation")
 
-    landscape_doc = _concat_episode_timelines(
-        project, db, list(compilation.episode_ids or []), prefer_shorts=False
-    )
-    shorts_doc = _concat_episode_timelines(
-        project, db, list(compilation.episode_ids or []), prefer_shorts=True
-    )
+    if compilation.shot_ids:
+        landscape_doc = _build_shot_compilation_timeline(
+            project, db, compilation.episode_id, list(compilation.shot_ids or []), prefer_shorts=False
+        )
+        shorts_doc = _build_shot_compilation_timeline(
+            project, db, compilation.episode_id, list(compilation.shot_ids or []), prefer_shorts=True
+        )
+    else:
+        landscape_doc = _concat_episode_timelines(
+            project, db, list(compilation.episode_ids or []), prefer_shorts=False
+        )
+        shorts_doc = _concat_episode_timelines(
+            project, db, list(compilation.episode_ids or []), prefer_shorts=True
+        )
 
     timeline = ProjectTimeline(
         project_id=compilation.project_id,
@@ -305,12 +399,18 @@ def promote_available_clips(
         compilation = db.get(Compilation, compilation_id)
         shots: list[Shot] = []
         seen: set[str] = set()
-        for ep_id in list(getattr(compilation, "episode_ids", None) or []):
-            for shot in latest_shots(project.id, db, episode_id=ep_id):
-                if shot.id in seen:
-                    continue
-                seen.add(shot.id)
-                shots.append(shot)
+        if compilation and compilation.shot_ids:
+            for shot in db.scalars(select(Shot).where(Shot.id.in_(compilation.shot_ids))).all():
+                if shot.id not in seen:
+                    seen.add(shot.id)
+                    shots.append(shot)
+        else:
+            for ep_id in list(getattr(compilation, "episode_ids", None) or []):
+                for shot in latest_shots(project.id, db, episode_id=ep_id):
+                    if shot.id in seen:
+                        continue
+                    seen.add(shot.id)
+                    shots.append(shot)
     elif episode_id:
         timeline = db.scalar(
             select(ProjectTimeline).where(

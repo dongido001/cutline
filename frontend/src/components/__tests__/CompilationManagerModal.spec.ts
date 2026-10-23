@@ -67,11 +67,11 @@ it('allows selecting episodes via preset and creates a new compilation box', asy
   })
 
   const wrapper = mount(CompilationManagerModal, {
-    props: { show: true },
+    props: { show: true, initialType: 'multi_episode', initialEpisodeId: 'ep-1' },
   })
   await flushPromises()
 
-  expect(wrapper.text()).toContain('Multi-Episode Compilation Boxes')
+  expect(wrapper.text()).toContain('Multi-Episode Box')
 
   // Click preset "Episodes 1–4"
   const presetBtns = wrapper.findAll('.preset-btn')
@@ -125,5 +125,90 @@ it('opens an existing compilation in Assemble', async () => {
 
   expect(wrapper.emitted('open-compilation')).toEqual([['comp-1']])
   expect(wrapper.emitted('close')).toHaveLength(1)
+  wrapper.unmount()
+})
+
+it('allows editing an existing compilation and saving updates', async () => {
+  const store = useStudioStore()
+  store.currentProject = mockProject
+
+  const updateSpy = vi.spyOn(store, 'updateCompilation').mockResolvedValue({
+    id: 'comp-1',
+    project_id: 'proj-123',
+    title: 'Batch 1-4 Updated',
+    description: 'Updated description',
+    episode_ids: ['ep-1', 'ep-2', 'ep-3', 'ep-4'],
+    settings: {},
+    created_at: '2026-10-10T10:00:00Z',
+    updated_at: '2026-10-10T11:00:00Z',
+    clip_count: 20,
+    duration_ms: 100000,
+  })
+
+  const wrapper = mount(CompilationManagerModal, {
+    props: { show: true },
+  })
+  await flushPromises()
+
+  // Switch to Saved Compilations tab
+  const tabs = wrapper.findAll('.tab-btn')
+  const savedTab = tabs.find((t) => t.text().includes('Saved Compilations'))
+  expect(savedTab).toBeDefined()
+  await savedTab!.trigger('click')
+  await flushPromises()
+
+  // Click the Edit button on comp-1
+  const editBtn = wrapper.find('.edit-btn')
+  expect(editBtn.exists()).toBe(true)
+  await editBtn.trigger('click')
+  await flushPromises()
+
+  // Verify form is populated with comp-1 data
+  expect(wrapper.text()).toContain('Edit Box: Batch 1-3')
+  const titleInput = wrapper.find<HTMLInputElement>('#comp-title')
+  expect(titleInput.element.value).toBe('Batch 1-3')
+
+  // Update title
+  await titleInput.setValue('Batch 1-4 Updated')
+  await flushPromises()
+
+  // Click Save Changes button
+  const saveBtn = wrapper.find('.primary-btn')
+  expect(saveBtn.text()).toContain('Save Changes')
+  await saveBtn.trigger('click')
+  await flushPromises()
+
+  expect(updateSpy).toHaveBeenCalledWith(
+    'comp-1',
+    expect.objectContaining({
+      title: 'Batch 1-4 Updated',
+    })
+  )
+
+  expect(wrapper.emitted('open-compilation')).toEqual([['comp-1']])
+  expect(wrapper.emitted('close')).toHaveLength(1)
+  wrapper.unmount()
+})
+
+it('opens directly in edit mode when initialCompilationId is provided', async () => {
+  const store = useStudioStore()
+  store.currentProject = mockProject
+
+  const wrapper = mount(CompilationManagerModal, {
+    props: { show: true, initialCompilationId: 'comp-1' },
+  })
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('Edit Box: Batch 1-3')
+  expect(wrapper.text()).toContain('Editing Batch 1-3')
+
+  // Cancel edit returns to saved compilations list
+  const cancelEditBtn = wrapper.find('.cancel-edit-pill')
+  expect(cancelEditBtn.exists()).toBe(true)
+  await cancelEditBtn.trigger('click')
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('Saved Compilations')
+  expect(wrapper.text()).toContain('Batch 1-3')
   wrapper.unmount()
 })

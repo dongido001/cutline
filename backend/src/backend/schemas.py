@@ -44,7 +44,9 @@ class EpisodeSummary(BaseModel):
 class CompilationCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = None
-    episode_ids: list[str] = Field(min_length=1)
+    episode_ids: list[str] = Field(default_factory=list)
+    episode_id: str | None = None
+    shot_ids: list[str] = Field(default_factory=list)
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -52,6 +54,8 @@ class CompilationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     episode_ids: list[str] | None = None
+    episode_id: str | None = None
+    shot_ids: list[str] | None = None
     settings: dict[str, Any] | None = None
 
 
@@ -63,6 +67,8 @@ class CompilationRead(BaseModel):
     title: str
     description: str | None = None
     episode_ids: list[str] = []
+    episode_id: str | None = None
+    shot_ids: list[str] = []
     settings: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime
@@ -114,6 +120,7 @@ class ProjectSummary(BaseModel):
     flow_project_id: str | None = None
     created_at: datetime
     updated_at: datetime
+    unresolved_note_count: int = 0
 
 
 class ProjectFinalCutRead(BaseModel):
@@ -225,6 +232,32 @@ class ShotContinuityStatus(BaseModel):
     ready: bool = True
 
 
+class ShotNoteAttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    original_name: str
+    mime_type: str
+    size_bytes: int
+    url: str
+    created_at: datetime
+
+
+class ShotNoteRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    shot_id: str
+    body: str
+    resolved: bool
+    attachments: list[ShotNoteAttachmentRead] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShotNoteUpdate(BaseModel):
+    body: str | None = Field(default=None, min_length=1, max_length=10000)
+    resolved: bool | None = None
+
+
 class ShotRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -257,6 +290,8 @@ class ShotRead(BaseModel):
     continuity_frames: list[ShotContinuityFrameRead] = []
     image_references: list[ShotImageReferenceRead] = []
     conversation_url: str | None = None
+    notes: list[ShotNoteRead] = []
+    unresolved_note_count: int = 0
 
 
 class ShotCreate(BaseModel):
@@ -291,7 +326,7 @@ class ShotUpdate(BaseModel):
             return round(value)
         return value
     image_prompt: str = Field(min_length=1, max_length=8000)
-    video_prompt: str = Field(default="", max_length=8000)
+    video_prompt: str | None = Field(default=None, max_length=8000)
     title_card_text: str = Field(default="", max_length=500)
     character_ids: list[str] | None = None
     dialogue: list[dict[str, Any]] | None = None

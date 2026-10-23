@@ -453,8 +453,13 @@ def build_copy_context(db: Session, kit: ReleaseKit) -> dict[str, Any]:
         compilation = db.get(Compilation, kit.compilation_id)
         if compilation:
             context["compilation"] = {"title": compilation.title, "description": compilation.description or ""}
+            if compilation.episode_id:
+                ep = db.get(Episode, compilation.episode_id)
+                if ep:
+                    context["episode"] = _episode_context(db, project, ep)
             episodes = [db.get(Episode, episode_id) for episode_id in compilation.episode_ids or []]
-            context["episodes"] = [_episode_context(db, project, episode, 4) for episode in episodes if episode][:10]
+            if episodes:
+                context["episodes"] = [_episode_context(db, project, episode, 4) for episode in episodes if episode][:10]
     elif kit.episode_id:
         episode = db.get(Episode, kit.episode_id)
         if episode:

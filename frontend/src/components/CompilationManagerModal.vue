@@ -8,26 +8,57 @@ import {
   Film,
   GripVertical,
   Plus,
+  Scissors,
   Sparkles,
   Trash2,
   X,
   Play,
   ArrowRight,
   Layers,
+  Pencil,
 } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
-import type { CompilationSummary } from '@/lib/api'
+import { api, type CompilationSummary, type Shot } from '@/lib/api'
 
-const props = defineProps<{ show: boolean }>()
+interface Props {
+  show: boolean
+  initialType?: 'episode_shots' | 'multi_episode'
+  initialEpisodeId?: string | null
+  initialShotIds?: string[]
+  initialCompilationId?: string | null
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  initialType: undefined,
+  initialEpisodeId: null,
+  initialShotIds: () => [],
+  initialCompilationId: null,
+})
+
 const emit = defineEmits<{ close: []; 'open-compilation': [compilationId: string] }>()
 
 const store = useStudioStore()
 const dialog = ref<HTMLDialogElement>()
 
 const activeTab = ref<'create' | 'list'>('create')
+const createType = ref<'episode_shots' | 'multi_episode'>('episode_shots')
+const editingCompilationId = ref<string | null>(null)
+const isEditing = computed(() => Boolean(editingCompilationId.value))
+const editingCompilation = computed(() =>
+  compilations.value.find((c) => c.id === editingCompilationId.value) ?? null,
+)
+
+// Episode Shot Cut state
+const selectedEpisodeId = ref<string>('')
+const episodeShots = ref<Shot[]>([])
+const loadingShots = ref(false)
+const selectedShotIds = ref<string[]>([])
+
+// Multi-Episode Box state
+const selectedEpisodeIds = ref<string[]>([])
+
 const newTitle = ref('')
 const newDescription = ref('')
-const selectedEpisodeIds = ref<string[]>([])
 const isSubmitting = ref(false)
 const localError = ref('')
 const deletingId = ref<string | null>(null)
@@ -36,27 +67,83 @@ const confirmingDeleteId = ref<string | null>(null)
 const projectEpisodes = computed(() => store.episodes || [])
 const compilations = computed(() => store.compilations || [])
 
-// Default title helper
-watch(
-  [selectedEpisodeIds, () => projectEpisodes.value],
-  () => {
-    if (newTitle.value && !newTitle.value.startsWith('Episodes ')) return
-    if (!selectedEpisodeIds.value.length) {
-      newTitle.value = ''
-      return
+// Load shots for chosen episode
+async function loadEpisodeShots(epId: string) {
+  if (!epId) {
+    episodeShots.value = []
+    return
+  }
+  // Initialize immediately from store if matching current episode
+  if (store.currentProject?.current_version?.scenes && store.currentEpisodeId === epId) {
+    episodeShots.value = store.currentProject.current_version.scenes.flatMap((s) => s.shots || [])
+  }
+  if (store.currentProject?.id) {
+    loadingShots.value = true
+    try {
+      const shots = await api.episodeShots(store.currentProject.id, epId)
+      if (selectedEpisodeId.value === epId) {
+        episodeShots.value = shots
+      }
+    } catch {
+      // In tests or offline, keep in-memory fallback
+    } finally {
+      loadingShots.value = false
     }
-    const nums = selectedEpisodeIds.value
-      .map((id) => projectEpisodes.value.find((e) => e.id === id)?.episode_number)
-      .filter((n): n is number => n !== undefined)
-    if (nums.length === 1) {
-      newTitle.value = `Episode ${nums[0]} Cut`
-    } else if (nums.length > 1) {
-      const min = Math.min(...nums)
-      const max = Math.max(...nums)
-      if (max - min + 1 === nums.length) {
-        newTitle.value = `Episodes ${min}–${max} Box`
+  }
+}
+
+function handleEpisodeChange() {
+  selectedShotIds.value = []
+  if (selectedEpisodeId.value) {
+    loadEpisodeShots(selectedEpisodeId.value)
+  }
+}
+
+function setCreateType(type: 'episode_shots' | 'multi_episode') {
+  createType.value = type
+  localError.value = ''
+  if (type === 'episode_shots') {
+    if (!selectedEpisodeId.value) {
+      selectedEpisodeId.value = store.currentEpisodeId || projectEpisodes.value[0]?.id || ''
+    }
+    if (selectedEpisodeId.value && !episodeShots.value.length) {
+      loadEpisodeShots(selectedEpisodeId.value)
+    }
+  }
+}
+
+// Auto title helper
+watch(
+  [createType, selectedEpisodeId, selectedShotIds, selectedEpisodeIds, () => projectEpisodes.value],
+  () => {
+    if (createType.value === 'episode_shots') {
+      if (newTitle.value && !newTitle.value.startsWith('Ep ') && !newTitle.value.startsWith('Episode ')) return
+      const ep = projectEpisodes.value.find((e) => e.id === selectedEpisodeId.value)
+      const epNum = ep ? ep.episode_number : 1
+      if (!selectedShotIds.value.length) {
+        newTitle.value = `Ep ${epNum} Short Cut`
       } else {
-        newTitle.value = `Episodes ${nums.join(', ')} Mix`
+        newTitle.value = `Ep ${epNum} Short Cut (${selectedShotIds.value.length} shot${selectedShotIds.value.length === 1 ? '' : 's'})`
+      }
+    } else {
+      if (newTitle.value && !newTitle.value.startsWith('Episodes ')) return
+      if (!selectedEpisodeIds.value.length) {
+        newTitle.value = ''
+        return
+      }
+      const nums = selectedEpisodeIds.value
+        .map((id) => projectEpisodes.value.find((e) => e.id === id)?.episode_number)
+        .filter((n): n is number => n !== undefined)
+      if (nums.length === 1) {
+        newTitle.value = `Episode ${nums[0]} Cut`
+      } else if (nums.length > 1) {
+        const min = Math.min(...nums)
+        const max = Math.max(...nums)
+        if (max - min + 1 === nums.length) {
+          newTitle.value = `Episodes ${min}–${max} Box`
+        } else {
+          newTitle.value = `Episodes ${nums.join(', ')} Mix`
+        }
       }
     }
   },
@@ -69,32 +156,103 @@ watch(
     if (open) {
       localError.value = ''
       confirmingDeleteId.value = null
-      if (compilations.value.length > 0) {
+
+      if (props.initialCompilationId) {
+        const target = compilations.value.find((c) => c.id === props.initialCompilationId)
+        if (target) {
+          await startEditCompilation(target)
+          await nextTick()
+          if (typeof dialog.value?.showModal === 'function') {
+            dialog.value.showModal()
+          }
+          return
+        }
+      }
+
+      editingCompilationId.value = null
+
+      if (props.initialType) {
+        createType.value = props.initialType
+      } else if (props.initialShotIds && props.initialShotIds.length > 0) {
+        createType.value = 'episode_shots'
+      } else {
+        createType.value = 'episode_shots'
+      }
+
+      if (props.initialType || (props.initialShotIds && props.initialShotIds.length > 0) || props.initialEpisodeId) {
+        activeTab.value = 'create'
+      } else if (compilations.value.length > 0) {
         activeTab.value = 'list'
       } else {
         activeTab.value = 'create'
       }
+
       resetForm()
       await nextTick()
-      dialog.value?.showModal()
+      if (typeof dialog.value?.showModal === 'function') {
+        dialog.value.showModal()
+      }
     } else {
       confirmingDeleteId.value = null
-      dialog.value?.close()
+      editingCompilationId.value = null
+      if (typeof dialog.value?.close === 'function') {
+        dialog.value.close()
+      }
     }
   },
+  { immediate: true },
 )
+
+async function startEditCompilation(comp: CompilationSummary) {
+  editingCompilationId.value = comp.id
+  localError.value = ''
+  newTitle.value = comp.title
+  newDescription.value = comp.description || ''
+
+  const isShorts = Boolean(comp.episode_id || (comp.shot_ids && comp.shot_ids.length > 0))
+  if (isShorts) {
+    createType.value = 'episode_shots'
+    selectedEpisodeId.value = comp.episode_id || store.currentEpisodeId || projectEpisodes.value[0]?.id || ''
+    selectedShotIds.value = [...(comp.shot_ids || [])]
+    if (selectedEpisodeId.value) {
+      await loadEpisodeShots(selectedEpisodeId.value)
+    }
+  } else {
+    createType.value = 'multi_episode'
+    selectedEpisodeIds.value = [...(comp.episode_ids || [])]
+  }
+  activeTab.value = 'create'
+}
+
+function cancelEditCompilation() {
+  editingCompilationId.value = null
+  resetForm()
+  activeTab.value = 'list'
+}
 
 function resetForm() {
   selectedEpisodeIds.value = projectEpisodes.value.slice(0, Math.min(4, projectEpisodes.value.length)).map((e) => e.id)
   newTitle.value = ''
   newDescription.value = ''
   localError.value = ''
+
+  const epId = props.initialEpisodeId || store.currentEpisodeId || projectEpisodes.value[0]?.id || ''
+  selectedEpisodeId.value = epId
+  if (props.initialShotIds && props.initialShotIds.length > 0) {
+    selectedShotIds.value = [...props.initialShotIds]
+  } else {
+    selectedShotIds.value = []
+  }
+  if (epId) {
+    loadEpisodeShots(epId)
+  }
 }
 
 function handleClose() {
   emit('close')
 }
 
+// Multi-Episode helpers
 function applyPreset(count: number | 'all') {
   if (count === 'all') {
     selectedEpisodeIds.value = projectEpisodes.value.map((e) => e.id)
@@ -116,7 +274,6 @@ function isEpisodeSelected(epId: string): boolean {
   return selectedEpisodeIds.value.includes(epId)
 }
 
-// Move episode up/down in the custom compilation order
 function moveEpisode(epId: string, direction: 'up' | 'down') {
   const idx = selectedEpisodeIds.value.indexOf(epId)
   if (idx < 0) return
@@ -147,24 +304,145 @@ const selectedSummary = computed(() => {
   }
 })
 
-async function handleCreateCompilation() {
-  if (!selectedEpisodeIds.value.length) {
-    localError.value = 'Please select at least one episode for the compilation box.'
-    return
+// Episode Shots helpers
+function toggleShot(shotId: string) {
+  const idx = selectedShotIds.value.indexOf(shotId)
+  if (idx >= 0) {
+    selectedShotIds.value.splice(idx, 1)
+  } else {
+    selectedShotIds.value.push(shotId)
   }
-  const title = (newTitle.value || 'Custom Compilation').trim()
-  isSubmitting.value = true
+}
+
+function isShotSelected(shotId: string): boolean {
+  return selectedShotIds.value.includes(shotId)
+}
+
+function applyShotPreset(preset: 'all' | 3 | 5 | 'clear') {
+  if (preset === 'all') {
+    selectedShotIds.value = episodeShots.value.map((s) => s.id)
+  } else if (preset === 'clear') {
+    selectedShotIds.value = []
+  } else {
+    selectedShotIds.value = episodeShots.value.slice(0, preset).map((s) => s.id)
+  }
+}
+
+function moveShot(shotId: string, direction: 'up' | 'down') {
+  const idx = selectedShotIds.value.indexOf(shotId)
+  if (idx < 0) return
+  const targetIdx = direction === 'up' ? idx - 1 : idx + 1
+  if (targetIdx < 0 || targetIdx >= selectedShotIds.value.length) return
+  const [item] = selectedShotIds.value.splice(idx, 1)
+  if (item) {
+    selectedShotIds.value.splice(targetIdx, 0, item)
+  }
+}
+
+const selectedShotsSummary = computed(() => {
+  const selected = episodeShots.value.filter((s) => selectedShotIds.value.includes(s.id))
+  const totalMs = selected.reduce((acc, s) => acc + (s.duration_ms || 4000), 0)
+  const seconds = (totalMs / 1000).toFixed(1)
+  const isShortsReady = totalMs > 0 && totalMs <= 60000
+  return {
+    count: selectedShotIds.value.length,
+    totalCount: episodeShots.value.length,
+    durationMs: totalMs,
+    durationFormatted: `${seconds}s`,
+    isShortsReady,
+  }
+})
+
+function shotThumbUrl(shot: Shot): string | null {
+  if (shot.image?.url) return shot.image.url
+  if (shot.image_references?.[0]?.url) return shot.image_references[0].url
+  if (shot.continuity_frames?.[0]?.url) return shot.continuity_frames[0].url
+  if (shot.clip?.url) return shot.clip.url
+  return null
+}
+
+function formatShotDuration(ms?: number): string {
+  return `${((ms || 4000) / 1000).toFixed(1)}s`
+}
+
+function getShotOrderIndex(shotId: string): string {
+  const shot = episodeShots.value.find((s) => s.id === shotId)
+  if (!shot) return '?'
+  const idx = episodeShots.value.indexOf(shot)
+  return idx >= 0 ? String(idx + 1) : String(shot.order_index + 1)
+}
+
+function getSingleEpisodeNumber(epId?: string | null): string {
+  if (!epId) return ''
+  const ep = projectEpisodes.value.find((e) => e.id === epId)
+  return ep ? String(ep.episode_number) : ''
+}
+
+// Submission
+async function handleCreateCompilation() {
   localError.value = ''
+  isSubmitting.value = true
   try {
-    const created = await store.createCompilation({
-      title,
-      description: newDescription.value.trim() || undefined,
-      episode_ids: [...selectedEpisodeIds.value],
-    })
-    emit('open-compilation', created.id)
-    emit('close')
+    if (createType.value === 'episode_shots') {
+      if (!selectedEpisodeId.value) {
+        localError.value = 'Please select a source episode.'
+        return
+      }
+      if (!selectedShotIds.value.length) {
+        localError.value = 'Please select at least one shot for the Short Cut.'
+        return
+      }
+      const title = (newTitle.value || 'Episode Short Cut').trim()
+      if (editingCompilationId.value) {
+        const updated = await store.updateCompilation(editingCompilationId.value, {
+          title,
+          description: newDescription.value.trim() || undefined,
+          episode_id: selectedEpisodeId.value,
+          shot_ids: [...selectedShotIds.value],
+          episode_ids: [],
+        })
+        emit('open-compilation', updated.id)
+        editingCompilationId.value = null
+        emit('close')
+      } else {
+        const created = await store.createCompilation({
+          title,
+          description: newDescription.value.trim() || undefined,
+          episode_id: selectedEpisodeId.value,
+          shot_ids: [...selectedShotIds.value],
+        })
+        emit('open-compilation', created.id)
+        emit('close')
+      }
+    } else {
+      if (!selectedEpisodeIds.value.length) {
+        localError.value = 'Please select at least one episode for the compilation box.'
+        return
+      }
+      const title = (newTitle.value || 'Custom Compilation').trim()
+      if (editingCompilationId.value) {
+        const updated = await store.updateCompilation(editingCompilationId.value, {
+          title,
+          description: newDescription.value.trim() || undefined,
+          episode_ids: [...selectedEpisodeIds.value],
+          shot_ids: [],
+          episode_id: undefined,
+        })
+        emit('open-compilation', updated.id)
+        editingCompilationId.value = null
+        emit('close')
+      } else {
+        const created = await store.createCompilation({
+          title,
+          description: newDescription.value.trim() || undefined,
+          episode_ids: [...selectedEpisodeIds.value],
+        })
+        emit('open-compilation', created.id)
+        emit('close')
+      }
+    }
   } catch (cause) {
-    localError.value = cause instanceof Error ? cause.message : 'Failed to create compilation'
+    localError.value = cause instanceof Error ? cause.message : (isEditing.value ? 'Failed to update compilation' : 'Failed to create compilation')
   } finally {
     isSubmitting.value = false
   }
@@ -226,12 +504,16 @@ function getEpisodeNumbers(epIds: string[]): string {
       <header class="modal-header">
         <div class="modal-title-group">
           <div class="icon-bubble">
-            <Boxes :size="20" />
+            <Pencil v-if="isEditing" :size="20" />
+            <Scissors v-else-if="createType === 'episode_shots'" :size="20" />
+            <Boxes v-else :size="20" />
           </div>
           <div>
-            <h2 id="compilation-modal-title">Multi-Episode Compilation Boxes</h2>
+            <h2 id="compilation-modal-title">
+              {{ isEditing ? `Edit ${createType === 'episode_shots' ? 'Short Cut' : 'Box'}: ${editingCompilation?.title || ''}` : 'Compilations &amp; Short Cuts' }}
+            </h2>
             <p class="modal-subtitle">
-              Group and rearrange episodes into custom compilation cuts with independent timelines and master exports.
+              {{ isEditing ? 'Update the title, description, and selected shots or episodes for this cut.' : 'Group shots inside an episode for YouTube Shorts, or combine multiple episodes into recap boxes.' }}
             </p>
           </div>
         </div>
@@ -247,8 +529,9 @@ function getEpisodeNumbers(epIds: string[]): string {
           :class="{ active: activeTab === 'create' }"
           @click="activeTab = 'create'"
         >
-          <Plus :size="15" />
-          <span>New Compilation Box</span>
+          <Pencil v-if="isEditing" :size="15" />
+          <Plus v-else :size="15" />
+          <span>{{ isEditing ? 'Edit Compilation' : 'New Compilation' }}</span>
         </button>
         <button
           type="button"
@@ -266,165 +549,390 @@ function getEpisodeNumbers(epIds: string[]): string {
         {{ localError }}
       </div>
 
+      <div v-if="isEditing && activeTab === 'create'" class="editing-banner">
+        <div class="editing-banner-content">
+          <Pencil :size="14" />
+          <span>Editing <strong>{{ editingCompilation?.title }}</strong></span>
+        </div>
+        <button type="button" class="cancel-edit-pill" @click="cancelEditCompilation">
+          Cancel Edit
+        </button>
+      </div>
+
       <!-- CREATE VIEW -->
       <section v-if="activeTab === 'create'" class="tab-panel create-panel">
-        <div class="form-row">
-          <div class="form-group flex-2">
-            <label for="comp-title">Compilation Title</label>
-            <input
-              id="comp-title"
-              v-model="newTitle"
-              type="text"
-              placeholder="e.g. Episodes 1–4 Recap"
-              class="text-input"
-              maxlength="200"
-            />
-          </div>
-          <div class="form-group flex-3">
-            <label for="comp-desc">Description (Optional)</label>
-            <input
-              id="comp-desc"
-              v-model="newDescription"
-              type="text"
-              placeholder="e.g. Feature-length recap for social media"
-              class="text-input"
-            />
-          </div>
-        </div>
-
-        <div class="presets-row">
-          <span class="presets-label">Quick Presets:</span>
-          <button
-            v-if="projectEpisodes.length >= 4"
-            type="button"
-            class="preset-btn"
-            @click="applyPreset(4)"
-          >
-            Episodes 1–4
-          </button>
-          <button
-            v-if="projectEpisodes.length >= 7"
-            type="button"
-            class="preset-btn"
-            @click="applyPreset(7)"
-          >
-            Episodes 1–7
-          </button>
+        <!-- SEGMENTED TYPE TOGGLE -->
+        <div class="comp-type-switch" role="tablist">
           <button
             type="button"
-            class="preset-btn"
-            @click="applyPreset('all')"
+            class="comp-type-btn"
+            :class="{ active: createType === 'episode_shots' }"
+            @click="setCreateType('episode_shots')"
           >
-            All Episodes (1–{{ projectEpisodes.length }})
-          </button>
-          <button
-            v-if="selectedEpisodeIds.length"
-            type="button"
-            class="preset-btn ghost"
-            @click="selectedEpisodeIds = []"
-          >
-            Clear Selection
-          </button>
-        </div>
-
-        <div class="episodes-selector-area">
-          <div class="selector-header">
-            <h3>Select &amp; Order Episodes in this Box</h3>
-            <span class="selection-pill">
-              {{ selectedSummary.count }} of {{ projectEpisodes.length }} episodes selected
-              &middot; {{ selectedSummary.shots }} shots &middot; {{ selectedSummary.durationFormatted }}
+            <Scissors :size="16" />
+            <span class="type-btn-text">
+              <strong>Episode Short Cut</strong>
+              <small>Select shots from an episode for YouTube Shorts (9:16)</small>
             </span>
-          </div>
-
-          <div class="episodes-cards-grid">
-            <div
-              v-for="ep in projectEpisodes"
-              :key="ep.id"
-              class="episode-card"
-              :class="{ selected: isEpisodeSelected(ep.id) }"
-              @click="toggleEpisode(ep.id)"
-            >
-              <div class="ep-check-indicator">
-                <Check v-if="isEpisodeSelected(ep.id)" :size="14" />
-              </div>
-              <div class="ep-card-info">
-                <div class="ep-card-top">
-                  <span class="ep-number">Episode {{ ep.episode_number }}</span>
-                  <span class="ep-duration">{{ formatDuration(ep.duration_ms) }}</span>
-                </div>
-                <strong class="ep-title">{{ ep.title || 'Untitled Episode' }}</strong>
-                <span class="ep-shots-count">{{ ep.shot_count || 0 }} shots</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Order arrangement pill strip if episodes are selected -->
-          <div v-if="selectedEpisodeIds.length > 1" class="order-arrangement-section">
-            <span class="order-label">Sequence Arrangement (Drag/Shift order):</span>
-            <div class="ordered-pills-row">
-              <div
-                v-for="(epId, idx) in selectedEpisodeIds"
-                :key="epId"
-                class="ordered-ep-pill"
-              >
-                <span class="order-idx">{{ idx + 1 }}</span>
-                <span class="order-name">
-                  Ep {{ projectEpisodes.find((e) => e.id === epId)?.episode_number }}
-                </span>
-                <div class="reorder-actions">
-                  <button
-                    type="button"
-                    class="arrow-btn"
-                    :disabled="idx === 0"
-                    title="Move earlier"
-                    @click.stop="moveEpisode(epId, 'up')"
-                  >
-                    &lsaquo;
-                  </button>
-                  <button
-                    type="button"
-                    class="arrow-btn"
-                    :disabled="idx === selectedEpisodeIds.length - 1"
-                    title="Move later"
-                    @click.stop="moveEpisode(epId, 'down')"
-                  >
-                    &rsaquo;
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          </button>
+          <button
+            type="button"
+            class="comp-type-btn"
+            :class="{ active: createType === 'multi_episode' }"
+            @click="setCreateType('multi_episode')"
+          >
+            <Boxes :size="16" />
+            <span class="type-btn-text">
+              <strong>Multi-Episode Box</strong>
+              <small>Combine whole episodes into a multi-part compilation</small>
+            </span>
+          </button>
         </div>
 
-        <footer class="modal-footer">
-          <div class="footer-summary">
-            <strong>Estimated Cut:</strong>
-            <span>{{ selectedSummary.durationFormatted }} ({{ selectedSummary.shots }} total shots)</span>
+        <!-- EPISODE SHOT CUT FLOW -->
+        <template v-if="createType === 'episode_shots'">
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="comp-source-ep">Source Episode</label>
+              <select
+                id="comp-source-ep"
+                v-model="selectedEpisodeId"
+                class="text-input select-input"
+                @change="handleEpisodeChange"
+              >
+                <option v-for="ep in projectEpisodes" :key="ep.id" :value="ep.id">
+                  Episode {{ ep.episode_number }}: {{ ep.title || 'Untitled' }} ({{ ep.shot_count || 0 }} shots)
+                </option>
+              </select>
+            </div>
+            <div class="form-group flex-2">
+              <label for="comp-title">Short Cut Title</label>
+              <input
+                id="comp-title"
+                v-model="newTitle"
+                type="text"
+                placeholder="e.g. Ep 1 - Viral Hook Short"
+                class="text-input"
+                maxlength="200"
+              />
+            </div>
+            <div class="form-group flex-3">
+              <label for="comp-desc">Description (Optional)</label>
+              <input
+                id="comp-desc"
+                v-model="newDescription"
+                type="text"
+                placeholder="e.g. 9:16 vertical hook for YouTube Shorts"
+                class="text-input"
+              />
+            </div>
           </div>
-          <div class="footer-actions">
-            <button type="button" class="secondary-btn" @click="handleClose">Cancel</button>
+
+          <div class="presets-row">
+            <span class="presets-label">Quick Presets:</span>
             <button
               type="button"
-              class="primary-btn"
-              :disabled="!selectedEpisodeIds.length || isSubmitting"
-              @click="handleCreateCompilation"
+              class="preset-btn"
+              @click="applyShotPreset('all')"
             >
-              <Sparkles :size="15" />
-              <span>{{ isSubmitting ? 'Creating compilation…' : 'Create & Open Box' }}</span>
+              Select All ({{ episodeShots.length }})
+            </button>
+            <button
+              v-if="episodeShots.length >= 3"
+              type="button"
+              class="preset-btn"
+              @click="applyShotPreset(3)"
+            >
+              First 3 Shots
+            </button>
+            <button
+              v-if="episodeShots.length >= 5"
+              type="button"
+              class="preset-btn"
+              @click="applyShotPreset(5)"
+            >
+              First 5 Shots
+            </button>
+            <button
+              v-if="selectedShotIds.length"
+              type="button"
+              class="preset-btn ghost"
+              @click="applyShotPreset('clear')"
+            >
+              Clear Selection
             </button>
           </div>
-        </footer>
+
+          <div class="episodes-selector-area">
+            <div class="selector-header">
+              <h3>Select Shots for this Short Cut</h3>
+              <div class="selector-meta-pills">
+                <span class="selection-pill">
+                  {{ selectedShotsSummary.count }} of {{ selectedShotsSummary.totalCount }} shots selected
+                  &middot; {{ selectedShotsSummary.durationFormatted }}
+                </span>
+                <span v-if="selectedShotsSummary.isShortsReady" class="shorts-indicator ready">
+                  ✓ YouTube Shorts Ready (&lt;60s)
+                </span>
+                <span v-else-if="selectedShotsSummary.durationMs > 60000" class="shorts-indicator warn">
+                  Longer Short (&gt;60s)
+                </span>
+              </div>
+            </div>
+
+            <div v-if="loadingShots" class="loading-state">
+              Loading episode shots…
+            </div>
+            <div v-else-if="!episodeShots.length" class="empty-state-mini">
+              No shots found in this episode. Generate or approve a script to create shots.
+            </div>
+            <div v-else class="shots-cards-grid">
+              <div
+                v-for="(shot, sIdx) in episodeShots"
+                :key="shot.id"
+                class="shot-card"
+                :class="{ selected: isShotSelected(shot.id) }"
+                @click="toggleShot(shot.id)"
+              >
+                <div class="shot-check-indicator">
+                  <Check v-if="isShotSelected(shot.id)" :size="13" />
+                </div>
+                <div class="shot-thumb-box">
+                  <img v-if="shotThumbUrl(shot)" :src="shotThumbUrl(shot)!" alt="" />
+                  <Film v-else :size="18" class="shot-thumb-placeholder" />
+                </div>
+                <div class="shot-card-info">
+                  <div class="shot-card-top">
+                    <span class="shot-number">Shot {{ sIdx + 1 }}</span>
+                    <span class="shot-framing-badge">{{ shot.framing || 'Medium' }}</span>
+                    <span class="shot-duration">{{ formatShotDuration(shot.duration_ms) }}</span>
+                  </div>
+                  <strong class="shot-title">{{ shot.title || `Shot ${sIdx + 1}` }}</strong>
+                  <p class="shot-action-preview">{{ shot.action || 'No visual action yet.' }}</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sequence arrangement strip for selected shots -->
+            <div v-if="selectedShotIds.length > 1" class="order-arrangement-section">
+              <span class="order-label">Short Cut Sequence (Shift order):</span>
+              <div class="ordered-pills-row">
+                <div
+                  v-for="(shotId, idx) in selectedShotIds"
+                  :key="shotId"
+                  class="ordered-ep-pill"
+                >
+                  <span class="order-idx">{{ idx + 1 }}</span>
+                  <span class="order-name">Shot {{ getShotOrderIndex(shotId) }}</span>
+                  <div class="reorder-actions">
+                    <button
+                      type="button"
+                      class="arrow-btn"
+                      :disabled="idx === 0"
+                      title="Move earlier"
+                      @click.stop="moveShot(shotId, 'up')"
+                    >
+                      &lsaquo;
+                    </button>
+                    <button
+                      type="button"
+                      class="arrow-btn"
+                      :disabled="idx === selectedShotIds.length - 1"
+                      title="Move later"
+                      @click.stop="moveShot(shotId, 'down')"
+                    >
+                      &rsaquo;
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <footer class="modal-footer">
+            <div class="footer-summary">
+              <strong>Estimated Short:</strong>
+              <span>{{ selectedShotsSummary.durationFormatted }} ({{ selectedShotsSummary.count }} shots)</span>
+            </div>
+            <div class="footer-actions">
+              <button type="button" class="secondary-btn" @click="isEditing ? cancelEditCompilation() : handleClose()">
+                {{ isEditing ? 'Cancel Edit' : 'Cancel' }}
+              </button>
+              <button
+                type="button"
+                class="primary-btn"
+                :disabled="!selectedShotIds.length || isSubmitting"
+                @click="handleCreateCompilation"
+              >
+                <Sparkles :size="15" />
+                <span>{{ isSubmitting ? (isEditing ? 'Saving changes…' : 'Creating cut…') : (isEditing ? 'Save Changes' : 'Create & Assemble Short Cut') }}</span>
+              </button>
+            </div>
+          </footer>
+        </template>
+
+        <!-- MULTI-EPISODE BOX FLOW -->
+        <template v-else>
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="comp-title">Compilation Title</label>
+              <input
+                id="comp-title"
+                v-model="newTitle"
+                type="text"
+                placeholder="e.g. Episodes 1–4 Recap"
+                class="text-input"
+                maxlength="200"
+              />
+            </div>
+            <div class="form-group flex-3">
+              <label for="comp-desc">Description (Optional)</label>
+              <input
+                id="comp-desc"
+                v-model="newDescription"
+                type="text"
+                placeholder="e.g. Feature-length recap for social media"
+                class="text-input"
+              />
+            </div>
+          </div>
+
+          <div class="presets-row">
+            <span class="presets-label">Quick Presets:</span>
+            <button
+              v-if="projectEpisodes.length >= 4"
+              type="button"
+              class="preset-btn"
+              @click="applyPreset(4)"
+            >
+              Episodes 1–4
+            </button>
+            <button
+              v-if="projectEpisodes.length >= 7"
+              type="button"
+              class="preset-btn"
+              @click="applyPreset(7)"
+            >
+              Episodes 1–7
+            </button>
+            <button
+              type="button"
+              class="preset-btn"
+              @click="applyPreset('all')"
+            >
+              All Episodes (1–{{ projectEpisodes.length }})
+            </button>
+            <button
+              v-if="selectedEpisodeIds.length"
+              type="button"
+              class="preset-btn ghost"
+              @click="selectedEpisodeIds = []"
+            >
+              Clear Selection
+            </button>
+          </div>
+
+          <div class="episodes-selector-area">
+            <div class="selector-header">
+              <h3>Select &amp; Order Episodes in this Box</h3>
+              <span class="selection-pill">
+                {{ selectedSummary.count }} of {{ projectEpisodes.length }} episodes selected
+                &middot; {{ selectedSummary.shots }} shots &middot; {{ selectedSummary.durationFormatted }}
+              </span>
+            </div>
+
+            <div class="episodes-cards-grid">
+              <div
+                v-for="ep in projectEpisodes"
+                :key="ep.id"
+                class="episode-card"
+                :class="{ selected: isEpisodeSelected(ep.id) }"
+                @click="toggleEpisode(ep.id)"
+              >
+                <div class="ep-check-indicator">
+                  <Check v-if="isEpisodeSelected(ep.id)" :size="14" />
+                </div>
+                <div class="ep-card-info">
+                  <div class="ep-card-top">
+                    <span class="ep-number">Episode {{ ep.episode_number }}</span>
+                    <span class="ep-duration">{{ formatDuration(ep.duration_ms) }}</span>
+                  </div>
+                  <strong class="ep-title">{{ ep.title || 'Untitled Episode' }}</strong>
+                  <span class="ep-shots-count">{{ ep.shot_count || 0 }} shots</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Order arrangement pill strip if episodes are selected -->
+            <div v-if="selectedEpisodeIds.length > 1" class="order-arrangement-section">
+              <span class="order-label">Sequence Arrangement (Drag/Shift order):</span>
+              <div class="ordered-pills-row">
+                <div
+                  v-for="(epId, idx) in selectedEpisodeIds"
+                  :key="epId"
+                  class="ordered-ep-pill"
+                >
+                  <span class="order-idx">{{ idx + 1 }}</span>
+                  <span class="order-name">
+                    Ep {{ projectEpisodes.find((e) => e.id === epId)?.episode_number }}
+                  </span>
+                  <div class="reorder-actions">
+                    <button
+                      type="button"
+                      class="arrow-btn"
+                      :disabled="idx === 0"
+                      title="Move earlier"
+                      @click.stop="moveEpisode(epId, 'up')"
+                    >
+                      &lsaquo;
+                    </button>
+                    <button
+                      type="button"
+                      class="arrow-btn"
+                      :disabled="idx === selectedEpisodeIds.length - 1"
+                      title="Move later"
+                      @click.stop="moveEpisode(epId, 'down')"
+                    >
+                      &rsaquo;
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <footer class="modal-footer">
+            <div class="footer-summary">
+              <strong>Estimated Cut:</strong>
+              <span>{{ selectedSummary.durationFormatted }} ({{ selectedSummary.shots }} total shots)</span>
+            </div>
+            <div class="footer-actions">
+              <button type="button" class="secondary-btn" @click="isEditing ? cancelEditCompilation() : handleClose()">
+                {{ isEditing ? 'Cancel Edit' : 'Cancel' }}
+              </button>
+              <button
+                type="button"
+                class="primary-btn"
+                :disabled="!selectedEpisodeIds.length || isSubmitting"
+                @click="handleCreateCompilation"
+              >
+                <Sparkles :size="15" />
+                <span>{{ isSubmitting ? (isEditing ? 'Saving changes…' : 'Creating compilation…') : (isEditing ? 'Save Changes' : 'Create & Open Box') }}</span>
+              </button>
+            </div>
+          </footer>
+        </template>
       </section>
 
       <!-- SAVED COMPILATIONS VIEW -->
       <section v-else class="tab-panel list-panel">
         <div v-if="!compilations.length" class="empty-state">
           <Boxes :size="36" class="empty-icon" />
-          <h3>No compilation boxes yet</h3>
-          <p>Create your first compilation box to combine and edit multiple episodes together.</p>
+          <h3>No compilations yet</h3>
+          <p>Create an Episode Short Cut for YouTube Shorts, or group multiple episodes into a box.</p>
           <button type="button" class="primary-btn" @click="activeTab = 'create'">
             <Plus :size="15" />
-            <span>Create Compilation Box</span>
+            <span>Create Compilation</span>
           </button>
         </div>
 
@@ -437,17 +945,31 @@ function getEpisodeNumbers(epIds: string[]): string {
           >
             <div class="comp-card-main">
               <div class="comp-title-row">
-                <span class="comp-icon"><Boxes :size="16" /></span>
+                <span class="comp-icon">
+                  <Scissors v-if="comp.episode_id || (comp.shot_ids && comp.shot_ids.length > 0)" :size="16" />
+                  <Boxes v-else :size="16" />
+                </span>
                 <strong>{{ comp.title }}</strong>
+                <span v-if="comp.episode_id || (comp.shot_ids && comp.shot_ids.length > 0)" class="type-pill shorts-type-pill">
+                  <Scissors :size="11" />
+                  <span>Episode Short Cut</span>
+                </span>
+                <span v-else class="type-pill box-type-pill">
+                  <Boxes :size="11" />
+                  <span>Multi-Episode Box</span>
+                </span>
                 <span v-if="store.activeCompilationId === comp.id" class="active-badge">Active in Assemble</span>
               </div>
               <p v-if="comp.description" class="comp-desc">{{ comp.description }}</p>
               <div class="comp-meta-row">
-                <span class="meta-tag episodes-tag">
+                <span v-if="comp.episode_id" class="meta-tag episodes-tag">
+                  Episode {{ getSingleEpisodeNumber(comp.episode_id) }}
+                </span>
+                <span v-else-if="comp.episode_ids?.length" class="meta-tag episodes-tag">
                   {{ getEpisodeNumbers(comp.episode_ids) }}
                 </span>
                 <span class="meta-tag">
-                  {{ comp.clip_count ?? 0 }} shots
+                  {{ comp.shot_ids?.length || comp.clip_count || 0 }} shots
                 </span>
                 <span class="meta-tag">
                   {{ formatDuration(comp.duration_ms) }}
@@ -482,6 +1004,15 @@ function getEpisodeNumbers(epIds: string[]): string {
             <div v-else class="comp-card-actions">
               <button
                 type="button"
+                class="action-btn edit-btn"
+                title="Edit compilation"
+                @click="startEditCompilation(comp)"
+              >
+                <Pencil :size="14" />
+                <span>Edit</span>
+              </button>
+              <button
+                type="button"
                 class="action-btn open-btn"
                 @click="handleSelectExisting(comp)"
               >
@@ -503,7 +1034,7 @@ function getEpisodeNumbers(epIds: string[]): string {
         <footer class="modal-footer list-footer">
           <button type="button" class="secondary-btn" @click="activeTab = 'create'">
             <Plus :size="15" />
-            <span>Create Another Compilation Box</span>
+            <span>Create New Compilation</span>
           </button>
           <button type="button" class="secondary-btn" @click="handleClose">Close</button>
         </footer>
@@ -647,6 +1178,61 @@ function getEpisodeNumbers(epIds: string[]): string {
   font-weight: 600;
 }
 
+/* SEGMENTED TYPE SWITCHER */
+.comp-type-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 4px;
+  background: #090d16;
+  border-radius: 12px;
+  border: 1px solid #1e293b;
+}
+
+.comp-type-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  color: #94a3b8;
+}
+
+.comp-type-btn:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: #cbd5e1;
+}
+
+.comp-type-btn.active {
+  background: #1e293b;
+  border-color: #9333ea;
+  color: #f8fafc;
+  box-shadow: 0 2px 8px rgba(147, 51, 234, 0.15);
+}
+
+.type-btn-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.type-btn-text strong {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.type-btn-text small {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
 .modal-error-banner {
   background: rgba(239, 68, 68, 0.15);
   border-left: 3px solid #ef4444;
@@ -698,6 +1284,10 @@ function getEpisodeNumbers(epIds: string[]): string {
   font-size: 0.9rem;
   outline: none;
   transition: border-color 0.15s ease;
+}
+
+.select-input {
+  cursor: pointer;
 }
 
 .text-input:focus {
@@ -755,6 +1345,8 @@ function getEpisodeNumbers(epIds: string[]): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .selector-header h3 {
@@ -762,6 +1354,12 @@ function getEpisodeNumbers(epIds: string[]): string {
   font-weight: 600;
   color: #f1f5f9;
   margin: 0;
+}
+
+.selector-meta-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .selection-pill {
@@ -772,6 +1370,162 @@ function getEpisodeNumbers(epIds: string[]): string {
   border-radius: 12px;
 }
 
+.shorts-indicator {
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 12px;
+}
+
+.shorts-indicator.ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.shorts-indicator.warn {
+  background: rgba(234, 179, 8, 0.15);
+  color: #facc15;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.loading-state,
+.empty-state-mini {
+  padding: 30px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  background: #090d16;
+  border: 1px dashed #334155;
+  border-radius: 10px;
+}
+
+/* SHOTS CARDS GRID */
+.shots-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+  max-height: 270px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.shot-card {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.shot-card:hover {
+  border-color: #475569;
+}
+
+.shot-card.selected {
+  background: rgba(147, 51, 234, 0.08);
+  border-color: #9333ea;
+}
+
+.shot-check-indicator {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1px solid #475569;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+  background: #0f172a;
+}
+
+.shot-card.selected .shot-check-indicator {
+  background: #9333ea;
+  border-color: #9333ea;
+  color: white;
+}
+
+.shot-thumb-box {
+  width: 52px;
+  height: 38px;
+  border-radius: 6px;
+  background: #1e293b;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.shot-thumb-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shot-thumb-placeholder {
+  color: #64748b;
+}
+
+.shot-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+  flex: 1;
+}
+
+.shot-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shot-number {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #a855f7;
+}
+
+.shot-framing-badge {
+  font-size: 0.68rem;
+  background: #1e293b;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #94a3b8;
+}
+
+.shot-duration {
+  font-size: 0.7rem;
+  color: #64748b;
+  margin-left: auto;
+}
+
+.shot-title {
+  font-size: 0.82rem;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shot-action-preview {
+  font-size: 0.74rem;
+  color: #94a3b8;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+/* EPISODES GRID */
 .episodes-cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -1046,6 +1800,7 @@ function getEpisodeNumbers(epIds: string[]): string {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .comp-icon {
@@ -1057,6 +1812,28 @@ function getEpisodeNumbers(epIds: string[]): string {
 .comp-title-row strong {
   font-size: 0.98rem;
   color: #f8fafc;
+}
+
+.type-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+
+.shorts-type-pill {
+  background: rgba(236, 72, 153, 0.15);
+  color: #f472b6;
+  border: 1px solid rgba(236, 72, 153, 0.3);
+}
+
+.box-type-pill {
+  background: rgba(147, 51, 234, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(147, 51, 234, 0.3);
 }
 
 .active-badge {
@@ -1170,6 +1947,53 @@ function getEpisodeNumbers(epIds: string[]): string {
   font-weight: 500;
   padding: 8px 14px;
   transition: all 0.15s ease;
+}
+
+.edit-btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #94a3b8;
+}
+
+.edit-btn:hover {
+  background: #334155;
+  border-color: #475569;
+  color: #f8fafc;
+}
+
+.editing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #93c5fd;
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin: 0 0 16px 0;
+  font-size: 0.85rem;
+}
+
+.editing-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cancel-edit-pill {
+  background: transparent;
+  border: 1px solid rgba(147, 197, 253, 0.3);
+  color: #bfdbfe;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cancel-edit-pill:hover {
+  background: rgba(147, 197, 253, 0.15);
+  color: #fff;
 }
 
 .open-btn {

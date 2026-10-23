@@ -37,7 +37,8 @@ def run_worker() -> None:
                     if queue == "backend.tasks.image_huey"
                     else "1"
                 ),
-            ]
+            ],
+            stdin=subprocess.DEVNULL,
         )
         for queue in queues
     ]

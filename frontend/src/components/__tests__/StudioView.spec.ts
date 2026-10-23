@@ -265,6 +265,33 @@ describe('StudioView', () => {
     wrapper.unmount()
   })
 
+  it('opens and closes the shot notes drawer from the header button', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-1')
+    await router.isReady()
+
+    const wrapper = mount(StudioView, {
+      global: { plugins: [createPinia(), router] },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.shot-notes-drawer').exists()).toBe(false)
+
+    const notesBtn = wrapper.find('.shot-notes-header-btn')
+    expect(notesBtn.exists()).toBe(true)
+    await notesBtn.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.shot-notes-drawer').exists()).toBe(true)
+    expect(wrapper.find('.shot-notes-drawer-header').text()).toContain('Shot notes & reminders')
+
+    await wrapper.find('.drawer-close-btn').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.shot-notes-drawer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('supports importing screenplay files via the create modal', async () => {
     vi.spyOn(api, 'projects').mockResolvedValue([])
     const router = createRouter({ history: createMemoryHistory(), routes: routes() })

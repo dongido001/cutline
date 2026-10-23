@@ -153,6 +153,19 @@ describe('TimelineEditor state persistence', () => {
     }))
   })
 
+  it('interrupts export when a timeline shot has an unresolved note', async () => {
+    const wrapper = mountEditor()
+    await flushPromises()
+    const shots = makeShots()
+    shots[0]!.notes = [{ id: 'note-1', shot_id: 'shot-1', body: 'Remove the boom mic', resolved: false, attachments: [], created_at: '', updated_at: '' }]
+    await wrapper.setProps({ shots })
+    const exportButton = wrapper.findAll('button').find((button) => button.text().includes('Export video'))
+    expect(exportButton).toBeTruthy()
+    await exportButton!.trigger('click')
+    expect(wrapper.text()).toContain('Unresolved shot notes')
+    expect(wrapper.text()).toContain('Go back to resolve')
+  })
+
   it('persists and restores preview mute, zoom level, selected item, and variant across remounts', async () => {
     const wrapper1 = mountEditor()
     await flushPromises()
@@ -1326,6 +1339,78 @@ describe('TimelineEditor state persistence', () => {
     await leftPresetBtn?.trigger('click')
     await flushPromises()
     expect(shotGeom.focal_x).toBeCloseTo(0.15)
+
+    wrapper.unmount()
+  })
+
+  it('supports per-clip and timeline-wide Boxed / Letterbox toggles for 16:9 videos in Shorts', async () => {
+    vi.mocked(api.timeline).mockImplementation(async () => makeTimeline())
+    const wrapper = mountEditor()
+    await flushPromises()
+
+    // Switch to Shorts 9:16
+    const shortsBtn = wrapper.findAll('.variant-toggle button').find((b) => b.text().includes('Shorts'))
+    expect(shortsBtn?.exists()).toBe(true)
+    await shortsBtn?.trigger('click')
+    await flushPromises()
+
+    const vm = wrapper.vm as any
+
+    // Ensure we are in shorts variant
+    expect(vm.variant).toBe('shorts')
+
+    // Initially clips default to cover (Fill frame)
+    expect(vm.allClipsFitState).toBe('cover')
+
+    // Find the Boxed button in the inspector
+    const boxedBtns = wrapper.findAll('.framing-fit-btn').filter((b) => b.text().includes('Boxed'))
+    expect(boxedBtns.length).toBeGreaterThan(0)
+
+    // Click Boxed for the selected clip
+    await boxedBtns[0]?.trigger('click')
+    await flushPromises()
+
+    const shot1Geom = vm.geometryFor(vm.primary[0])
+    expect(shot1Geom.fit).toBe('contain')
+
+    // Apply to all clips via inspector button
+    const applyAllBtn = wrapper.find('.framing-apply-all-btn')
+    expect(applyAllBtn.exists()).toBe(true)
+    await applyAllBtn.trigger('click')
+    await flushPromises()
+
+    expect(vm.allClipsFitState).toBe('contain')
+    for (const item of vm.primary) {
+      expect(vm.geometryFor(item).fit).toBe('contain')
+    }
+
+    // Now test global timeline-wide Fill all button in layout panel
+    const fillAllBtn = wrapper.findAll('.framing-fit-btn').find((b) => b.text().includes('Fill all'))
+    expect(fillAllBtn?.exists()).toBe(true)
+    await fillAllBtn?.trigger('click')
+    await flushPromises()
+
+    expect(vm.allClipsFitState).toBe('cover')
+    for (const item of vm.primary) {
+      expect(vm.geometryFor(item).fit).toBe('cover')
+    }
+
+    // Now test global timeline-wide Box all button in layout panel
+    const boxAllBtn = wrapper.findAll('.framing-fit-btn').find((b) => b.text().includes('Box all'))
+    expect(boxAllBtn?.exists()).toBe(true)
+    await boxAllBtn?.trigger('click')
+    await flushPromises()
+
+    expect(vm.allClipsFitState).toBe('contain')
+    for (const item of vm.primary) {
+      expect(vm.geometryFor(item).fit).toBe('contain')
+    }
+
+    // Verify 'boxed' preset exists in layout presets
+    const boxedPreset = vm.layoutPresets.find((p: any) => p.id === 'boxed')
+    expect(boxedPreset).toBeDefined()
+    expect(boxedPreset.label).toBe('Boxed')
+    expect(boxedPreset.video.h).toBeCloseTo(0.3164, 3)
 
     wrapper.unmount()
   })

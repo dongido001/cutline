@@ -18,7 +18,7 @@ def test_worker_concurrency_only_changes_video_and_image_queues(monkeypatch):
             return 0
         def wait(self):
             return 0
-    monkeypatch.setattr(cli.subprocess, 'Popen', lambda command: calls.append(command) or Process())
+    monkeypatch.setattr(cli.subprocess, 'Popen', lambda command, **kwargs: calls.append(command) or Process())
     monkeypatch.setattr(settings, 'video_worker_concurrency', 3)
     monkeypatch.setattr(settings, 'image_worker_concurrency', 2)
     cli.run_worker()

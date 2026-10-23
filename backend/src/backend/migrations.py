@@ -58,6 +58,10 @@ CHARACTER_COLUMNS = {
 CHARACTER_REFERENCE_COLUMNS = {
     "view_type": "VARCHAR(24) NOT NULL DEFAULT 'main'",
 }
+COMPILATION_COLUMNS = {
+    "episode_id": "VARCHAR",
+    "shot_ids": "JSON NOT NULL DEFAULT '[]'",
+}
 PROJECT_COLUMNS = {
     "image_conversation_url": "TEXT",
     "flow_project_id": "VARCHAR(120)",
@@ -104,6 +108,30 @@ def _ensure_oauth_states(engine: Engine) -> None:
         """))
         connection.execute(text("CREATE INDEX ix_oauth_states_platform ON oauth_states (platform)"))
         connection.execute(text("CREATE INDEX ix_oauth_states_expires_at ON oauth_states (expires_at)"))
+
+
+def _ensure_shot_notes(engine: Engine) -> None:
+    if "shots" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS shot_notes (
+                id VARCHAR PRIMARY KEY, shot_id VARCHAR NOT NULL, body TEXT NOT NULL,
+                resolved BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME, updated_at DATETIME,
+                FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_shot_notes_shot_id ON shot_notes (shot_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_shot_notes_resolved ON shot_notes (resolved)"))
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS shot_note_attachments (
+                id VARCHAR PRIMARY KEY, note_id VARCHAR NOT NULL, filename VARCHAR(240) NOT NULL,
+                original_name VARCHAR(240) NOT NULL, mime_type VARCHAR(120) NOT NULL,
+                size_bytes INTEGER NOT NULL, created_at DATETIME,
+                FOREIGN KEY(note_id) REFERENCES shot_notes(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_shot_note_attachments_note_id ON shot_note_attachments (note_id)"))
 
 
 def _ensure_publish_records(engine: Engine) -> None:
@@ -173,6 +201,7 @@ def _ensure_release_kits(engine: Engine) -> None:
 def migrate_schema(engine: Engine) -> None:
     """Apply the small additive migrations needed by the local prototype."""
     _ensure_columns(engine, "projects", PROJECT_COLUMNS)
+    _ensure_shot_notes(engine)
     existing = {column["name"] for column in inspect(engine).get_columns("shots")}
     missing = [name for name in SHOT_COLUMNS if name not in existing]
     needs_legacy_backfill = any(name in LEGACY_SHOT_COLUMNS for name in missing)
@@ -271,6 +300,7 @@ def migrate_schema(engine: Engine) -> None:
     _group_legacy_structured_shots(engine)
     _ensure_episodes_table(engine)
     _ensure_compilations_table(engine)
+    _ensure_columns(engine, "compilations", COMPILATION_COLUMNS)
     _ensure_columns(engine, "script_versions", SCRIPT_VERSION_COLUMNS)
     _ensure_columns(engine, "project_final_cuts", FINAL_CUT_COLUMNS)
     _ensure_columns(engine, "project_variant_exports", VARIANT_EXPORT_COLUMNS)
@@ -485,13 +515,16 @@ def _ensure_compilations_table(engine: Engine) -> None:
                 CREATE TABLE IF NOT EXISTS compilations (
                     id VARCHAR NOT NULL PRIMARY KEY,
                     project_id VARCHAR NOT NULL,
+                    episode_id VARCHAR,
                     title VARCHAR(200) NOT NULL,
                     description TEXT,
                     episode_ids JSON NOT NULL DEFAULT '[]',
+                    shot_ids JSON NOT NULL DEFAULT '[]',
                     settings JSON NOT NULL DEFAULT '{}',
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL,
-                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE
+                    FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE,
+                    FOREIGN KEY(episode_id) REFERENCES episodes (id) ON DELETE CASCADE
                 )
                 """
             )
@@ -499,6 +532,11 @@ def _ensure_compilations_table(engine: Engine) -> None:
         connection.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_compilations_project_id ON compilations (project_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_compilations_episode_id ON compilations (episode_id)"
             )
         )
 

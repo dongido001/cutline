@@ -39,10 +39,10 @@ import {
   type TimelineVideoOverlay,
 } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
-import { AlignCenter, Boxes, Library, Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CopyPlus, Crosshair, Download, Film, Frame, GripVertical, ImagePlus, Keyboard, Layers, LoaderCircle, MoveLeft, MoveRight, Music, Package, Palette, Pause, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
+import { AlignCenter, Boxes, Library, Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleAlert, CopyPlus, Crosshair, Download, Film, Frame, GripVertical, ImagePlus, Keyboard, Layers, LoaderCircle, MessageSquare, MoveLeft, MoveRight, Music, Package, Palette, Pause, Pencil, Play, Plus, Redo2, RefreshCw, Repeat, Save, Scissors, Share2, SkipBack, SkipForward, Split, Trash2, Type, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut } from '@lucide/vue'
 
 const props = defineProps<{ project: ProjectDetail; shots: Shot[]; compilationId?: string }>()
-const emit = defineEmits<{ variantChange: [variant: OutputVariant] }>()
+const emit = defineEmits<{ variantChange: [variant: OutputVariant]; openCompilationModal: [compilationId: string] }>()
 const store = useStudioStore()
 const route = useRoute()
 const router = useRouter()
@@ -136,6 +136,7 @@ const zoomLevel = ref(
 )
 const currentScrollLeft = ref(typeof initialUiState.scrollLeft === 'number' && initialUiState.scrollLeft >= 0 ? initialUiState.scrollLeft : 0)
 const showShortcutsModal = ref(false)
+const showUnresolvedNotesModal = ref(false)
 const dragSourceIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
 const primaryTrackRef = ref<HTMLElement | null>(null)
@@ -692,6 +693,7 @@ const layoutPresets = computed<LayoutTemplatePreset[]>(() => {
   return family === 'shorts'
     ? [
         { id: 'full_bleed', label: 'Full bleed', blurb: 'Edge-to-edge', family, video: { x: 0, y: 0, w: 1, h: 1 }, default_matte: 'solid' as const, slots: {} },
+        { id: 'boxed', label: 'Boxed', blurb: '16:9 video boxed in center · top & bottom space', family, video: { x: 0, y: 0.3418, w: 1, h: 0.3164 }, default_matte: 'solid' as const, slots: { top: 'hook', bottom: 'caption' } },
         { id: 'center_stage', label: 'Center stage', blurb: 'Hook + caption bands', family, video: { x: 0, y: 0.16, w: 1, h: 0.68 }, default_matte: 'blur' as const, slots: { top: 'hook', bottom: 'caption' } },
         { id: 'top_hero', label: 'Top hero', blurb: 'CTA band below', family, video: { x: 0, y: 0, w: 1, h: 0.7 }, default_matte: 'gradient' as const, slots: { bottom: 'caption' } },
         { id: 'bottom_anchor', label: 'Bottom anchor', blurb: 'Hook band on top', family, video: { x: 0, y: 0.3, w: 1, h: 0.7 }, default_matte: 'gradient' as const, slots: { top: 'hook' } },
@@ -1079,6 +1081,77 @@ function applyFocalPreset(geom: TimelineGeometry, focalX: number) {
   })
 }
 
+function setPrimaryFit(fit: 'cover' | 'contain') {
+  if (!selectedPrimary.value) return
+  mutate(() => {
+    const geom = geometryFor(selectedPrimary.value!)
+    geom.fit = fit
+    if (fit === 'contain') {
+      if ((geom.zoom ?? 1) > 1.01) geom.zoom = 1
+      geom.focal_x = 0.5
+      geom.focal_y = 0.5
+    }
+  })
+  commitInspectorEdit()
+}
+
+function setVideoOverlayFit(fit: 'cover' | 'contain') {
+  if (!selectedVideo.value) return
+  mutate(() => {
+    const geom = videoOverlayGeometryFor(selectedVideo.value!)
+    geom.fit = fit
+    if (fit === 'contain') {
+      if ((geom.zoom ?? 1) > 1.01) geom.zoom = 1
+      geom.focal_x = 0.5
+      geom.focal_y = 0.5
+    }
+  })
+  commitInspectorEdit()
+}
+
+function applyFitToAllClips(fit: 'cover' | 'contain') {
+  const primary = timeline.value?.document?.primary
+  if (!primary || !primary.length) return
+  mutate(() => {
+    for (const item of primary) {
+      if (!item.variant[variant.value]) {
+        item.variant[variant.value] = defaultGeometry(item)
+      }
+      const geom = ensureCropFields(item.variant[variant.value]!)
+      geom.fit = fit
+      if (fit === 'contain') {
+        if ((geom.zoom ?? 1) > 1.01) geom.zoom = 1
+        geom.focal_x = 0.5
+        geom.focal_y = 0.5
+      }
+    }
+  })
+  commitInspectorEdit()
+}
+
+const allClipsFitState = computed<'cover' | 'contain' | 'mixed'>(() => {
+  const primary = timeline.value?.document?.primary
+  if (!primary || !primary.length) return 'cover'
+  const v = variant.value
+  let hasCover = false
+  let hasContain = false
+  for (const item of primary) {
+    const geom = item.variant?.[v]
+    const fit = geom?.fit || 'cover'
+    if (fit === 'contain') hasContain = true
+    else hasCover = true
+  }
+  if (hasCover && hasContain) return 'mixed'
+  return hasContain ? 'contain' : 'cover'
+})
+
+const programMonitorStyle = computed(() => {
+  if (variant.value === 'shorts' && canvasLayout.value?.matte_color) {
+    return { backgroundColor: canvasLayout.value.matte_color }
+  }
+  return {}
+})
+
 const isReframingActivePrimary = computed(() => {
   if (!activeItem.value || !activeMedia.value) return false
   if (activeGeometry.value.fit === 'contain') return false
@@ -1388,9 +1461,10 @@ function videoOverlayPreviewStyle(overlay: TimelineVideoOverlay) {
   const clipPath = geometryCropClipPath(geom, !isFullFrame, frameRadiusCqw(geom) / zoom)
   const translate = geometryOffsetTranslate(geom)
   if (isFullFrame) {
+    const objectFit = geom.fit === 'contain' ? 'contain' : (targetAspect.value === '9:16' ? 'fill' : (geom.fit || 'cover'))
     return {
       opacity: overlay.opacity ?? 1,
-      objectFit: (geom.fit || 'cover') as 'cover' | 'contain',
+      objectFit: objectFit as 'contain' | 'cover' | 'fill',
       objectPosition: `${fx}% ${fy}%`,
       transformOrigin: `${fx}% ${fy}%`,
       transform: `scale(${zoom})`,
@@ -3304,7 +3378,7 @@ async function uploadAsset(event: Event, append: boolean) {
 let lastModifierToggleTime = 0
 let lastModifierToggledId = ''
 
-function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: string, _start: number, event?: MouseEvent) {
+function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: string, start: number, event?: MouseEvent) {
   if (event && (event.shiftKey || event.ctrlKey || event.metaKey)) {
     if (Date.now() - lastModifierToggleTime > 300 || lastModifierToggledId !== id) {
       lastModifierToggleTime = Date.now()
@@ -3313,10 +3387,42 @@ function selectItem(kind: 'primary' | 'video' | 'image' | 'text' | 'audio', id: 
     }
     return
   }
-  // Overlay tracks (VIDEO/IMAGE/TEXT/AUDIO): select only — keep playhead/playback where it is.
+  // Select the layer. If the playhead is outside its interval, pause and seek into it
+  // so the layer is immediately visible on the monitor.
   selectedKind.value = kind
   selectedId.value = id
   selectedEntries.value = [{ kind, id }]
+  const item = kind === 'video'
+    ? videoOverlays.value.find((entry) => entry.id === id)
+    : kind === 'image'
+      ? timeline.value?.document.image_overlays.find((entry) => entry.id === id)
+      : kind === 'text'
+        ? timeline.value?.document.text_overlays.find((entry) => entry.id === id)
+        : kind === 'audio'
+          ? timeline.value?.document.audio_overlays?.find((entry) => entry.id === id)
+          : undefined
+  if (item) {
+    const itemStart = item.start_ms
+    const itemEnd = itemStart + (item.duration_ms || 0)
+    if (playheadMs.value < itemStart || playheadMs.value >= itemEnd) {
+      stopPlayback()
+      const duration = item.duration_ms || 0
+      playheadMs.value = Math.min(totalMs.value, Math.max(0, itemStart + Math.min(1000, Math.floor(duration / 2))))
+      void nextTick(() => {
+        syncVideo()
+        syncVideoOverlays()
+      })
+    }
+  }
+}
+
+function seekToOverlay(item: { start_ms: number; duration_ms: number }) {
+  stopPlayback()
+  playheadMs.value = Math.min(totalMs.value, Math.max(0, item.start_ms + Math.min(1000, Math.floor(item.duration_ms / 2))))
+  void nextTick(() => {
+    syncVideo()
+    syncVideoOverlays()
+  })
 }
 
 function handlePrimaryBlockClick(event: MouseEvent, item: TimelinePrimaryItem, index: number) {
@@ -3484,6 +3590,9 @@ function finishOverlayEdit(event?: PointerEvent) {
   if (edit && (edit.kind === 'image' || edit.kind === 'video') && dropMs !== null) {
     moveOverlayToPrimary(edit.kind, edit.item as TimelineImageOverlay | TimelineVideoOverlay, dropMs, edit.moved ? null : edit.before)
     return
+  }
+  if (edit && !edit.moved && (event?.type === 'pointerup' || !event)) {
+    selectItem(edit.kind, edit.item.id, edit.item.start_ms)
   }
   if (changed) scheduleSave()
 }
@@ -4179,7 +4288,25 @@ function togglePlayback() {
   playbackTimer = requestAnimationFrame(tick)
 }
 
-async function renderVariant() {
+const unresolvedTimelineShots = computed(() => {
+  const byId = new Map(props.shots.map((shot) => [shot.id, shot]))
+  const orderedIds = timeline.value?.document.primary
+    .map((item) => item.source?.kind.startsWith('shot_') ? item.source.ref_id : null)
+    .filter((id): id is string => Boolean(id)) || []
+  return [...new Set(orderedIds)]
+    .map((id) => byId.get(id))
+    .filter((shot): shot is Shot => Boolean(shot))
+    .filter((shot) => (shot.unresolved_note_count ?? 0) > 0 || (shot.notes || []).some((note) => !note.resolved))
+})
+
+function hasUnresolvedNote(item: TimelinePrimaryItem): boolean {
+  if (!item.source?.ref_id) return false
+  const shot = props.shots.find((s) => s.id === item.source?.ref_id)
+  if (!shot) return false
+  return (shot.unresolved_note_count ?? 0) > 0 || (shot.notes || []).some((n) => !n.resolved)
+}
+
+async function performRenderVariant() {
   await flushPendingSave()
   if (props.compilationId) {
     await store.renderCompilationExport(props.compilationId, variant.value)
@@ -4189,6 +4316,34 @@ async function renderVariant() {
   } else {
     await store.renderFinalCut(variant.value)
   }
+}
+
+async function renderVariant() {
+  if (unresolvedTimelineShots.value.length) {
+    showUnresolvedNotesModal.value = true
+    return
+  }
+  await performRenderVariant()
+}
+
+async function continueExportWithNotes() {
+  showUnresolvedNotesModal.value = false
+  await performRenderVariant()
+}
+
+async function reviewShot(shotId: string) {
+  showUnresolvedNotesModal.value = false
+  await router.push({
+    name: 'project-stage',
+    params: { projectId: props.project.id, stage: 'shots', shotId },
+    query: store.currentEpisodeId ? { episode: store.currentEpisodeId } : {},
+  })
+}
+
+async function reviewFirstUnresolvedNote() {
+  const shot = unresolvedTimelineShots.value[0]
+  if (!shot) return
+  await reviewShot(shot.id)
 }
 
 async function resetTimeline() {
@@ -4487,7 +4642,15 @@ onBeforeUnmount(() => {
           <h2>Timeline</h2>
           <div v-if="props.compilationId && store.activeCompilation" class="compilation-badge-pill">
             <Boxes :size="13" />
-            <span>Box: {{ store.activeCompilation.title }}</span>
+            <span>{{ store.activeCompilation.episode_id || store.activeCompilation.shot_ids?.length ? 'Short Cut' : 'Box' }}: {{ store.activeCompilation.title }}</span>
+            <button
+              type="button"
+              class="edit-compilation-btn"
+              title="Edit compilation details and shots"
+              @click="emit('openCompilationModal', props.compilationId)"
+            >
+              <Pencil :size="11" />
+            </button>
             <button
               type="button"
               class="exit-compilation-btn"
@@ -4564,7 +4727,7 @@ onBeforeUnmount(() => {
     <template v-else-if="timeline">
       <div class="editor-main">
         <div class="preview-pane">
-          <section ref="programMonitor" class="program-monitor" :class="[variant, { 'has-layout': !isFullBleedLayout }]">
+          <section ref="programMonitor" class="program-monitor" :class="[variant, { 'has-layout': !isFullBleedLayout }]" :style="programMonitorStyle">
             <div
               v-if="!isFullBleedLayout"
               class="layout-matte"
@@ -4656,7 +4819,7 @@ onBeforeUnmount(() => {
                 v-if="playheadMs >= overlay.start_ms && playheadMs < overlay.start_ms + overlay.duration_ms && resolveSource(overlay.source)?.mime_type.startsWith('video')"
                 :ref="(el) => setVideoOverlayRef(overlay.id, el as HTMLVideoElement | null)"
                 class="preview-video-overlay"
-                :class="[videoOverlayGeometryFor(overlay).position, { 'is-full-frame': videoOverlayGeometryFor(overlay).position === 'full-frame' }]"
+                :class="[videoOverlayGeometryFor(overlay).position, { 'is-full-frame': videoOverlayGeometryFor(overlay).position === 'full-frame', 'is-selected': isSelected('video', overlay.id) }]"
                 :style="videoOverlayPreviewStyle(overlay)"
                 :src="resolveSource(overlay.source)!.url"
                 :muted="isMuted || Boolean(overlay.mute_audio) || (overlay.volume ?? 1) <= 0"
@@ -4792,6 +4955,36 @@ onBeforeUnmount(() => {
                   </span>
                   <em>{{ preset.label }}</em>
                 </button>
+              </div>
+              <div class="layout-fit-global">
+                <div class="layout-fit-global-header">
+                  <span class="quick-dur-label">Clips framing</span>
+                  <span class="layout-fit-status-badge" :class="allClipsFitState">
+                    {{ allClipsFitState === 'contain' ? 'All Boxed' : allClipsFitState === 'cover' ? 'All Fill' : 'Mixed' }}
+                  </span>
+                </div>
+                <div class="framing-fit-segmented mini">
+                  <button
+                    type="button"
+                    class="framing-fit-btn"
+                    :class="{ active: allClipsFitState === 'cover' }"
+                    title="Crop all primary clips to fill the portrait frame"
+                    @click="applyFitToAllClips('cover')"
+                  >
+                    <span class="fit-btn-glyph fill"><i></i></span>
+                    <span>Fill all (Crop)</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="framing-fit-btn"
+                    :class="{ active: allClipsFitState === 'contain' }"
+                    title="Box all primary clips so the entire 16:9 video is visible in the center"
+                    @click="applyFitToAllClips('contain')"
+                  >
+                    <span class="fit-btn-glyph boxed"><i></i></span>
+                    <span>Box all (Letterbox)</span>
+                  </button>
+                </div>
               </div>
               <template v-if="!isFullBleedLayout">
                 <label class="layout-field">
@@ -5009,13 +5202,50 @@ onBeforeUnmount(() => {
                 </button>
               </summary>
               <div class="framing-panel">
-                <label class="framing-fit-label">
-                  <span>Fit</span>
-                  <select v-model="geometryFor(selectedPrimary).fit" @change="commitInspectorEdit">
-                    <option value="cover">Fill frame (crop)</option>
-                    <option value="contain">Full frame (no crop)</option>
-                  </select>
-                </label>
+                <div class="framing-fit-control">
+                  <div class="framing-fit-header">
+                    <span class="framing-fit-title">Framing</span>
+                    <button
+                      v-if="timeline?.document?.primary && timeline.document.primary.length > 1"
+                      type="button"
+                      class="framing-apply-all-btn"
+                      :title="`Apply '${(geometryFor(selectedPrimary).fit || 'cover') === 'contain' ? 'Boxed' : 'Fill frame'}' to all clips in this Shorts timeline`"
+                      @click="applyFitToAllClips(geometryFor(selectedPrimary).fit || 'cover')"
+                    >
+                      Apply to all clips
+                    </button>
+                  </div>
+                  <div class="framing-fit-segmented">
+                    <button
+                      type="button"
+                      class="framing-fit-btn"
+                      :class="{ active: (geometryFor(selectedPrimary).fit || 'cover') === 'cover' }"
+                      title="Fill frame: crops widescreen video to fill 9:16 portrait"
+                      @click="setPrimaryFit('cover')"
+                    >
+                      <span class="fit-btn-glyph fill"><i></i></span>
+                      <span>Fill frame (Crop)</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="framing-fit-btn"
+                      :class="{ active: geometryFor(selectedPrimary).fit === 'contain' }"
+                      title="Boxed / Letterbox: shows the full 16:9 video centered with space top and bottom"
+                      @click="setPrimaryFit('contain')"
+                    >
+                      <span class="fit-btn-glyph boxed"><i></i></span>
+                      <span>Boxed (Letterbox)</span>
+                    </button>
+                  </div>
+                  <div class="framing-fit-subtext">
+                    <span v-if="(geometryFor(selectedPrimary).fit || 'cover') === 'contain'">
+                      Full 16:9 widescreen video centered with top &amp; bottom space.
+                    </span>
+                    <span v-else>
+                      Cropped to fill 9:16 frame. Drag preview to reframe focal point.
+                    </span>
+                  </div>
+                </div>
 
                 <div class="framing-card position-card">
                   <div class="framing-card-header">
@@ -5265,6 +5495,19 @@ onBeforeUnmount(() => {
                 + Add video layer
               </button>
             </div>
+            <div
+              v-if="playheadMs < selectedVideo.start_ms || playheadMs >= selectedVideo.start_ms + selectedVideo.duration_ms"
+              class="inspector-outside-notice"
+            >
+              <span>Playhead is outside layer window ({{ (selectedVideo.start_ms / 1000).toFixed(1) }}s – {{ ((selectedVideo.start_ms + selectedVideo.duration_ms) / 1000).toFixed(1) }}s)</span>
+              <button
+                type="button"
+                class="jump-to-layer-btn"
+                @click="seekToOverlay(selectedVideo)"
+              >
+                Jump playhead to layer
+              </button>
+            </div>
             <label>Label<input v-model="selectedVideo.label" @change="commitInspectorEdit" /></label>
             <label>Start (ms)<input v-model.number="selectedVideo.start_ms" type="number" min="0" step="100" @change="commitInspectorEdit" /></label>
             <label>Duration (ms)<input v-model.number="selectedVideo.duration_ms" type="number" min="100" step="100" @change="commitInspectorEdit" /></label>
@@ -5289,19 +5532,40 @@ onBeforeUnmount(() => {
                 <option value="bottom">Picture-in-Picture · Bottom center</option>
               </select>
             </label>
-            <label v-if="videoOverlayGeometryFor(selectedVideo).position === 'full-frame'">
-              Fit
-              <select v-model="videoOverlayGeometryFor(selectedVideo).fit" @change="commitInspectorEdit">
-                <option value="cover">Fill frame (Cover / Crop)</option>
-                <option value="contain">Fit frame (Contain / No crop)</option>
-              </select>
-            </label>
+            <div v-if="videoOverlayGeometryFor(selectedVideo).position === 'full-frame'" class="framing-fit-control">
+              <div class="framing-fit-header">
+                <span class="framing-fit-title">Framing</span>
+              </div>
+              <div class="framing-fit-segmented">
+                <button
+                  type="button"
+                  class="framing-fit-btn"
+                  :class="{ active: (videoOverlayGeometryFor(selectedVideo).fit || 'cover') === 'cover' }"
+                  title="Fill frame: crops layer to fill 9:16 portrait"
+                  @click="setVideoOverlayFit('cover')"
+                >
+                  <span class="fit-btn-glyph fill"><i></i></span>
+                  <span>Fill frame (Crop)</span>
+                </button>
+                <button
+                  type="button"
+                  class="framing-fit-btn"
+                  :class="{ active: videoOverlayGeometryFor(selectedVideo).fit === 'contain' }"
+                  title="Boxed / Letterbox: shows full layer centered with space top & bottom"
+                  @click="setVideoOverlayFit('contain')"
+                >
+                  <span class="fit-btn-glyph boxed"><i></i></span>
+                  <span>Boxed (Letterbox)</span>
+                </button>
+              </div>
+            </div>
             <label v-else class="framing-slider-field">
               <span class="framing-field-head">
                 <span>Scale</span>
                 <b>{{ Math.round((videoOverlayGeometryFor(selectedVideo).scale ?? 1) * 100) }}%</b>
               </span>
               <input v-model.number="videoOverlayGeometryFor(selectedVideo).scale" type="range" min="0.1" max="2" step="0.05" @change="commitInspectorEdit" />
+              <small class="inspector-help">Scale changes the layer's visible size. Zoom below changes the crop inside the layer.</small>
             </label>
             <details class="inspector-section framing-section" open>
               <summary class="inspector-section-summary">
@@ -5833,6 +6097,7 @@ onBeforeUnmount(() => {
                 <span class="block-kind-label">{{ item.kind.toUpperCase() }}</span>
               </span>
               <span class="block-status-icons">
+                <span v-if="hasUnresolvedNote(item)" class="block-note-icon" title="This shot has unresolved notes"><MessageSquare :size="10" /></span>
                 <Scissors v-if="item.kind === 'video' && (item.source_in_ms > 0)" class="block-trim-icon" :size="10" title="Trimmed clip" />
                 <Repeat v-if="item.kind === 'video' && item.loop" class="block-loop-icon" :size="10" title="Loops to fill its length" />
                 <span
@@ -6295,7 +6560,45 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="variantExport" class="export-status" :class="{ stale: variantExport.is_stale }"><strong>{{ variant === 'shorts' ? 'Shorts' : 'Landscape' }} export</strong><span>{{ variantExport.width }} × {{ variantExport.height }} · {{ (variantExport.duration_ms / 1000).toFixed(1) }}s</span><em>{{ variantExport.is_stale ? 'Outdated — render again' : 'Up to date' }}</em></div>
-      <!-- PUBLISH MODAL -->
+      <!-- UNRESOLVED NOTES INTERRUPT MODAL -->
+      <div v-if="showUnresolvedNotesModal" class="publish-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="unresolved-notes-title" @click.self="showUnresolvedNotesModal = false">
+        <section class="unresolved-notes-card">
+          <header>
+            <div class="unresolved-notes-icon"><CircleAlert :size="22" /></div>
+            <div>
+              <h2 id="unresolved-notes-title">Unresolved shot notes</h2>
+              <p>{{ unresolvedTimelineShots.length }} shot{{ unresolvedTimelineShots.length === 1 ? '' : 's' }} in this timeline still need review before exporting.</p>
+            </div>
+            <button type="button" class="mini-icon unresolved-close-btn" aria-label="Close" @click="showUnresolvedNotesModal = false">
+              <X :size="16" />
+            </button>
+          </header>
+          <ul class="unresolved-notes-list">
+            <li
+              v-for="shot in unresolvedTimelineShots.slice(0, 5)"
+              :key="shot.id"
+              class="unresolved-shot-item"
+              title="Click to jump directly to this shot"
+              @click="reviewShot(shot.id)"
+            >
+              <div class="unresolved-shot-item-main">
+                <MessageSquare :size="14" class="unresolved-item-icon" />
+                <strong>{{ shot.title || `Shot ${shot.order_index + 1}` }}</strong>
+              </div>
+              <span class="unresolved-count-pill">
+                {{ ((shot.notes || []).filter((note) => !note.resolved).length) || shot.unresolved_note_count || 1 }} unresolved
+                <ChevronRight :size="13" />
+              </span>
+            </li>
+          </ul>
+          <p v-if="unresolvedTimelineShots.length > 5" class="unresolved-more">And {{ unresolvedTimelineShots.length - 5 }} more shots with unresolved notes.</p>
+          <footer>
+            <button type="button" class="secondary-button" @click="continueExportWithNotes">Continue without resolving</button>
+            <button type="button" class="primary-button" @click="reviewFirstUnresolvedNote">Go back to resolve</button>
+          </footer>
+        </section>
+      </div>
+
       <div v-if="showPublishModal" class="publish-modal-backdrop" @click.self="closePublishModal()">
         <div class="publish-modal-card">
           <PublishPanel
@@ -6386,6 +6689,26 @@ onBeforeUnmount(() => {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+.edit-compilation-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #c7d2fe;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s ease;
+}
+
+.edit-compilation-btn:hover {
+  background: rgba(99, 102, 241, 0.35);
+  color: #ffffff;
 }
 
 .exit-compilation-btn {
@@ -7017,6 +7340,49 @@ onBeforeUnmount(() => {
   pointer-events: none;
   border-radius: 4px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.preview-video-overlay.is-selected {
+  outline: 2px solid #fb6b5b;
+  outline-offset: -2px;
+  box-shadow: 0 0 0 1px rgba(8, 12, 16, 0.9), 0 4px 18px rgba(0, 0, 0, 0.6);
+}
+
+.inspector-outside-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: rgba(251, 107, 91, 0.12);
+  border: 1px solid rgba(251, 107, 91, 0.35);
+  border-radius: 8px;
+  font-size: 0.74rem;
+  color: #ff9d92;
+}
+
+.jump-to-layer-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: #fb6b5b;
+  color: #0b0d12;
+  font-weight: 600;
+  font-size: 0.72rem;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.jump-to-layer-btn:hover {
+  opacity: 0.9;
+}
+
+.inspector-help {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
 }
 
 .preview-video-overlay.is-full-frame,
@@ -7755,6 +8121,160 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
   margin: 0 !important;
 }
 
+.framing-fit-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.framing-fit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.framing-fit-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.framing-apply-all-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.framing-apply-all-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.framing-fit-segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.framing-fit-segmented.mini {
+  margin-top: 5px;
+}
+
+.framing-fit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  user-select: none;
+}
+
+.framing-fit-btn:hover {
+  border-color: var(--line-strong, #3a4150);
+  color: var(--text);
+}
+
+.framing-fit-btn.active {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
+.fit-btn-glyph {
+  position: relative;
+  display: inline-block;
+  width: 13px;
+  height: 17px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.framing-fit-btn.active .fit-btn-glyph {
+  border-color: var(--accent);
+}
+
+.fit-btn-glyph.fill i {
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0.85;
+}
+
+.fit-btn-glyph.boxed i {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 4px;
+  bottom: 4px;
+  background: currentColor;
+  opacity: 0.85;
+  border-radius: 1px;
+}
+
+.framing-fit-subtext {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.layout-fit-global {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.layout-fit-global-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.layout-fit-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--fill-muted);
+  color: var(--muted);
+}
+
+.layout-fit-status-badge.contain {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.layout-fit-status-badge.cover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+}
+
+.layout-fit-status-badge.mixed {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+}
+
 .framing-card {
   display: flex;
   flex-direction: column;
@@ -8328,7 +8848,10 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
    TIMELINE RULER, PLAYHEAD & MULTI-TRACK LANES
    ========================================================================== */
 .timeline-scroll {
-  overflow-x: auto;
+  flex: 0 0 auto;
+  max-height: 42vh;
+  overflow: auto;
+  overscroll-behavior: contain;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 42px),
     var(--preview-well);
@@ -9476,6 +9999,118 @@ details.inspector-section:not([open]) .inspector-section-summary > span::before 
 
 .publish-modal-card.release-kit-card {
   max-width: 980px;
+}
+
+.unresolved-notes-card {
+  width: min(540px, calc(100vw - 32px));
+  border: 1px solid var(--line-emphasis);
+  border-radius: 16px;
+  background: var(--surface-2);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  padding: 22px;
+  display: grid;
+  gap: 18px;
+}
+.unresolved-notes-card header {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.unresolved-notes-card h2,
+.unresolved-notes-card p {
+  margin: 0;
+}
+.unresolved-notes-card header p {
+  color: var(--muted);
+  margin-top: 4px;
+}
+.unresolved-notes-icon {
+  color: #f6c453;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(246, 196, 83, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.unresolved-close-btn {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+}
+.unresolved-close-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.unresolved-notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.unresolved-shot-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.unresolved-shot-item:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  border-color: rgba(246, 196, 83, 0.25);
+  transform: translateX(2px);
+}
+.unresolved-shot-item-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.unresolved-shot-item-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.unresolved-item-icon {
+  color: #f6c453;
+  flex-shrink: 0;
+}
+.unresolved-count-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #f6c453;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.unresolved-more {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+.unresolved-notes-card footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.block-note-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #f6c453;
+  margin-right: 3px;
 }
 
 .preview-frame-notice {

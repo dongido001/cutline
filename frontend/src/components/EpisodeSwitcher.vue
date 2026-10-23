@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { Boxes, Check, ChevronDown, Clapperboard, Copy, Pencil, Plus, Settings, Trash2, X } from '@lucide/vue'
+import { Boxes, Check, ChevronDown, Clapperboard, Copy, Pencil, Plus, Scissors, Settings, Trash2, X } from '@lucide/vue'
 import { useStudioStore } from '@/stores/studio'
 
 const emit = defineEmits<{
@@ -29,7 +29,8 @@ const episodeLabel = computed(() => store.episodeLabel || 'Episode')
 const currentEpisodeDisplay = computed(() => {
   if (!store.currentProject) return 'No project'
   if (store.isCompilationMode && store.activeCompilation) {
-    return `Box: ${store.activeCompilation.title}`
+    const isShort = Boolean(store.activeCompilation.episode_id || (store.activeCompilation.shot_ids && store.activeCompilation.shot_ids.length > 0))
+    return `${isShort ? 'Short Cut' : 'Box'}: ${store.activeCompilation.title}`
   }
   const ep = store.currentEpisode
   if (!ep) return `${episodeLabel.value} 1`
@@ -183,7 +184,12 @@ onUnmounted(() => {
         :title="'Switch ' + episodeLabel"
         @click="toggleDropdown"
       >
-        <Boxes v-if="store.isCompilationMode" :size="13" class="episode-trigger-icon compilation-trigger-icon" />
+        <Scissors
+          v-if="store.isCompilationMode && (store.activeCompilation?.episode_id || store.activeCompilation?.shot_ids?.length)"
+          :size="13"
+          class="episode-trigger-icon compilation-trigger-icon"
+        />
+        <Boxes v-else-if="store.isCompilationMode" :size="13" class="episode-trigger-icon compilation-trigger-icon" />
         <Clapperboard v-else :size="13" class="episode-trigger-icon" />
         <span class="episode-switcher-label" :class="{ 'compilation-label': store.isCompilationMode }">{{ currentEpisodeDisplay }}</span>
         <ChevronDown :size="13" class="switcher-arrow" />
@@ -364,7 +370,10 @@ onUnmounted(() => {
             @click="handleSelectCompilation(comp.id)"
           >
             <div class="episode-item-info">
-              <span class="compilation-pill-icon"><Boxes :size="13" /></span>
+              <span class="compilation-pill-icon">
+                <Scissors v-if="comp.episode_id || (comp.shot_ids && comp.shot_ids.length > 0)" :size="13" />
+                <Boxes v-else :size="13" />
+              </span>
               <span class="episode-item-title">{{ comp.title }}</span>
               <span class="compilation-shots-badge">{{ comp.clip_count ?? 0 }} shots</span>
             </div>

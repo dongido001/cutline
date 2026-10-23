@@ -5,6 +5,7 @@ import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from pathlib import Path
 
 import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
@@ -41,7 +42,7 @@ from .video import (
 from .draft import enqueue_create_draft, project_readiness
 from .takes import record_take, select_take
 from .vibevoice_tts import synthesize_dialogue, vibevoice_status
-from .models import Character, CharacterReference, Compilation, DeepReviewRun, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotTake, StemSeparation, LibraryAudio, Suggestion, TimelineAsset, PublishRecord, ReleaseKit, now
+from .models import Character, CharacterReference, Compilation, DeepReviewRun, Episode, Job, Project, ProjectFinalCut, ProjectTimeline, ProjectVariantExport, Scene, ScriptVersion, Shot, ShotClip, ShotContinuityFrame, ShotImage, ShotImageReference, ShotMediaVariant, ShotNote, ShotNoteAttachment, ShotTake, StemSeparation, LibraryAudio, Suggestion, TimelineAsset, PublishRecord, ReleaseKit, now
 from .stems import separator_statuses, set_stem_separator
 from .schemas import (
     LibraryAudioCreate,
@@ -60,6 +61,8 @@ from .schemas import (
     EpisodeSummary,
     EpisodeUpdate,
     ProjectUpdate,
+    ShotNoteRead,
+    ShotNoteUpdate,
     CharacterCreate,
     CharacterRead,
     CharacterUpdate,
@@ -623,8 +626,20 @@ def continue_project(
 
 
 @app.get("/api/projects", response_model=list[ProjectSummary])
-def list_projects(db: Session = Depends(get_db)) -> list[Project]:
-    return list(db.scalars(select(Project).order_by(Project.updated_at.desc())))
+def list_projects(db: Session = Depends(get_db)) -> list[dict]:
+    projects = list(db.scalars(select(Project).order_by(Project.updated_at.desc())))
+    counts = dict(db.execute(
+        select(ScriptVersion.project_id, func.count(ShotNote.id))
+        .join(Scene, Scene.script_version_id == ScriptVersion.id)
+        .join(Shot, Shot.scene_id == Scene.id)
+        .join(ShotNote, ShotNote.shot_id == Shot.id)
+        .where(ShotNote.resolved.is_(False))
+        .group_by(ScriptVersion.project_id)
+    ).all())
+    return [
+        {**ProjectSummary.model_validate(project).model_dump(), "unresolved_note_count": counts.get(project.id, 0)}
+        for project in projects
+    ]
 
 
 @app.patch("/api/projects/{project_id}", response_model=ProjectSummary)
@@ -814,6 +829,21 @@ def delete_episode(
     db.commit()
 
 
+@app.get("/api/projects/{project_id}/episodes/{episode_id}/shots", response_model=list[ShotRead])
+def get_episode_shots(
+    project_id: str,
+    episode_id: str,
+    db: Session = Depends(get_db),
+) -> list[Shot]:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    episode = db.get(Episode, episode_id)
+    if not episode or episode.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return latest_shots(project_id, db, episode_id=episode_id)
+
+
 @app.get("/api/projects/{project_id}", response_model=ProjectDetail)
 def get_project(
     project_id: str,
@@ -876,6 +906,10 @@ def get_project(
             selectinload(ScriptVersion.scenes)
             .selectinload(Scene.shots)
             .selectinload(Shot.continuity_frames),
+            selectinload(ScriptVersion.scenes)
+            .selectinload(Scene.shots)
+            .selectinload(Shot.notes)
+            .selectinload(ShotNote.attachments),
             selectinload(ScriptVersion.suggestions),
         )
         .order_by(ScriptVersion.version_number.desc())
@@ -906,6 +940,10 @@ def get_project(
                 selectinload(ScriptVersion.scenes)
                 .selectinload(Scene.shots)
                 .selectinload(Shot.continuity_frames),
+                selectinload(ScriptVersion.scenes)
+                .selectinload(Scene.shots)
+                .selectinload(Shot.notes)
+                .selectinload(ShotNote.attachments),
                 selectinload(ScriptVersion.suggestions),
             )
             .order_by(ScriptVersion.version_number.desc())
@@ -957,6 +995,13 @@ def get_project(
         )
 
     data = ProjectSummary.model_validate(project).model_dump()
+    data["unresolved_note_count"] = db.scalar(
+        select(func.count(ShotNote.id))
+        .join(Shot, Shot.id == ShotNote.shot_id)
+        .join(Scene, Scene.id == Shot.scene_id)
+        .join(ScriptVersion, ScriptVersion.id == Scene.script_version_id)
+        .where(ScriptVersion.project_id == project_id, ShotNote.resolved.is_(False))
+    ) or 0
     data["episodes"] = episodes_summary
     data["current_episode_id"] = active_episode.id
     data["current_version"] = version
@@ -1007,9 +1052,11 @@ def get_project(
             {
                 "id": comp.id,
                 "project_id": comp.project_id,
+                "episode_id": comp.episode_id,
                 "title": comp.title,
                 "description": comp.description,
                 "episode_ids": comp.episode_ids or [],
+                "shot_ids": comp.shot_ids or [],
                 "settings": comp.settings or {},
                 "created_at": comp.created_at,
                 "updated_at": comp.updated_at,
@@ -1542,6 +1589,8 @@ def delete_shot(shot_id: str, db: Session = Depends(get_db)) -> None:
     for frame in shot.continuity_frames:
         if frame.filename:
             files_to_delete.append(frame.filename)
+    for note in shot.notes:
+        files_to_delete.extend(attachment.filename for attachment in note.attachments)
 
     for timeline in db.scalars(select(ProjectTimeline).where(ProjectTimeline.project_id == project.id)):
         for doc_attr in ("document", "shorts_document"):
@@ -1616,7 +1665,8 @@ def update_shot(
     shot.framing = payload.framing
     shot.duration_ms = payload.duration_ms
     shot.image_prompt = payload.image_prompt
-    shot.video_prompt = payload.video_prompt
+    if payload.video_prompt is not None:
+        shot.video_prompt = payload.video_prompt
     shot.title_card_text = payload.title_card_text
     if payload.character_ids is not None:
         project = shot.scene.script_version.project
@@ -2508,12 +2558,125 @@ def read_shot(shot_id: str, db: Session = Depends(get_db)) -> Shot:
             selectinload(Shot.takes),
             selectinload(Shot.image_references),
             selectinload(Shot.continuity_frames),
+            selectinload(Shot.notes).selectinload(ShotNote.attachments),
             selectinload(Shot.scene).selectinload(Scene.script_version),
         )
     )
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
     return shot
+
+
+async def _save_note_attachments(note: ShotNote, files: list[UploadFile], db: Session) -> None:
+    settings.media_dir.mkdir(parents=True, exist_ok=True)
+    for upload in files:
+        mime_type = (upload.content_type or "application/octet-stream").lower()
+        if mime_type in {"text/html", "image/svg+xml", "application/javascript", "text/javascript"}:
+            raise HTTPException(status_code=415, detail=f"{upload.filename or 'Attachment'} is not a supported attachment type")
+        content = await upload.read(20 * 1024 * 1024 + 1)
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"{upload.filename or 'Attachment'} exceeds 20 MB")
+        if not content:
+            continue
+        original_name = Path(upload.filename or "attachment").name[:240]
+        suffix = Path(original_name).suffix.lower()[:12]
+        filename = f"shot-note-{uuid.uuid4().hex}{suffix}"
+        (settings.media_dir / filename).write_bytes(content)
+        db.add(ShotNoteAttachment(
+            note=note,
+            filename=filename,
+            original_name=original_name,
+            mime_type=mime_type[:120],
+            size_bytes=len(content),
+        ))
+
+
+def _note_with_attachments(note_id: str, db: Session) -> ShotNote | None:
+    return db.scalar(
+        select(ShotNote).where(ShotNote.id == note_id).options(selectinload(ShotNote.attachments))
+    )
+
+
+@app.get("/api/shots/{shot_id}/notes", response_model=list[ShotNoteRead])
+def list_shot_notes(shot_id: str, db: Session = Depends(get_db)) -> list[ShotNote]:
+    if not db.get(Shot, shot_id):
+        raise HTTPException(status_code=404, detail="Shot not found")
+    return list(db.scalars(
+        select(ShotNote).where(ShotNote.shot_id == shot_id)
+        .options(selectinload(ShotNote.attachments)).order_by(ShotNote.created_at.desc())
+    ))
+
+
+@app.post("/api/shots/{shot_id}/notes", response_model=ShotNoteRead, status_code=201)
+async def create_shot_note(
+    shot_id: str,
+    body: str = Form(...),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+) -> ShotNote:
+    if not db.get(Shot, shot_id):
+        raise HTTPException(status_code=404, detail="Shot not found")
+    clean_body = body.strip()
+    if not clean_body or len(clean_body) > 10000:
+        raise HTTPException(status_code=422, detail="Note must be between 1 and 10,000 characters")
+    note = ShotNote(shot_id=shot_id, body=clean_body)
+    db.add(note)
+    await _save_note_attachments(note, files, db)
+    db.commit()
+    return _note_with_attachments(note.id, db)
+
+
+@app.patch("/api/shot-notes/{note_id}", response_model=ShotNoteRead)
+def update_shot_note(note_id: str, payload: ShotNoteUpdate, db: Session = Depends(get_db)) -> ShotNote:
+    note = _note_with_attachments(note_id, db)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if payload.body is not None:
+        clean_body = payload.body.strip()
+        if not clean_body or len(clean_body) > 10000:
+            raise HTTPException(status_code=422, detail="Note must be between 1 and 10,000 characters")
+        note.body = clean_body
+    if payload.resolved is not None:
+        note.resolved = payload.resolved
+    note.updated_at = now()
+    db.commit()
+    return _note_with_attachments(note.id, db)
+
+
+@app.post("/api/shot-notes/{note_id}/attachments", response_model=ShotNoteRead)
+async def add_shot_note_attachments(
+    note_id: str, files: list[UploadFile] = File(...), db: Session = Depends(get_db)
+) -> ShotNote:
+    note = _note_with_attachments(note_id, db)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    await _save_note_attachments(note, files, db)
+    note.updated_at = now()
+    db.commit()
+    return _note_with_attachments(note.id, db)
+
+
+@app.delete("/api/shot-note-attachments/{attachment_id}", status_code=204)
+def delete_shot_note_attachment(attachment_id: str, db: Session = Depends(get_db)) -> None:
+    attachment = db.get(ShotNoteAttachment, attachment_id)
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    filename = attachment.filename
+    db.delete(attachment)
+    db.commit()
+    delete_media_file(filename)
+
+
+@app.delete("/api/shot-notes/{note_id}", status_code=204)
+def delete_shot_note(note_id: str, db: Session = Depends(get_db)) -> None:
+    note = _note_with_attachments(note_id, db)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    filenames = [attachment.filename for attachment in note.attachments]
+    db.delete(note)
+    db.commit()
+    for filename in filenames:
+        delete_media_file(filename)
 
 
 @app.get("/api/shots/{shot_id}/image-reference/sources")
@@ -4464,9 +4627,11 @@ def list_compilations(project_id: str, db: Session = Depends(get_db)) -> list[di
             {
                 "id": comp.id,
                 "project_id": comp.project_id,
+                "episode_id": comp.episode_id,
                 "title": comp.title,
                 "description": comp.description,
                 "episode_ids": comp.episode_ids or [],
+                "shot_ids": comp.shot_ids or [],
                 "settings": comp.settings or {},
                 "created_at": comp.created_at,
                 "updated_at": comp.updated_at,
@@ -4483,14 +4648,34 @@ def create_compilation(project_id: str, payload: CompilationCreate, db: Session 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     valid_ep_ids = {ep.id for ep in project.episodes}
+    if payload.episode_id and payload.episode_id not in valid_ep_ids:
+        raise HTTPException(status_code=400, detail=f"Episode {payload.episode_id} does not belong to project")
     for ep_id in payload.episode_ids:
         if ep_id not in valid_ep_ids:
             raise HTTPException(status_code=400, detail=f"Episode {ep_id} does not belong to project")
+    if not payload.episode_ids and not payload.shot_ids:
+        raise HTTPException(status_code=422, detail="Provide at least one episode or one shot for the compilation")
+
+    target_episode_id = payload.episode_id
+    if payload.shot_ids:
+        shots = db.scalars(select(Shot).where(Shot.id.in_(payload.shot_ids))).all()
+        found_ids = {s.id for s in shots}
+        missing = [sid for sid in payload.shot_ids if sid not in found_ids]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Shots not found: {', '.join(missing)}")
+        if not target_episode_id and shots:
+            first_scene = db.get(Scene, shots[0].scene_id)
+            first_version = db.get(ScriptVersion, first_scene.script_version_id) if first_scene else None
+            if first_version and first_version.episode_id:
+                target_episode_id = first_version.episode_id
+
     compilation = Compilation(
         project_id=project_id,
+        episode_id=target_episode_id,
         title=payload.title.strip(),
         description=payload.description.strip() if payload.description else None,
-        episode_ids=payload.episode_ids,
+        episode_ids=payload.episode_ids or [],
+        shot_ids=payload.shot_ids or [],
         settings=payload.settings or {},
     )
     db.add(compilation)
@@ -4505,10 +4690,12 @@ def create_compilation(project_id: str, payload: CompilationCreate, db: Session 
     return {
         "id": compilation.id,
         "project_id": compilation.project_id,
+        "episode_id": compilation.episode_id,
         "title": compilation.title,
         "description": compilation.description,
-        "episode_ids": compilation.episode_ids,
-        "settings": compilation.settings,
+        "episode_ids": compilation.episode_ids or [],
+        "shot_ids": compilation.shot_ids or [],
+        "settings": compilation.settings or {},
         "created_at": compilation.created_at,
         "updated_at": compilation.updated_at,
         "duration_ms": duration_ms,
@@ -4532,9 +4719,11 @@ def get_compilation(compilation_id: str, db: Session = Depends(get_db)) -> dict:
     return {
         "id": comp.id,
         "project_id": comp.project_id,
+        "episode_id": comp.episode_id,
         "title": comp.title,
         "description": comp.description,
         "episode_ids": comp.episode_ids or [],
+        "shot_ids": comp.shot_ids or [],
         "settings": comp.settings or {},
         "created_at": comp.created_at,
         "updated_at": comp.updated_at,
@@ -4548,6 +4737,19 @@ def get_compilation_shots(compilation_id: str, db: Session = Depends(get_db)):
     comp = db.get(Compilation, compilation_id)
     if not comp:
         raise HTTPException(status_code=404, detail="Compilation not found")
+    if comp.shot_ids:
+        shots = db.scalars(
+            select(Shot)
+            .where(Shot.id.in_(comp.shot_ids))
+            .options(
+                selectinload(Shot.media_variants),
+                selectinload(Shot.takes),
+                selectinload(Shot.image_references),
+                selectinload(Shot.notes).selectinload(ShotNote.attachments),
+            )
+        ).all()
+        shots_by_id = {s.id: s for s in shots}
+        return [shots_by_id[sid] for sid in comp.shot_ids if sid in shots_by_id]
     all_shots: list[Shot] = []
     for ep_id in (comp.episode_ids or []):
         all_shots.extend(latest_shots(comp.project_id, db, episode_id=ep_id))
@@ -4565,6 +4767,15 @@ def update_compilation(compilation_id: str, payload: CompilationUpdate, db: Sess
     if payload.description is not None:
         comp.description = payload.description.strip() if payload.description else None
     membership_changed = False
+    if payload.episode_id is not None:
+        if payload.episode_id:
+            valid_ep_ids = {ep.id for ep in project.episodes}
+            if payload.episode_id not in valid_ep_ids:
+                raise HTTPException(status_code=400, detail=f"Episode {payload.episode_id} does not belong to project")
+        previous_ep = comp.episode_id
+        next_ep = payload.episode_id or None
+        membership_changed = membership_changed or (previous_ep != next_ep)
+        comp.episode_id = next_ep
     if payload.episode_ids is not None:
         valid_ep_ids = {ep.id for ep in project.episodes}
         for ep_id in payload.episode_ids:
@@ -4572,14 +4783,19 @@ def update_compilation(compilation_id: str, payload: CompilationUpdate, db: Sess
                 raise HTTPException(status_code=400, detail=f"Episode {ep_id} does not belong to project")
         previous_ids = list(comp.episode_ids or [])
         next_ids = list(payload.episode_ids)
-        membership_changed = previous_ids != next_ids
+        membership_changed = membership_changed or (previous_ids != next_ids)
         comp.episode_ids = next_ids
         flag_modified(comp, "episode_ids")
+    if payload.shot_ids is not None:
+        previous_shots = list(comp.shot_ids or [])
+        next_shots = list(payload.shot_ids)
+        membership_changed = membership_changed or (previous_shots != next_shots)
+        comp.shot_ids = next_shots
+        flag_modified(comp, "shot_ids")
     if payload.settings is not None:
         comp.settings = {**comp.settings, **payload.settings}
     comp.updated_at = now()
     if membership_changed:
-        # Membership is a snapshot source: rebuild landscape + shorts from current episodes.
         rebuild_compilation_timeline(db, comp)
     db.commit()
     db.refresh(comp)
@@ -4596,9 +4812,11 @@ def update_compilation(compilation_id: str, payload: CompilationUpdate, db: Sess
     return {
         "id": comp.id,
         "project_id": comp.project_id,
+        "episode_id": comp.episode_id,
         "title": comp.title,
         "description": comp.description,
         "episode_ids": comp.episode_ids or [],
+        "shot_ids": comp.shot_ids or [],
         "settings": comp.settings or {},
         "created_at": comp.created_at,
         "updated_at": comp.updated_at,

@@ -137,14 +137,19 @@ class Compilation(Base):
     project_id: Mapped[str] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
+    episode_id: Mapped[str | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     episode_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    shot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
     project: Mapped["Project"] = relationship("Project", back_populates="compilations")
+    episode: Mapped["Episode | None"] = relationship("Episode")
     timeline: Mapped["ProjectTimeline | None"] = relationship(
         "ProjectTimeline",
         foreign_keys="[ProjectTimeline.compilation_id]",
@@ -260,12 +265,51 @@ class Shot(Base):
     takes: Mapped[list["ShotTake"]] = relationship(
         back_populates="shot", cascade="all, delete-orphan", order_by="ShotTake.created_at"
     )
+    notes: Mapped[list["ShotNote"]] = relationship(
+        back_populates="shot", cascade="all, delete-orphan", order_by="ShotNote.created_at.desc()"
+    )
 
     @property
     def continuity(self) -> dict[str, Any]:
         from .continuity import shot_continuity_status
 
         return shot_continuity_status(self)
+
+    @property
+    def unresolved_note_count(self) -> int:
+        return sum(1 for note in self.notes if not note.resolved)
+
+
+class ShotNote(Base):
+    __tablename__ = "shot_notes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    shot: Mapped["Shot"] = relationship(back_populates="notes")
+    attachments: Mapped[list["ShotNoteAttachment"]] = relationship(
+        back_populates="note", cascade="all, delete-orphan", order_by="ShotNoteAttachment.created_at"
+    )
+
+
+class ShotNoteAttachment(Base):
+    __tablename__ = "shot_note_attachments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    note_id: Mapped[str] = mapped_column(ForeignKey("shot_notes.id", ondelete="CASCADE"), index=True)
+    filename: Mapped[str] = mapped_column(String(240))
+    original_name: Mapped[str] = mapped_column(String(240))
+    mime_type: Mapped[str] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    note: Mapped["ShotNote"] = relationship(back_populates="attachments")
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.filename}"
 
 
 class ShotImage(Base):

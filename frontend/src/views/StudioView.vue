@@ -46,12 +46,13 @@ import {
   Volume2,
   X,
 } from '@lucide/vue'
-import { api, DEFAULT_FLOW_PRESETS, videoColorBoostFilter, type AspectRatio, type Character, type ElementKind, type OutputVariant, type ProjectInput, type ProjectSummary, type ReferenceColorRetouchAction, type Scene, type Shot, type ShotTake, type Suggestion } from '@/lib/api'
+import { api, DEFAULT_FLOW_PRESETS, videoColorBoostFilter, type AspectRatio, type Character, type ElementKind, type OutputVariant, type ProjectInput, type ProjectSummary, type ReferenceColorRetouchAction, type Scene, type Shot, type ShotNote, type ShotTake, type Suggestion } from '@/lib/api'
 import { buildShotVideoPrompt } from '@/lib/shotPrompt'
 import { useStudioStore } from '@/stores/studio'
 import TimelineEditor from '@/components/TimelineEditor.vue'
 import ImageReferencePanel from '@/components/ImageReferencePanel.vue'
 import ShotTakesPanel from '@/components/ShotTakesPanel.vue'
+import ShotNotesPanel from '@/components/ShotNotesPanel.vue'
 import CastManagerModal from '@/components/CastManagerModal.vue'
 import DeepReviewPanel from '@/components/DeepReviewPanel.vue'
 import EpisodeSwitcher from '@/components/EpisodeSwitcher.vue'
@@ -97,6 +98,7 @@ const createBackdropPressed = ref(false)
 const showContinuation = ref(false)
 const showScriptGuide = ref(false)
 const scriptGuideCopied = ref(false)
+const showShotNotesDrawer = ref(false)
 const showPreview = ref(false)
 const previewPlaying = ref(false)
 const previewShotIndex = ref(0)
@@ -1111,6 +1113,15 @@ watch(() => route.query.scene, (sceneId) => {
   const index = scenes.value.findIndex((scene) => scene.id === sceneId)
   activeScene.value = index >= 0 ? index : 0
 }, { immediate: true })
+watch(
+  () => route.query.notes,
+  (val) => {
+    if (val === '1' || val === 'true') {
+      showShotNotesDrawer.value = true
+    }
+  },
+  { immediate: true },
+)
 watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage]) => {
   const hasShotParam = typeof shotId === 'string' && shotId.length > 0
   const requestedShot = hasShotParam ? shots.find((shot) => shot.id === shotId) : undefined
@@ -1189,6 +1200,10 @@ function handleGlobalPointerDown(event: PointerEvent) {
 
 function handleGlobalKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    if (showShotNotesDrawer.value) {
+      showShotNotesDrawer.value = false
+      return
+    }
     if (deleteChatUrl.value) {
       if (!deletingChat.value) deleteChatUrl.value = null
       return
@@ -1733,6 +1748,35 @@ function formatProjectMeta(project: ProjectSummary): string {
   return parts.join(' · ')
 }
 
+async function handleShotNotesChanged(shot: Shot, notes: ShotNote[]) {
+  shot.notes = notes
+  shot.unresolved_note_count = notes.filter((note) => !note.resolved).length
+  try {
+    store.projects = await api.projects()
+    if (store.currentProject) {
+      const updated = store.projects.find((item) => item.id === store.currentProject?.id)
+      if (updated && typeof updated.unresolved_note_count === 'number') {
+        store.currentProject.unresolved_note_count = updated.unresolved_note_count
+      }
+    }
+  } catch {}
+}
+
+function openShotNotes(shot?: Shot) {
+  if (shot && shot.id !== activeShotId.value) {
+    openProduceDetail(shot.id)
+  }
+  showShotNotesDrawer.value = true
+}
+
+function jumpToFirstUnresolvedShot() {
+  const shotWithNote = allShots.value.find((s) => (s.unresolved_note_count ?? 0) > 0)
+  if (shotWithNote) {
+    openProduceDetail(shotWithNote.id)
+    showShotNotesDrawer.value = true
+  }
+}
+
 function openDeleteConfirmation(project: ProjectSummary) {
   projectMenuId.value = null
   deleteCandidate.value = project
@@ -2033,7 +2077,75 @@ const showProjectSettingsModal = ref(false)
 const showOriginalScriptModal = ref(false)
 const showScriptHistory = ref(false)
 const showCompilationModal = ref(false)
+const compilationModalInitialEpisodeId = ref<string | null>(null)
+const compilationModalInitialShotIds = ref<string[]>([])
+const compilationModalInitialType = ref<'episode_shots' | 'multi_episode'>('episode_shots')
+const compilationModalInitialCompilationId = ref<string | null>(null)
 const compilationShots = ref<Shot[]>([])
+
+function openCompilationModal(
+  type: 'episode_shots' | 'multi_episode' = 'episode_shots',
+  episodeId?: string | null,
+  shotIds?: string[],
+  compilationId?: string | null,
+) {
+  compilationModalInitialType.value = type
+  compilationModalInitialEpisodeId.value = episodeId ?? store.currentEpisodeId ?? null
+  compilationModalInitialShotIds.value = shotIds ?? []
+  compilationModalInitialCompilationId.value = compilationId ?? null
+  showCompilationModal.value = true
+}
+
+const shortsSelectionMode = ref(false)
+const selectedShotIdsForShort = ref<string[]>([])
+
+function toggleShortsSelectionMode() {
+  shortsSelectionMode.value = !shortsSelectionMode.value
+  if (!shortsSelectionMode.value) {
+    selectedShotIdsForShort.value = []
+  }
+}
+
+function toggleShotForShort(shotId: string) {
+  const idx = selectedShotIdsForShort.value.indexOf(shotId)
+  if (idx >= 0) {
+    selectedShotIdsForShort.value.splice(idx, 1)
+  } else {
+    selectedShotIdsForShort.value.push(shotId)
+  }
+}
+
+function isShotSelectedForShort(shotId: string): boolean {
+  return selectedShotIdsForShort.value.includes(shotId)
+}
+
+function selectAllShotsForShort() {
+  selectedShotIdsForShort.value = allShots.value.map((s) => s.id)
+}
+
+function clearShotsForShort() {
+  selectedShotIdsForShort.value = []
+}
+
+const selectedShortsSummary = computed(() => {
+  const selected = allShots.value.filter((s) => selectedShotIdsForShort.value.includes(s.id))
+  const totalMs = selected.reduce((acc, s) => acc + (s.duration_ms || 4000), 0)
+  const seconds = (totalMs / 1000).toFixed(1)
+  return {
+    count: selectedShotIdsForShort.value.length,
+    durationMs: totalMs,
+    durationFormatted: `${seconds}s`,
+    isShortsReady: totalMs > 0 && totalMs <= 60000,
+  }
+})
+
+function handleCreateShortFromSelection() {
+  if (!selectedShotIdsForShort.value.length) return
+  const shotIds = [...selectedShotIdsForShort.value]
+  shortsSelectionMode.value = false
+  selectedShotIdsForShort.value = []
+  openCompilationModal('episode_shots', store.currentEpisodeId, shotIds)
+}
 
 watch(
   () => store.activeCompilationId,
@@ -2535,6 +2647,7 @@ function formatRenderedAt(value: string) {
                   <span class="project-status-label">{{ project.status.replace('_', ' ') }}</span>
                   <span v-if="formatProjectMeta(project)" class="project-meta-extra">· {{ formatProjectMeta(project) }}</span>
                 </small>
+                <span v-if="project.unresolved_note_count" class="project-note-badge"><MessageSquare :size="12" />{{ project.unresolved_note_count }}</span>
               </span>
             </button>
             <button
@@ -2615,19 +2728,30 @@ function formatRenderedAt(value: string) {
             <EpisodeSwitcher
               @open-settings="openProjectSettings"
               @open-new-episode="openNewEpisodeModal"
-              @open-compilation-modal="showCompilationModal = true"
+              @open-compilation-modal="openCompilationModal('episode_shots')"
               @select-compilation="handleOpenCompilation"
             />
             <button
               type="button"
               class="compilations-header-pill"
               :class="{ 'is-active': store.isCompilationMode }"
-              title="Manage Multi-Episode Compilations"
-              @click="showCompilationModal = true"
+              title="Manage Compilations & Short Cuts"
+              @click="openCompilationModal('episode_shots')"
             >
-              <Boxes :size="13" />
+              <Scissors v-if="store.isCompilationMode && (store.activeCompilation?.episode_id || store.activeCompilation?.shot_ids?.length)" :size="13" />
+              <Boxes v-else :size="13" />
               <span>Compilations</span>
               <span v-if="store.compilations.length" class="compilations-count-pill">{{ store.compilations.length }}</span>
+            </button>
+            <button
+              v-if="store.currentProject?.unresolved_note_count"
+              type="button"
+              class="project-notes-header-pill"
+              :title="`${store.currentProject.unresolved_note_count} unresolved shot note${store.currentProject.unresolved_note_count === 1 ? '' : 's'} in this project. Click to jump to the first unresolved shot.`"
+              @click="jumpToFirstUnresolvedShot"
+            >
+              <MessageSquare :size="12" />
+              <span>{{ store.currentProject.unresolved_note_count }} note{{ store.currentProject.unresolved_note_count === 1 ? '' : 's' }}</span>
             </button>
           </div>
           <h1 class="project-stage-heading">{{ stageTitle }}</h1>
@@ -3095,14 +3219,33 @@ function formatRenderedAt(value: string) {
                     :id="`produce-shot-${shot.id}`"
                     type="button"
                     class="produce-shot-row"
-                    :class="{ active: selectedShot?.id === shot.id, open: isProduceShotExpanded(shot.id) }"
-                    @click="toggleProduceShot(shot.id)"
+                    :class="{
+                      active: selectedShot?.id === shot.id,
+                      open: !shortsSelectionMode && isProduceShotExpanded(shot.id),
+                      'is-short-selected': isShotSelectedForShort(shot.id),
+                    }"
+                    @click="shortsSelectionMode ? toggleShotForShort(shot.id) : toggleProduceShot(shot.id)"
                   >
+                    <span
+                      v-if="shortsSelectionMode"
+                      class="produce-shot-select-check"
+                      :class="{ checked: isShotSelectedForShort(shot.id) }"
+                    >
+                      <Check v-if="isShotSelectedForShort(shot.id)" :size="12" />
+                    </span>
                     <span class="produce-shot-toggle">
                       <ChevronDown v-if="isProduceShotExpanded(shot.id)" :size="16" />
                       <ChevronRight v-else :size="16" />
                       <strong>Shot {{ shotIndex + 1 }}</strong>
                       <small>{{ shotTime(shot) }} · {{ shot.framing || 'Medium' }}</small>
+                      <span
+                        v-if="shot.unresolved_note_count"
+                        class="shot-note-badge"
+                        :title="`${shot.unresolved_note_count} unresolved note${shot.unresolved_note_count === 1 ? '' : 's'}. Click to view notes.`"
+                        @click.stop="openShotNotes(shot)"
+                      >
+                        <MessageSquare :size="12" />{{ shot.unresolved_note_count }}
+                      </span>
                       <Check v-if="shotMedia(shot, 'clip')" class="shot-ready-icon" :size="14" />
                       <Image v-else-if="shotMedia(shot, 'image')" class="shot-ready-icon muted" :size="14" />
                       <RefreshCw v-else-if="store.isProcessingShot(shot.id)" class="shot-processing-icon" :size="14" />
@@ -3170,12 +3313,39 @@ function formatRenderedAt(value: string) {
           <div v-else class="empty-shot-plan"><ListChecks :size="28" /><strong>No scenes yet</strong><span>Approve a script to unlock Produce.</span></div>
         </section>
 
-        <footer v-if="!produceDetailOpen" class="produce-dock">
+        <footer v-if="!produceDetailOpen && shortsSelectionMode" class="produce-dock shorts-selection-dock">
+          <div class="shorts-dock-summary">
+            <Scissors :size="16" class="shorts-dock-icon" />
+            <strong>{{ selectedShortsSummary.count }} of {{ allShots.length }} shots selected</strong>
+            <span>&middot; {{ selectedShortsSummary.durationFormatted }}</span>
+            <span v-if="selectedShortsSummary.isShortsReady" class="shorts-dock-pill ready">✓ YouTube Shorts Ready (&lt;60s)</span>
+            <span v-else-if="selectedShortsSummary.durationMs > 60000" class="shorts-dock-pill warn">Longer Short (&gt;60s)</span>
+          </div>
+          <div class="produce-dock-actions">
+            <button type="button" class="secondary-button" @click="selectAllShotsForShort">Select all</button>
+            <button v-if="selectedShotIdsForShort.length" type="button" class="secondary-button" @click="clearShotsForShort">Clear</button>
+            <button
+              type="button"
+              class="primary-button"
+              :disabled="!selectedShotIdsForShort.length"
+              @click="handleCreateShortFromSelection"
+            >
+              <Sparkles :size="15" />
+              <span>Create Short Cut ({{ selectedShotIdsForShort.length }})</span>
+            </button>
+            <button type="button" class="secondary-button" @click="toggleShortsSelectionMode">Cancel</button>
+          </div>
+        </footer>
+
+        <footer v-else-if="!produceDetailOpen" class="produce-dock">
           <div>
             <strong>{{ allShots.length }} shots</strong>
             <span>{{ mediaReadyCount }} with media · {{ clipCount }} with video</span>
           </div>
           <div class="produce-dock-actions">
+            <button type="button" class="secondary-button" title="Select shots for a YouTube Shorts cut" @click="toggleShortsSelectionMode">
+              <Scissors :size="15" /> Create Short
+            </button>
             <button type="button" class="secondary-button" @click="openAnimaticPreview"><Play :size="15" fill="currentColor" /> Preview</button>
             <button type="button" class="secondary-button" :disabled="!isScriptApproved" @click="router.push(stageRoute('final-cut'))"><Film :size="15" /> Assemble</button>
             <button
@@ -3193,9 +3363,31 @@ function formatRenderedAt(value: string) {
         <div v-if="produceDetailOpen" class="shot-plan-workspace produce-detail">
           <aside class="shot-browser">
             <div class="shot-browser-heading">
-              <button type="button" class="ghost-link back-to-story" @click="closeProduceDetail"><ChevronRight class="back-chevron" :size="16" /> Back to story</button>
-              <div><span class="section-label">Shot list</span><strong>{{ allShots.length }} planned shots</strong></div>
-              <span>{{ allShots.filter((shot) => shotHasMedia(shot)).length }}/{{ allShots.length }} ready</span>
+              <div class="shot-browser-heading-top">
+                <button type="button" class="ghost-link back-to-story" @click="closeProduceDetail">
+                  <ChevronRight class="back-chevron" :size="14" />
+                  <span>Back to story</span>
+                </button>
+                <span class="shot-browser-ready-pill">
+                  {{ allShots.filter((shot) => shotHasMedia(shot)).length }}/{{ allShots.length }} ready
+                </span>
+              </div>
+              <div class="shot-browser-heading-main">
+                <div class="shot-browser-title-group">
+                  <span class="section-label">Shot list</span>
+                  <strong>{{ allShots.length }} planned shots</strong>
+                </div>
+                <button
+                  type="button"
+                  class="ghost-link select-shorts-link"
+                  :class="{ active: shortsSelectionMode }"
+                  title="Select shots for a Short Cut"
+                  @click="toggleShortsSelectionMode"
+                >
+                  <Scissors :size="13" />
+                  <span>{{ shortsSelectionMode ? 'Cancel' : 'Create Short' }}</span>
+                </button>
+              </div>
             </div>
             <div class="shot-list">
               <section v-for="(scene, sceneIndex) in scenes" :key="scene.id" class="shot-scene-group">
@@ -3218,15 +3410,35 @@ function formatRenderedAt(value: string) {
                   v-for="shot in scene.shots"
                   :key="shot.id"
                   class="shot-list-item"
-                  :class="{ active: selectedShot?.id === shot.id }"
-                  @click="selectShot(shot.id)"
+                  :class="{
+                    active: !shortsSelectionMode && selectedShot?.id === shot.id,
+                    'is-short-selected': isShotSelectedForShort(shot.id),
+                  }"
+                  @click="shortsSelectionMode ? toggleShotForShort(shot.id) : selectShot(shot.id)"
                 >
+                  <span
+                    v-if="shortsSelectionMode"
+                    class="produce-shot-select-check"
+                    :class="{ checked: isShotSelectedForShort(shot.id) }"
+                  >
+                    <Check v-if="isShotSelectedForShort(shot.id)" :size="12" />
+                  </span>
                   <span class="shot-list-thumb">
                     <img v-if="shotThumbUrl(shot)" :src="shotThumbUrl(shot)!" alt="" />
                     <Image v-else :size="18" />
                   </span>
                   <span>
-                    <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
+                    <div class="shot-list-title-row">
+                      <strong>{{ shot.title || `Shot ${String(shot.order_index + 1).padStart(2, '0')}` }}</strong>
+                      <span
+                        v-if="shot.unresolved_note_count"
+                        class="shot-note-badge shot-list-item-badge"
+                        :title="`${shot.unresolved_note_count} unresolved note${shot.unresolved_note_count === 1 ? '' : 's'}. Click to view notes.`"
+                        @click.stop="openShotNotes(shot)"
+                      >
+                        <MessageSquare :size="10" />{{ shot.unresolved_note_count }}
+                      </span>
+                    </div>
                     <small class="shot-list-meta" :title="`${shot.framing || 'Medium'} · ${(shot.duration_ms / 1000).toFixed(1)}s`">
                       <span class="shot-list-framing">{{ shot.framing || 'Medium' }}</span>
                       <span class="shot-list-duration">· {{ (shot.duration_ms / 1000).toFixed(1) }}s</span>
@@ -3298,6 +3510,32 @@ function formatRenderedAt(value: string) {
                   <ExternalLink :size="10" />
                 </a>
                 <button v-if="canDeleteChat" type="button" class="secondary-button" :disabled="deletingChat" title="Remove linked chat from Cutline (keeps chat in ChatGPT/Gemini)" @click="beginDeleteChat"><Trash2 :size="14" />Delete chat</button>
+                <button
+                  type="button"
+                  class="shot-notes-header-btn"
+                  :class="{
+                    'has-unresolved': (selectedShot.unresolved_note_count ?? 0) > 0,
+                    'has-notes': (selectedShot.notes?.length ?? 0) > 0,
+                    active: showShotNotesDrawer,
+                  }"
+                  :title="selectedShot.unresolved_note_count ? `${selectedShot.unresolved_note_count} unresolved note(s) for this shot` : ((selectedShot.notes?.length ?? 0) > 0 ? `${selectedShot.notes?.length} note(s) for this shot` : 'Shot notes and reminders')"
+                  @click="showShotNotesDrawer = !showShotNotesDrawer"
+                >
+                  <MessageSquareText :size="14" />
+                  <span>Notes</span>
+                  <span
+                    v-if="selectedShot.unresolved_note_count"
+                    class="shot-notes-header-badge unresolved"
+                  >
+                    {{ selectedShot.unresolved_note_count }}
+                  </span>
+                  <span
+                    v-else-if="selectedShot.notes?.length"
+                    class="shot-notes-header-badge"
+                  >
+                    {{ selectedShot.notes.length }}
+                  </span>
+                </button>
                 <button
                   v-if="selectedShotScene"
                   type="button"
@@ -3908,6 +4146,7 @@ function formatRenderedAt(value: string) {
         :shots="activeTimelineShots"
         :compilation-id="store.activeCompilationId || undefined"
         @variant-change="setFinalCutVariant"
+        @open-compilation-modal="(id) => openCompilationModal('episode_shots', null, [], id)"
       />
 
       <section v-else class="stage-placeholder">
@@ -4119,6 +4358,10 @@ function formatRenderedAt(value: string) {
     @restored="store.loadProject(store.currentProject.id, { resumeJobs: false })" />
   <CompilationManagerModal
     :show="showCompilationModal"
+    :initial-type="compilationModalInitialType"
+    :initial-episode-id="compilationModalInitialEpisodeId"
+    :initial-shot-ids="compilationModalInitialShotIds"
+    :initial-compilation-id="compilationModalInitialCompilationId"
     @close="showCompilationModal = false"
     @open-compilation="handleOpenCompilation"
   />
@@ -4438,6 +4681,71 @@ function formatRenderedAt(value: string) {
     @close="managingCharacterId = null"
     @deleted-character="selectedCharacterIds = selectedCharacterIds.filter((id) => id !== $event)"
   />
+
+  <!-- Shot Notes Slide-over Drawer -->
+  <Transition name="drawer-fade">
+    <div
+      v-if="showShotNotesDrawer && selectedShot"
+      class="shot-notes-drawer-backdrop"
+      @mousedown="trackModalBackdropPress"
+      @click="handleBackdropClose($event, () => showShotNotesDrawer = false)"
+    >
+      <aside
+        class="shot-notes-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shot-notes-drawer-title"
+        @click.stop
+      >
+        <header class="shot-notes-drawer-header">
+          <div class="drawer-header-left">
+            <div class="drawer-header-icon">
+              <MessageSquareText :size="18" />
+            </div>
+            <div>
+              <div class="drawer-header-meta">
+                <span class="drawer-eyebrow">{{ selectedShotLabel }}</span>
+                <span v-if="selectedShotScene?.title" class="drawer-scene-title">· {{ selectedShotScene.title }}</span>
+              </div>
+              <h2 id="shot-notes-drawer-title">Shot notes &amp; reminders</h2>
+            </div>
+          </div>
+          <div class="drawer-header-right">
+            <span
+              v-if="selectedShot.unresolved_note_count"
+              class="drawer-status-pill unresolved"
+            >
+              {{ selectedShot.unresolved_note_count }} unresolved
+            </span>
+            <span
+              v-else-if="selectedShot.notes?.length"
+              class="drawer-status-pill resolved"
+            >
+              <Check :size="12" /> All resolved
+            </span>
+            <button
+              type="button"
+              class="mini-icon drawer-close-btn"
+              aria-label="Close notes drawer"
+              title="Close (Esc)"
+              @click="showShotNotesDrawer = false"
+            >
+              <X :size="18" />
+            </button>
+          </div>
+        </header>
+
+        <div class="shot-notes-drawer-body">
+          <ShotNotesPanel
+            :shot="selectedShot"
+            :in-drawer="true"
+            :hide-header="true"
+            @changed="handleShotNotesChanged(selectedShot, $event)"
+          />
+        </div>
+      </aside>
+    </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -5998,6 +6306,222 @@ input::placeholder { color: #68716c; }
   padding-inline: 8px;
   min-width: 30px;
   justify-content: center;
+}
+
+/* Shot Notes Header Button */
+.shot-notes-header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted, #94a3b8);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.shot-notes-header-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.shot-notes-header-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.shot-notes-header-btn.has-unresolved {
+  background: rgba(246, 196, 83, 0.12);
+  border-color: rgba(246, 196, 83, 0.45);
+  color: #f6c453;
+}
+.shot-notes-header-btn.has-unresolved:hover {
+  background: rgba(246, 196, 83, 0.2);
+  border-color: rgba(246, 196, 83, 0.65);
+  color: #ffd874;
+}
+.shot-notes-header-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+}
+.shot-notes-header-badge.unresolved {
+  background: #f6c453;
+  color: #141715;
+}
+
+/* Shot Notes Slide-over Drawer */
+.shot-notes-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0, 0, 0, 0.52);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: flex-end;
+}
+.shot-notes-drawer {
+  width: min(540px, 100vw);
+  height: 100vh;
+  background: #141715;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.shot-notes-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: #181c19;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.drawer-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.drawer-header-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: rgba(246, 196, 83, 0.12);
+  color: #f6c453;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.drawer-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.drawer-eyebrow {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #f6c453;
+}
+.drawer-scene-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.shot-notes-drawer-header h2 {
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #eff2ef;
+}
+.drawer-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.drawer-status-pill {
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.drawer-status-pill.unresolved {
+  background: rgba(246, 196, 83, 0.15);
+  color: #f6c453;
+  border: 1px solid rgba(246, 196, 83, 0.35);
+}
+.drawer-status-pill.resolved {
+  background: rgba(74, 222, 128, 0.12);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+.drawer-close-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.drawer-close-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.shot-notes-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+/* Slide-in & Fade Transition */
+.drawer-fade-enter-active,
+.drawer-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.drawer-fade-enter-from,
+.drawer-fade-leave-to {
+  opacity: 0;
+}
+.drawer-fade-enter-active .shot-notes-drawer {
+  animation: drawerSlideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.drawer-fade-leave-active .shot-notes-drawer {
+  animation: drawerSlideOut 0.18s cubic-bezier(0.7, 0, 0.84, 0);
+}
+@keyframes drawerSlideIn {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes drawerSlideOut {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.shot-note-badge {
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+.shot-note-badge:hover {
+  transform: scale(1.08);
+  opacity: 0.95;
 }
 </style>
 

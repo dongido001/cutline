@@ -278,3 +278,67 @@ def test_compilation_seeds_shorts_from_episode_shorts_and_rebuilds_on_membership
             del_p_db.delete(del_p)
             del_p_db.commit()
         del_p_db.close()
+
+
+def test_episode_shot_compilation():
+    client = TestClient(app)
+    db = SessionLocal()
+
+    p = Project(title="EPISODE SHOT COMPILATION TEST", status="approved", aspect_ratio="16:9")
+    ep = Episode(project=p, episode_number=1, title="Episode 1")
+    v = ScriptVersion(project=p, episode=ep, source_text="s1", status="approved")
+    sc = Scene(script_version=v, title="Scene 1", order_index=0)
+    sh1 = Shot(scene=sc, title="Shot 1", order_index=0, duration_ms=5000)
+    sh2 = Shot(scene=sc, title="Shot 2", order_index=1, duration_ms=4000)
+    sh3 = Shot(scene=sc, title="Shot 3", order_index=2, duration_ms=6000)
+
+    db.add(p)
+    db.commit()
+
+    project_id = p.id
+    ep_id = ep.id
+    sh1_id = sh1.id
+    sh3_id = sh3.id
+
+    ensure_timeline(p, db, episode_id=ep_id)
+    db.close()
+
+    try:
+        # Create shot-level compilation (Short Cut containing only Shot 1 and Shot 3)
+        res = client.post(
+            f"/api/projects/{project_id}/compilations",
+            json={
+                "title": "Ep 1 Teaser Short",
+                "episode_id": ep_id,
+                "shot_ids": [sh1_id, sh3_id],
+            },
+        )
+        assert res.status_code == 201
+        comp = res.json()
+        assert comp["title"] == "Ep 1 Teaser Short"
+        assert comp["episode_id"] == ep_id
+        assert comp["shot_ids"] == [sh1_id, sh3_id]
+        comp_id = comp["id"]
+
+        # Verify timeline for shot-level compilation
+        tl_res = client.get(f"/api/compilations/{comp_id}/timeline")
+        assert tl_res.status_code == 200
+        tl = tl_res.json()
+        assert len(tl["document"]["primary"]) == 2
+        assert tl["document"]["primary"][0]["source"]["ref_id"] == sh1_id
+        assert tl["document"]["primary"][1]["source"]["ref_id"] == sh3_id
+
+        # Verify get compilation shots
+        shots_res = client.get(f"/api/compilations/{comp_id}/shots")
+        assert shots_res.status_code == 200
+        shots = shots_res.json()
+        assert len(shots) == 2
+        assert [s["id"] for s in shots] == [sh1_id, sh3_id]
+    finally:
+        del_p_db = SessionLocal()
+        del_p = del_p_db.get(Project, project_id)
+        if del_p:
+            del_p_db.delete(del_p)
+            del_p_db.commit()
+        del_p_db.close()
+        client.close()
