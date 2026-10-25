@@ -743,6 +743,7 @@ def load_cast_references(
     *,
     require_all: bool = True,
     max_per_character: int | None = None,
+    prefer_main_portrait: bool = False,
 ) -> list[FaceReferenceImage]:
     """Resolve the complete selected cast, without silently dropping identities."""
     selected_ids = list(dict.fromkeys(character_ids))
@@ -770,6 +771,8 @@ def load_cast_references(
                 return (0 if v_type == "prop" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
             if kind == "scene":
                 return (0 if v_type == "scene" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
+            if prefer_main_portrait:
+                return (0 if v_type == "main" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
             # Characters: prefer 3D turnaround sheets when present.
             return (0 if v_type == "3d_view" else 1, ref.created_at.timestamp() if ref.created_at else 0.0)
 

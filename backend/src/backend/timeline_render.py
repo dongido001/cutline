@@ -589,12 +589,17 @@ def _segment_cache_path(
 
 
 def _audio_overlay_chain(input_index: int, overlay: TimelineAudioOverlay, audio_path: Path, label: str) -> str:
-    trim_start = max(0.0, overlay.source_in_ms / 1000)
-    dur = max(0.1, overlay.duration_ms / 1000)
+    total_dur = probe_duration_ms(audio_path) / 1000.0
+    raw_in = max(0.0, overlay.source_in_ms / 1000.0)
+    if total_dur > 0 and (overlay.loop or raw_in >= total_dur):
+        trim_start = raw_in % total_dur
+    else:
+        trim_start = raw_in
+    dur = max(0.1, overlay.duration_ms / 1000.0)
     vol = max(0.0, min(2.0, float(overlay.volume)))
     delay_ms = max(0, int(overlay.start_ms))
-    remaining = probe_duration_ms(audio_path) / 1000 - trim_start if overlay.loop else 0.0
-    if 0.05 < remaining < dur:
+    remaining = (total_dur - trim_start) if overlay.loop else (total_dur - trim_start)
+    if overlay.loop and 0.05 < remaining < dur:
         # Repeat the in-point..end portion until the clip's length is filled.
         body = (
             f"atrim=start={trim_start},asetpts=PTS-STARTPTS,"

@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
-import { defineStore } from 'pinia'
-import { api, type AspectRatio, type CompilationCreateInput, type CompilationSummary, type CompilationUpdateInput, type ElementKind, type EpisodeCreate, type EpisodeUpdate, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProjectUpdateInput, type ProviderStatus, type ReferenceColorRetouchAction, type ReferenceViewType, type Shot, type ShotCreate, type ShotUpdate, type VoiceProviderInfo } from '@/lib/api'
+import { acceptHMRUpdate, defineStore } from 'pinia'
+import { api, type AspectRatio, type CompilationCreateInput, type CompilationSummary, type CompilationUpdateInput, type DeriveTakeCropPayload, type ElementKind, type EpisodeCreate, type EpisodeUpdate, type ImageProviderStatus, type Job, type OutputVariant, type ProjectContinuationInput, type ProjectDetail, type ProjectInput, type ProjectSummary, type ProjectUpdateInput, type ProviderStatus, type ReferenceColorRetouchAction, type ReferenceViewType, type Shot, type ShotCreate, type ShotUpdate, type VoiceProviderInfo } from '@/lib/api'
 import { cutlineWs } from '@/lib/ws'
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -1140,6 +1140,8 @@ export const useStudioStore = defineStore('studio', () => {
       generateVideo?: boolean
       includeCastReferences?: boolean
       chatgptDual?: boolean
+      lockBlocking?: boolean
+      focalCharacterId?: string | null
     },
   ) {
     if (!currentProject.value) return
@@ -1576,6 +1578,35 @@ export const useStudioStore = defineStore('studio', () => {
       return updatedShot
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Could not enhance image color'
+      if (currentProject.value?.id === projectId) {
+        error.value = message
+      }
+      throw cause
+    } finally {
+      endShotProcessing(shotId, projectId)
+    }
+  }
+
+  async function deriveTakeFromCrop(shotId: string, payload: DeriveTakeCropPayload) {
+    if (!currentProject.value) return
+    const projectId = currentProject.value.id
+    error.value = ''
+    beginShotProcessing(shotId, projectId, payload.aspect_ratio)
+    try {
+      const updatedShot = await api.deriveTakeFromCrop(shotId, payload)
+      if (currentProject.value?.current_version?.scenes) {
+        for (const scene of currentProject.value.current_version.scenes) {
+          const idx = scene.shots.findIndex((s) => s.id === shotId)
+          if (idx !== -1) {
+            scene.shots[idx] = updatedShot
+            break
+          }
+        }
+      }
+      await refreshShot(shotId)
+      return updatedShot
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not derive take from crop'
       if (currentProject.value?.id === projectId) {
         error.value = message
       }
@@ -2048,6 +2079,7 @@ export const useStudioStore = defineStore('studio', () => {
     selectShotTake,
     editShotImageTake,
     retouchShotTakeColor,
+    deriveTakeFromCrop,
     retouchShotReferenceColor,
     retouchShotClipColor,
     repaintShotReference,
@@ -2061,3 +2093,7 @@ export const useStudioStore = defineStore('studio', () => {
     deleteFinalCut,
   }
 })
+
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useStudioStore, import.meta.hot))
+}

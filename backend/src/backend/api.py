@@ -57,6 +57,7 @@ from .schemas import (
     CompilationCreate,
     CompilationRead,
     CompilationUpdate,
+    DeriveTakeCropRequest,
     EpisodeCreate,
     EpisodeSummary,
     EpisodeUpdate,
@@ -1695,6 +1696,15 @@ def update_shot(
                         "line": txt,
                     })
         shot.dialogue = normalized_dialogue
+    if shot.continuity_snapshot and shot.scene and shot.scene.script_version and shot.scene.script_version.project:
+        proj = shot.scene.script_version.project
+        snap_aspect = shot.continuity_snapshot.get("aspect_ratio") or proj.aspect_ratio
+        try:
+            shot.continuity_snapshot = create_shot_snapshot(
+                db, proj, shot, snap_aspect, character_ids=shot.character_ids
+            )
+        except Exception:
+            shot.continuity_snapshot = None
     db.commit()
     db.refresh(shot)
     delete_media_file(invalidated_filename)
@@ -1784,6 +1794,8 @@ def queue_shot_image(
             refresh=payload.refresh_continuity,
             character_ids=requested_ids,
             require_cast_references=True,
+            lock_blocking=payload.lock_blocking,
+            focal_character_id=payload.focal_character_id,
         )
     except RuntimeError as exc:
         message = str(exc)
@@ -1799,6 +1811,10 @@ def queue_shot_image(
         "image_reference": image_reference,
         "use_default_image_reference": payload.use_default_image_reference,
     }
+    if payload.lock_blocking:
+        attempt_meta["lock_blocking"] = True
+        if payload.focal_character_id:
+            attempt_meta["focal_character_id"] = payload.focal_character_id
     if payload.both_aspects:
         attempt_meta["both_aspects"] = True
     if payload.chatgpt_dual:
@@ -3578,6 +3594,187 @@ def select_shot_take(
             project.timeline.revision += 1
         invalidate_final_cut(project, db)
 
+    db.commit()
+    db.expire_all()
+    fresh_shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.image),
+            selectinload(Shot.clip),
+            selectinload(Shot.media_variants),
+            selectinload(Shot.scene).selectinload(Scene.script_version).selectinload(ScriptVersion.project),
+        )
+    )
+    return fresh_shot or shot
+
+
+@app.post("/api/shots/{shot_id}/derive-take", response_model=ShotRead)
+def derive_shot_take(
+    shot_id: str,
+    payload: DeriveTakeCropRequest,
+    db: Session = Depends(get_db),
+) -> Shot:
+    shot = db.scalar(
+        select(Shot)
+        .where(Shot.id == shot_id)
+        .options(
+            selectinload(Shot.takes),
+            selectinload(Shot.image),
+            selectinload(Shot.clip),
+            selectinload(Shot.media_variants),
+            selectinload(Shot.image_references),
+            selectinload(Shot.continuity_frames),
+            selectinload(Shot.scene).selectinload(Scene.script_version).selectinload(ScriptVersion.project),
+        )
+    )
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    target_aspect = payload.aspect_ratio
+    if target_aspect not in {"16:9", "9:16"}:
+        raise HTTPException(status_code=422, detail="Aspect ratio must be 16:9 or 9:16")
+
+    src_filename: str | None = None
+    source_label = payload.label or "reference"
+
+    if payload.source_type == "take" and payload.source_id:
+        target_take = db.get(ShotTake, payload.source_id) or next((t for t in shot.takes if t.id == payload.source_id), None)
+        if target_take:
+            src_filename = target_take.filename
+            source_label = f"take ({target_take.aspect_ratio})"
+    elif payload.source_type == "continuity_frame":
+        frame = (db.get(ShotContinuityFrame, payload.source_id) if payload.source_id else None) or next((f for f in shot.continuity_frames if f.id == payload.source_id or f.aspect_ratio == target_aspect), None)
+        if frame:
+            src_filename = frame.filename
+            source_label = f"continuity frame ({frame.aspect_ratio})"
+    elif payload.source_type == "reference":
+        ref = (db.get(ShotImageReference, payload.source_id) if payload.source_id else None) or next((r for r in shot.image_references if r.id == payload.source_id or r.aspect_ratio == target_aspect), None)
+        if ref:
+            src_filename = ref.filename
+            source_label = ref.source_shot_title or f"reference ({ref.aspect_ratio})"
+    elif payload.source_type == "image":
+        variant = next((v for v in shot.media_variants if v.media_type == "image" and v.aspect_ratio == target_aspect), None)
+        if variant:
+            src_filename = variant.filename
+        elif shot.image:
+            src_filename = shot.image.filename
+
+    # Fallback to any available reference, continuity frame, or take
+    if not src_filename:
+        ref = next((r for r in shot.image_references if r.aspect_ratio == target_aspect), None)
+        if ref:
+            src_filename = ref.filename
+            source_label = ref.source_shot_title or "reference"
+    if not src_filename and shot.continuity_frames:
+        frame = next((f for f in shot.continuity_frames if f.aspect_ratio == target_aspect), shot.continuity_frames[0])
+        src_filename = frame.filename
+        source_label = "continuity frame"
+    if not src_filename:
+        active_take = next((t for t in shot.takes if t.media_type == "image" and t.aspect_ratio == target_aspect and t.selected), None)
+        if active_take:
+            src_filename = active_take.filename
+            source_label = "current take"
+
+    if not src_filename:
+        raise HTTPException(status_code=422, detail="No source image or reference available to punch in from")
+
+    src_path = settings.media_dir / src_filename
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="Source image file not found on disk")
+
+    from uuid import uuid4
+    from .crop import crop_and_enhance_frame
+
+    dest_filename = f"punch-{uuid4()}.png"
+    dest_path = settings.media_dir / dest_filename
+    crop_and_enhance_frame(
+        src_path=src_path,
+        dest_path=dest_path,
+        aspect_ratio=target_aspect,
+        x=payload.x,
+        y=payload.y,
+        width=payload.width,
+        height=payload.height,
+    )
+
+    take_prompt = (
+        f"Optical punch-in crop: {payload.label} (from {source_label})"
+        if payload.label
+        else f"Optical punch-in crop from {source_label}"
+    )
+    take = record_take(
+        db,
+        shot,
+        media_type="image",
+        aspect_ratio=target_aspect,
+        filename=dest_filename,
+        mime_type="image/png",
+        source="cropped",
+        provider="optical_punch",
+        prompt=take_prompt,
+        settings={
+            "source_type": payload.source_type,
+            "source_id": payload.source_id,
+            "crop": {
+                "x": payload.x,
+                "y": payload.y,
+                "width": payload.width,
+                "height": payload.height,
+            },
+            "label": payload.label,
+        },
+        select=True,
+    )
+
+    project = shot.scene.script_version.project
+    use_legacy = target_aspect == project.aspect_ratio
+    take_timestamp = take.created_at or now()
+    if use_legacy:
+        if shot.image:
+            shot.image.filename = dest_filename
+            shot.image.mime_type = "image/png"
+            shot.image.source = "cropped"
+            shot.image.provider = "optical_punch"
+            shot.image.prompt = take.prompt
+            shot.image.created_at = take_timestamp
+        else:
+            shot.image = ShotImage(
+                shot_id=shot.id,
+                filename=dest_filename,
+                mime_type="image/png",
+                source="cropped",
+                provider="optical_punch",
+                prompt=take.prompt,
+                created_at=take_timestamp,
+            )
+    variant = next((item for item in shot.media_variants if item.media_type == "image" and item.aspect_ratio == target_aspect), None)
+    if variant:
+        variant.filename = dest_filename
+        variant.mime_type = "image/png"
+        variant.source = "cropped"
+        variant.provider = "optical_punch"
+        variant.prompt = take.prompt
+        variant.created_at = take_timestamp
+    elif not use_legacy:
+        shot.media_variants.append(
+            ShotMediaVariant(
+                shot_id=shot.id,
+                media_type="image",
+                aspect_ratio=target_aspect,
+                filename=dest_filename,
+                mime_type="image/png",
+                source="cropped",
+                provider="optical_punch",
+                prompt=take.prompt,
+                created_at=take_timestamp,
+            )
+        )
+
+    if project.timeline and not promote_available_clips(project, db):
+        project.timeline.revision += 1
+    invalidate_final_cut(project, db)
     db.commit()
     db.expire_all()
     fresh_shot = db.scalar(

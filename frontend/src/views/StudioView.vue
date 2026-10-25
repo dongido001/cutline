@@ -350,8 +350,17 @@ const canReferenceEarlier = computed(() => {
   )
 })
 const skipDefaultImageReference = ref(false)
+const lockSceneBlocking = ref(false)
+const focalCharacterId = ref<string | null>(null)
 watch(() => selectedShot.value?.id, () => {
   skipDefaultImageReference.value = false
+  lockSceneBlocking.value = false
+  focalCharacterId.value = null
+})
+watch(lockSceneBlocking, (locked) => {
+  if (!locked) {
+    focalCharacterId.value = null
+  }
 })
 function resolveActiveShotMedia(
   shot: Shot | null | undefined,
@@ -749,13 +758,17 @@ function handlePromptTextareaInput(field: 'video_prompt' | 'image_prompt', event
     mentionQuery.value = match[1] ?? ''
     mentionStartIndex.value = cursor - (match[1]?.length ?? 0) - 1
     mentionActiveIdx.value = 0
+    const typedTag = (match[1] ?? '').toUpperCase()
+    if (typedTag) {
+      const exactEl = castCharacters.value.find(
+        (el) => elementTag(el) === typedTag || el.name.trim().toUpperCase() === typedTag,
+      )
+      if (exactEl && !selectedCharacterIds.value.includes(exactEl.id)) {
+        selectedCharacterIds.value = [...selectedCharacterIds.value, exactEl.id]
+      }
+    }
   } else if (mentionField.value === field) {
     mentionField.value = null
-  }
-  for (const el of detectedPromptMentionElements.value) {
-    if (!selectedCharacterIds.value.includes(el.id)) {
-      selectedCharacterIds.value = [...selectedCharacterIds.value, el.id]
-    }
   }
 }
 function handlePromptTextareaKeydown(field: 'video_prompt' | 'image_prompt', event: KeyboardEvent) {
@@ -1890,6 +1903,35 @@ async function generateShotImage(
         generateVideo: andVideo,
         includeCastReferences: includeCastRefsInVideo.value,
         chatgptDual: false,
+        lockBlocking: false,
+        focalCharacterId: null,
+      },
+    )
+  } catch {
+    // The store exposes the provider or validation error in the workspace.
+  }
+}
+
+async function generateLockedBlockingImage() {
+  if (!selectedShot.value) return
+  try {
+    await saveShot()
+    lockSceneBlocking.value = true
+    const useDefault = !selectedAspectReference.value && !skipDefaultImageReference.value
+    await store.generateShotImage(
+      selectedShot.value.id,
+      mediaAspect.value,
+      selectedCharacterIds.value,
+      false,
+      selectedAspectReference.value?.id,
+      useDefault,
+      {
+        bothAspects: false,
+        generateVideo: false,
+        includeCastReferences: false,
+        chatgptDual: false,
+        lockBlocking: true,
+        focalCharacterId: focalCharacterId.value,
       },
     )
   } catch {
@@ -4004,6 +4046,9 @@ function formatRenderedAt(value: string) {
               :project-aspect="(store.currentProject?.aspect_ratio as AspectRatio | undefined)"
               :can-reference-earlier="canReferenceEarlier"
               v-model:skip-default="skipDefaultImageReference"
+              v-model:lock-blocking="lockSceneBlocking"
+              v-model:focal-character-id="focalCharacterId"
+              @generate-locked-blocking="generateLockedBlockingImage"
             />
 
             <form class="shot-fields" @submit.prevent="saveShot">

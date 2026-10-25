@@ -512,11 +512,16 @@ def generate_flowkit_clip(
                     err_val = result.get("error") or result.get("complaint")
                     if "FAIL" in status_val:
                         err_lower = str(err_val or "").lower()
-                        if has_fallback and (
+                        is_discarded = (
                             "discarded operation" in err_lower
                             or "media not found" in err_lower
                             or "failed: [5]" in err_lower
-                        ):
+                        )
+                        if has_fallback and is_discarded:
+                            discarded_for_fallback = True
+                            break
+                        if is_discarded and active_model_family == "omni_flash" and duration_s > 4:
+                            duration_s = 4
                             discarded_for_fallback = True
                             break
                         raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")

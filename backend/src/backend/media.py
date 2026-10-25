@@ -68,6 +68,10 @@ def normalize_conversation_url(url: str | None) -> str | None:
 def prepare_visual_reference_prompt(
     prompt: str,
     references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
+    *,
+    lock_blocking: bool = False,
+    focal_name: str | None = None,
+    target_names: str | None = None,
 ) -> str:
     is_aspect_conversion = any(
         isinstance(ref, VisualReferenceImage) and ref.reference_type in {"edit_target", "edit_target_fallback"}
@@ -83,6 +87,37 @@ def prepare_visual_reference_prompt(
         )
     if "Visual continuity reference:" in prompt:
         return prompt
+    if lock_blocking:
+        if focal_name:
+            focus_clause = (
+                f" This is a close-up of {focal_name} ONLY: from the attached reference image, turn the camera toward {focal_name} "
+                f"and zoom in closer (tight waist-up close-up) to capture {focal_name} as the sole subject in their established "
+                "screen position and side of frame from the reference without changing anything in the image sent; other characters stay off-frame in their established positions."
+                f" IMPORTANT: the attached shot reference is for SETTING, LIGHTING, and {focal_name}'s SCREEN POSITION ONLY. "
+                f"Do NOT reproduce the other people visible in it; the output must show {focal_name} alone. "
+                f"Simulate a professional film camera zooming in on {focal_name} from the original camera position on the same movie set: "
+                f"preserve the original environment directly behind {focal_name} exactly as it would appear at this tighter zoom level, "
+                f"so the surface/door/wall directly behind {focal_name} occupies most of the background and any chairs, windows, or desk areas where "
+                "adjacent people stood are cropped out of frame."
+            )
+        else:
+            who = target_names or "the selected characters"
+            focus_clause = (
+                f" CAMERA TURN & ZOOM-IN: From the attached reference image, turn the camera toward {who} and zoom in closer "
+                f"(tight waist-up framing) to capture ONLY {who} without changing anything in the image sent. "
+                f"Keep {who} in their exact positions, clothing, faces, and lighting from the reference image, "
+                "and remove all other people by zooming in so the outer left and right edges of the wider scene are outside the camera's field of view. "
+                "Do NOT keep the wide full-body framing, do NOT show feet or floor paving, and do NOT include the empty white plastic chairs, tables, gates, staircases, or windows "
+                f"where the other people were standing in the reference image — preserve ONLY the background directly behind {who} at this tighter camera zoom."
+            )
+        return (
+            f"{prompt}\n\nVisual continuity reference: use the attached shot reference for exact "
+            "spatial blocking, character positions, wardrobe, location, lighting, and visual continuity. "
+            "SPATIAL BLOCKING CONSTRAINT: Maintain the continuous horizontal stage arrangement and character "
+            "positions established in the reference frame. DO NOT swap, mirror, or rearrange characters."
+            f"{focus_clause} "
+            "When cast portraits are attached, use those for each named character's face."
+        )
     return (
         f"{prompt}\n\nVisual continuity reference: use the attached shot reference for relevant "
         "identity, wardrobe, location, lighting, and visual continuity. "
@@ -470,13 +505,24 @@ def generate_storyboard_image(
     references: Sequence[FaceReferenceImage | VisualReferenceImage] | None = None,
     conversation_url: str | None = None,
     is_followup_edit: bool = False,
+    lock_blocking: bool = False,
+    focal_name: str | None = None,
+    target_names: str | None = None,
+    is_locked_camera_zoom: bool = False,
 ) -> tuple[str, str, str]:
     references = list(references or [])
-    base_prompt = prepare_image_prompt(prompt, aspect_ratio)
-    prompt = prepare_face_reference_prompt(base_prompt, references)
     has_visual_reference = any(isinstance(ref, VisualReferenceImage) for ref in references)
-    if has_visual_reference and not is_followup_edit:
-        prompt = prepare_visual_reference_prompt(prompt, references=references)
+    if not is_locked_camera_zoom:
+        base_prompt = prepare_image_prompt(prompt, aspect_ratio)
+        prompt = prepare_face_reference_prompt(base_prompt, references)
+        if has_visual_reference and not is_followup_edit:
+            prompt = prepare_visual_reference_prompt(
+                prompt,
+                references=references,
+                lock_blocking=lock_blocking,
+                focal_name=focal_name,
+                target_names=target_names,
+            )
     providers = settings.image_provider_order
     if not providers:
         if has_visual_reference and not is_followup_edit:

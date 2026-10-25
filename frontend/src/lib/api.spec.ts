@@ -25,6 +25,8 @@ describe('image generation API', () => {
         generate_video: false,
         include_cast_references: false,
         chatgpt_dual: false,
+        lock_blocking: false,
+        focal_character_id: null,
       }),
     })
   })
@@ -50,6 +52,8 @@ describe('image generation API', () => {
         generate_video: false,
         include_cast_references: false,
         chatgpt_dual: false,
+        lock_blocking: false,
+        focal_character_id: null,
       }),
     })
   })
@@ -75,6 +79,68 @@ describe('image generation API', () => {
         generate_video: false,
         include_cast_references: false,
         chatgpt_dual: true,
+        lock_blocking: false,
+        focal_character_id: null,
+      }),
+    })
+  })
+
+  it('sends lock_blocking and focal_character_id when requested', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'job-4' }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.generateShotImage('shot-3', '16:9', ['c1'], false, 'ref-1', false, {
+      lockBlocking: true,
+      focalCharacterId: 'c1',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/shots/shot-3/image/generate?aspect_ratio=16%3A9', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        character_ids: ['c1'],
+        refresh_continuity: false,
+        image_reference_id: 'ref-1',
+        use_default_image_reference: false,
+        both_aspects: false,
+        generate_video: false,
+        include_cast_references: false,
+        chatgpt_dual: false,
+        lock_blocking: true,
+        focal_character_id: 'c1',
+      }),
+    })
+  })
+
+  it('calls deriveTakeFromCrop endpoint', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ id: 'shot-3' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.deriveTakeFromCrop('shot-3', {
+      aspect_ratio: '16:9',
+      x: 0.1,
+      y: 0.2,
+      width: 0.5,
+      height: 0.6,
+      label: 'Close-up Tobi',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/shots/shot-3/derive-take', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        aspect_ratio: '16:9',
+        x: 0.1,
+        y: 0.2,
+        width: 0.5,
+        height: 0.6,
+        label: 'Close-up Tobi',
       }),
     })
   })

@@ -17,7 +17,12 @@ from .cast import (
     sync_project_cast,
     shot_element_ids,
 )
-from .continuity import current_shot_snapshot, get_or_create_shot_snapshot, video_continuity_prompt
+from .continuity import (
+    build_locked_blocking_camera_zoom_prompt,
+    current_shot_snapshot,
+    get_or_create_shot_snapshot,
+    video_continuity_prompt,
+)
 from .database import SessionLocal
 from .final_cut import _run as _run_ffmpeg, invalidate_final_cut
 
@@ -477,9 +482,40 @@ def _generate_shot_image(
                 character_ids=character_ids,
                 prompt_override=None if edit_meta else prompt_override,
             )
-            shot.continuity_snapshot = snapshot
+            # Only persist the snapshot when it wasn't built with lock_blocking.
+            # Lock-blocking snapshots contain focal-character constraints in
+            # effective_image_prompt that should not bleed into future normal generations.
+            if not snapshot.get("lock_blocking"):
+                shot.continuity_snapshot = snapshot
             shot.character_ids = list(snapshot.get("character_ids") or [])
 
+            attempt_meta = next(
+                (
+                    item
+                    for item in (job.attempts or [])
+                    if isinstance(item, dict) and item.get("shot_id") == shot.id
+                ),
+                {},
+            )
+            lock_blocking = bool(attempt_meta.get("lock_blocking")) or bool(snapshot.get("lock_blocking"))
+            focal_id = attempt_meta.get("focal_character_id") or snapshot.get("focal_character_id")
+            focal_name = snapshot.get("focal_character_name")
+            if focal_id and not focal_name:
+                char_obj = db.get(Character, focal_id)
+                if char_obj:
+                    focal_name = char_obj.name
+            selected_char_names = [
+                str(c.get("name")).strip()
+                for c in (snapshot.get("characters") or [])
+                if isinstance(c, dict) and (c.get("kind") or "character") == "character" and str(c.get("name") or "").strip()
+            ]
+            target_names = (
+                focal_name
+                or (" and ".join(selected_char_names) if len(selected_char_names) <= 2 else ", ".join(selected_char_names))
+                or None
+            )
+
+            is_locked_camera_zoom = False
             if edit_meta:
                 prompt = str(
                     edit_meta.get("edit_prompt")
@@ -550,18 +586,44 @@ def _generate_shot_image(
                 is_aspect_conversion = bool(
                     image_reference and image_reference.get("mode") == "aspect_conversion"
                 )
+                is_locked_camera_zoom = bool(lock_blocking and visual_reference is not None and not is_aspect_conversion)
+                if is_locked_camera_zoom:
+                    prompt = (
+                        str(prompt_override).strip()
+                        if prompt_override
+                        else build_locked_blocking_camera_zoom_prompt(snapshot, shot=shot)
+                    )
                 char_ids = list(dict.fromkeys(shot.character_ids or []))
-                references = (
+                focal_only = bool(lock_blocking and focal_id)
+                if focal_only:
+                    char_ids = [focal_id]
+                elif lock_blocking and visual_reference is not None:
+                    non_char_ids = {
+                        c.get("id")
+                        for c in snapshot.get("characters", [])
+                        if (c.get("kind") or "character") != "character"
+                    }
+                    char_ids = [cid for cid in char_ids if cid not in non_char_ids]
+                cast_refs = (
                     []
                     if (is_aspect_conversion and visual_reference is not None)
                     else load_cast_references(
                         db, project.id, char_ids,
-                        reference_ids=[
-                            reference_id
-                            for character in snapshot.get("characters", [])
-                            for reference_id in character.get("reference_ids", [])
-                        ],
-                        max_per_character=1 if len(char_ids) > 1 else None,
+                        reference_ids=(
+                            None
+                            if is_locked_camera_zoom
+                            else [
+                                reference_id
+                                for character in snapshot.get("characters", [])
+                                if (
+                                    (not focal_only or character.get("id") == focal_id)
+                                    and not (lock_blocking and visual_reference is not None and (character.get("kind") or "character") != "character")
+                                )
+                                for reference_id in character.get("reference_ids", [])
+                            ]
+                        ),
+                        max_per_character=1 if (is_locked_camera_zoom or len(char_ids) > 1) else None,
+                        prefer_main_portrait=is_locked_camera_zoom,
                     )
                 )
                 fallback_conv_url = shot.conversation_url or next(
@@ -575,7 +637,14 @@ def _generate_shot_image(
                 if visual_reference is not None:
                     if is_aspect_conversion and fallback_conv_url:
                         visual_reference = replace(visual_reference, reference_type="edit_target_fallback")
-                    references.append(visual_reference)
+                    elif is_locked_camera_zoom:
+                        visual_reference = replace(visual_reference, reference_type="locked_camera_zoom")
+                    if is_locked_camera_zoom:
+                        references = [visual_reference, *cast_refs]
+                    else:
+                        references = [*cast_refs, visual_reference]
+                else:
+                    references = list(cast_refs)
 
             def report_progress(update: dict) -> None:
                 raise_if_cancelled(db, job_id)
@@ -787,18 +856,20 @@ def _generate_shot_image(
                     progress=report_progress,
                     references=references,
                     conversation_url=fallback_conv_url if is_aspect_conversion else None,
+                    lock_blocking=lock_blocking,
+                    focal_name=focal_name,
+                    target_names=target_names,
+                    is_locked_camera_zoom=is_locked_camera_zoom,
                 )
-            if image_reference:
-                prompt = prepare_visual_reference_prompt(prompt, references=references)
+            if image_reference and not is_locked_camera_zoom:
+                prompt = prepare_visual_reference_prompt(
+                    prompt,
+                    references=references,
+                    lock_blocking=lock_blocking,
+                    focal_name=focal_name,
+                    target_names=target_names,
+                )
             generated_filename = filename
-            attempt_meta = next(
-                (
-                    item
-                    for item in (job.attempts or [])
-                    if isinstance(item, dict) and item.get("shot_id") == shot.id
-                ),
-                {},
-            )
             both_aspects = bool(attempt_meta.get("both_aspects")) and not edit_meta
             generate_video = bool(attempt_meta.get("generate_video"))
             include_cast_refs = bool(attempt_meta.get("include_cast_references"))
@@ -1285,16 +1356,21 @@ def _resolve_video_cast_references(
         ).all()
     )
     by_id = {char.id: char for char in all_chars}
-    mention_ids = extract_mention_element_ids(
-        all_chars, shot.video_prompt, shot.image_prompt, shot.action
-    )
-    tagged_ids = [
-        cid
-        for cid in dict.fromkeys(
-            [str(cid) for cid in (shot.character_ids or []) if cid] + mention_ids
-        )
-        if cid in by_id and (getattr(by_id[cid], "kind", None) or "character") == "character"
+    explicit_cast_ids = [
+        str(cid) for cid in (shot.character_ids or [])
+        if cid and str(cid) in by_id and (getattr(by_id[str(cid)], "kind", None) or "character") == "character"
     ]
+    if explicit_cast_ids:
+        tagged_ids = list(dict.fromkeys(explicit_cast_ids))
+    else:
+        mention_ids = extract_mention_element_ids(
+            all_chars, shot.video_prompt, shot.image_prompt, shot.action
+        )
+        tagged_ids = [
+            cid
+            for cid in dict.fromkeys(mention_ids)
+            if cid in by_id and (getattr(by_id[cid], "kind", None) or "character") == "character"
+        ]
     if not tagged_ids:
         return [], []
 
@@ -1359,7 +1435,19 @@ def _resolve_r2v_element_references(
         if element_ids is not None
         else [str(cid) for cid in (shot.character_ids or []) if cid]
     )
-    selected_ids = list(dict.fromkeys([*base_ids, *mention_ids]))
+    has_explicit_character = any(
+        cid in by_id and (getattr(by_id[cid], "kind", None) or "character") == "character"
+        for cid in base_ids
+    )
+    filtered_mention_ids = [
+        cid for cid in mention_ids
+        if not (
+            has_explicit_character
+            and cid in by_id
+            and (getattr(by_id[cid], "kind", None) or "character") == "character"
+        )
+    ]
+    selected_ids = list(dict.fromkeys([*base_ids, *filtered_mention_ids]))
 
     if include_scene_reference and shot.scene:
         selected_ids = shot_element_ids(all_chars, shot, selected_ids)
@@ -1876,6 +1964,15 @@ def _generate_shot_clip(
             return
         except Exception as exc:
             db.rollback()
+            err_msg = str(exc)
+            if any(marker in err_msg for marker in ("failed: [5]", "discarded operation", "media expired", "NOT_FOUND")):
+                try:
+                    project_record = db.get(Project, project_id)
+                    if project_record and project_record.flow_project_id:
+                        project_record.flow_project_id = None
+                        db.commit()
+                except Exception:
+                    db.rollback()
             job = db.get(Job, job_id)
             if preserve_cancelled(job):
                 return

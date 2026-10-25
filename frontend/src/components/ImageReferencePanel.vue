@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
-import { Image as ImageIcon, Maximize2, Minus, Palette, Plus, Redo2, RefreshCw, RotateCcw, Sparkles, Undo2, X } from '@lucide/vue'
+import { Crop, Image as ImageIcon, Lock, Maximize2, Minus, Palette, Plus, Redo2, RefreshCw, RotateCcw, Sparkles, Undo2, X } from '@lucide/vue'
 import { api, type AspectRatio, type ImageReferenceSource, type ImageReferenceSourceShot, type ReferenceColorRetouchAction, type Shot } from '@/lib/api'
 import { useStudioStore } from '@/stores/studio'
 import Dialog from '@/components/ui/Dialog.vue'
 import VideoFramePicker from '@/components/VideoFramePicker.vue'
+import OpticalPunchModal from '@/components/OpticalPunchModal.vue'
 
 const props = defineProps<{
   shot: Shot
@@ -13,7 +14,12 @@ const props = defineProps<{
   projectAspect?: AspectRatio
   canReferenceEarlier?: boolean
 }>()
+const emit = defineEmits<{
+  (e: 'generate-locked-blocking'): void
+}>()
 const skipDefault = defineModel<boolean>('skipDefault', { default: false })
+const lockBlocking = defineModel<boolean>('lockBlocking', { default: false })
+const focalCharacterId = defineModel<string | null>('focalCharacterId', { default: null })
 const store = useStudioStore()
 const previousShotId = computed(() => props.previousShot?.id)
 const hasEarlierEpisodeShots = computed(() => {
@@ -120,6 +126,50 @@ const selectedVideo = ref<ImageReferenceSource | null>(null)
 const busy = ref(false)
 const error = ref('')
 const loading = ref(false)
+
+const showPunchModal = ref(false)
+const punchSource = computed(() => {
+  const target = retouchTarget.value
+  if (target) {
+    return {
+      url: target.url,
+      title: ('source_shot_title' in target ? target.source_shot_title : 'Reference frame') || 'Reference frame',
+      sourceType: ('source_time_ms' in target ? 'continuity_frame' : 'reference') as 'reference' | 'continuity_frame',
+      sourceId: target.id,
+    }
+  }
+  if (defaultPreview.value) {
+    return {
+      url: defaultPreview.value.url,
+      title: defaultPreview.value.title,
+      sourceType: 'image' as const,
+      sourceId: null,
+    }
+  }
+  return null
+})
+const canPunchIn = computed(() => Boolean(punchSource.value))
+const shotCharacters = computed(() => {
+  const ids = new Set(props.shot.character_ids || [])
+  return (store.currentProject?.characters || []).filter(
+    (c) => ids.has(c.id) && (c.kind || 'character') === 'character',
+  )
+})
+const focalTargetLabel = computed(() => {
+  if (focalCharacterId.value) {
+    const found = shotCharacters.value.find((c) => c.id === focalCharacterId.value)
+    if (found) return found.name
+  }
+  if (shotCharacters.value.length > 0) {
+    return shotCharacters.value.map((c) => c.name).join(' & ')
+  }
+  return 'Selected Cast'
+})
+
+function handleGenerateLockedBlocking() {
+  lockBlocking.value = true
+  emit('generate-locked-blocking')
+}
 
 // Lightbox state for viewing reference images full size
 const lightboxDialogRef = ref<HTMLDialogElement | null>(null)
@@ -388,7 +438,51 @@ async function handleAiRepaintReference() {
         <Sparkles v-else :size="13" />
         <span>{{ repaintingAi ? 'Repainting…' : 'AI Repaint' }}</span>
       </button>
+      <button
+        v-if="canPunchIn"
+        type="button"
+        class="secondary-button reference-punch-btn"
+        :disabled="busy || isProcessingShot"
+        title="Optical punch-in: Crop directly from this reference frame to focus on a character with 0% AI hallucination"
+        @click="showPunchModal = true"
+      >
+        <Crop :size="13" />
+        <span>Optical Punch-In</span>
+      </button>
       <button v-if="active" class="ghost-link" :disabled="busy" @click="remove">Remove</button>
+    </div>
+    <div v-if="retouchTarget || defaultPreview" class="reference-blocking-options">
+      <div class="blocking-header-row">
+        <label class="blocking-checkbox" title="Turn and zoom the camera toward selected character(s) directly from this reference image without changing anything else in the image">
+          <input v-model="lockBlocking" type="checkbox" :disabled="busy || isProcessingShot" />
+          <span class="blocking-checkbox-text">
+            <Lock :size="12" />
+            <span>Lock scene blocking (camera zoom on reference without changing positions)</span>
+          </span>
+        </label>
+      </div>
+      <div class="focal-cast-row">
+        <template v-if="shotCharacters.length">
+          <label for="focal-char-select">Focus on:</label>
+          <select id="focal-char-select" v-model="focalCharacterId" :disabled="busy || isProcessingShot">
+            <option :value="null">Selected cast ({{ shotCharacters.map((c) => c.name).join(' & ') }})</option>
+            <option v-for="char in shotCharacters" :key="char.id" :value="char.id">
+              Only {{ char.name }}
+            </option>
+          </select>
+        </template>
+        <button
+          type="button"
+          class="primary-button blocking-zoom-generate-btn"
+          :disabled="busy || isProcessingShot"
+          title="Dedicated Lock Scene Blocking generator: turns and zooms the camera toward the selected character(s) directly from this reference image without running normal continuity prompts"
+          @click="handleGenerateLockedBlocking"
+        >
+          <RefreshCw v-if="isProcessingShot" :size="13" class="spinning" />
+          <Lock v-else :size="13" />
+          <span>{{ isProcessingShot ? 'Zooming camera…' : `Zoom Camera on ${focalTargetLabel}` }}</span>
+        </button>
+      </div>
     </div>
     <p v-if="!canBrowse">References become available after the first shot.</p>
     <p v-if="error && !showBrowser && !selectedVideo" role="alert">{{ error }}</p>
@@ -440,6 +534,18 @@ async function handleAiRepaintReference() {
         </div>
       </div>
     </dialog>
+
+    <OpticalPunchModal
+      v-if="punchSource"
+      v-model:open="showPunchModal"
+      :shot-id="shot.id"
+      :src="punchSource.url"
+      :aspect="aspect"
+      :source-type="punchSource.sourceType"
+      :source-id="punchSource.sourceId"
+      :source-title="punchSource.title"
+      :characters="shotCharacters"
+    />
   </section>
   <Dialog :open="showBrowser" title="Choose an image reference" description="Browse earlier shots. Select a still image or choose a frame from a video." width-class="max-w-3xl" @update:open="!busy && (showBrowser = $event)">
     <p v-if="loading">Loading available media…</p>
@@ -710,5 +816,85 @@ p { margin: 4px 0; color: var(--text-secondary); font-size: 12px; line-height: 1
   height: auto;
   object-fit: contain;
   border-radius: 8px;
+}
+.reference-punch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+}
+.reference-punch-btn:hover:not(:disabled) {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.2);
+  color: #bae6fd;
+}
+.reference-blocking-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  margin-top: 4px;
+}
+.blocking-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary, #e2e8f0);
+  cursor: pointer;
+  user-select: none;
+}
+.blocking-checkbox-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.blocking-checkbox-text svg {
+  color: #38bdf8;
+}
+.focal-cast-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #94a3b8);
+  margin-left: 24px;
+}
+.focal-cast-row select {
+  padding: 5px 8px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  color: #e2e8f0;
+}
+.blocking-zoom-generate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.18);
+  color: #e0f2fe;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.blocking-zoom-generate-btn:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.28);
+  border-color: #38bdf8;
+  color: #ffffff;
+}
+.blocking-zoom-generate-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 </style>

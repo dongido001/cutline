@@ -177,6 +177,17 @@ export interface ShotTake {
   created_at: string
 }
 
+export interface DeriveTakeCropPayload {
+  aspect_ratio: AspectRatio
+  x: number
+  y: number
+  width: number
+  height: number
+  source_type?: 'reference' | 'take' | 'continuity_frame' | 'image'
+  source_id?: string | null
+  label?: string | null
+}
+
 export interface ShotImage {
   id: string
   url: string
@@ -1340,6 +1351,11 @@ export const api = {
     request<Shot>(`/api/shots/${shotId}/takes/${takeId}/retouch-color`, {
       method: 'POST',
     }),
+  deriveTakeFromCrop: (shotId: string, payload: DeriveTakeCropPayload) =>
+    request<Shot>(`/api/shots/${shotId}/derive-take`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   projects: () => request<ProjectSummary[]>('/api/projects'),
   shotNotes: (shotId: string) => request<ShotNote[]>(`/api/shots/${shotId}/notes`),
   createShotNote: (shotId: string, bodyText: string, files: File[] = []) => {
@@ -1428,6 +1444,8 @@ export const api = {
       generateVideo?: boolean
       includeCastReferences?: boolean
       chatgptDual?: boolean
+      lockBlocking?: boolean
+      focalCharacterId?: string | null
     },
   ) =>
     request<Job>(`/api/shots/${id}/image/generate${aspectRatio ? `?aspect_ratio=${encodeURIComponent(aspectRatio)}` : ''}`, {
@@ -1441,6 +1459,8 @@ export const api = {
         generate_video: Boolean(options?.generateVideo),
         include_cast_references: Boolean(options?.includeCastReferences),
         chatgpt_dual: Boolean(options?.chatgptDual),
+        lock_blocking: Boolean(options?.lockBlocking),
+        focal_character_id: options?.focalCharacterId ?? null,
       }),
     }),
   characters: (projectId: string) =>

@@ -254,6 +254,19 @@ describe('ImageReferencePanel', () => {
     await repaintBtn.trigger('click')
     await flushPromises()
     expect(store.repaintShotReference).toHaveBeenCalledWith('shot-3', '16:9', 'repaint this image')
+
+    const punchBtn = wrapper.get('.reference-punch-btn')
+    expect(punchBtn.text()).toContain('Optical Punch-In')
+
+    const blockingCheckbox = wrapper.get('.blocking-checkbox input')
+    expect((blockingCheckbox.element as HTMLInputElement).checked).toBe(false)
+    await blockingCheckbox.setValue(true)
+    expect(wrapper.emitted('update:lockBlocking')?.[0]).toEqual([true])
+
+    const zoomBtn = wrapper.get('.blocking-zoom-generate-btn')
+    expect(zoomBtn.text()).toContain('Zoom Camera on')
+    await zoomBtn.trigger('click')
+    expect(wrapper.emitted('generate-locked-blocking')).toBeTruthy()
   })
 })
 

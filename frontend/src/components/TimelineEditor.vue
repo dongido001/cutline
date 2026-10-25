@@ -2094,7 +2094,13 @@ function splitAtPlayhead() {
               const leftDuration = curPlayhead - start
               const rightDuration = end - curPlayhead
               const leftSourceIn = Math.round(item.source_in_ms ?? 0)
-              const rightSourceIn = leftSourceIn + leftDuration
+              let rightSourceIn = leftSourceIn + leftDuration
+
+              const url = resolveSource(item.source)?.url
+              const fileTotal = url ? audioFileDurations.value[url] : undefined
+              if (fileTotal && fileTotal > 0 && item.loop !== false) {
+                rightSourceIn = (leftSourceIn + leftDuration) % fileTotal
+              }
 
               const left: TimelineAudioOverlay = {
                 ...item,
@@ -3885,8 +3891,9 @@ function audioLoopSpanMs(overlay: TimelineAudioOverlay): number | null {
   const url = resolveSource(overlay.source)?.url
   const total = url ? audioFileDurations.value[url] : undefined
   if (!total) return null
-  const span = total - (overlay.source_in_ms || 0)
-  return span > 50 && span < overlay.duration_ms ? span : null
+  const inMs = (overlay.source_in_ms || 0) % total
+  const span = total - inMs
+  return span > 50 && (span < overlay.duration_ms || (overlay.source_in_ms || 0) >= total) ? span : null
 }
 
 function toggleSelectedAudioLoop() {
@@ -3955,8 +3962,21 @@ function syncAudioOverlays() {
     player.muted = muted
     player.volume = Math.max(0, Math.min(1, overlay.volume ?? 1))
     const elapsed = Math.max(0, playheadMs.value - overlay.start_ms)
+    const url = resolveSource(overlay.source)?.url
+    const total = url ? audioFileDurations.value[url] : undefined
     const span = audioLoopSpanMs(overlay)
-    const targetSec = ((overlay.source_in_ms || 0) + (span ? elapsed % span : elapsed)) / 1000
+    let targetSec = 0
+    if (span && span > 0 && total && total > 0) {
+      const inMs = (overlay.source_in_ms || 0) % total
+      targetSec = ((inMs + (elapsed % span)) % total) / 1000
+    } else if (total && total > 0 && overlay.loop !== false) {
+      targetSec = (((overlay.source_in_ms || 0) + elapsed) % total) / 1000
+    } else {
+      targetSec = ((overlay.source_in_ms || 0) + (span ? elapsed % span : elapsed)) / 1000
+    }
+    if (overlay.loop !== false && Number.isFinite(player.duration) && player.duration > 0 && targetSec >= player.duration) {
+      targetSec = targetSec % player.duration
+    }
     if (playing.value && inWindow && !muted) {
       try {
         if (Math.abs((player.currentTime || 0) - targetSec) > 0.25) {

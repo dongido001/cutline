@@ -497,6 +497,19 @@ class ShotImageGenerateRequest(BaseModel):
     generate_video: bool = False
     include_cast_references: bool = False
     chatgpt_dual: bool = False
+    lock_blocking: bool = False
+    focal_character_id: str | None = None
+
+
+class DeriveTakeCropRequest(BaseModel):
+    aspect_ratio: str
+    x: float = Field(default=0.0, ge=0.0, le=1.0)
+    y: float = Field(default=0.0, ge=0.0, le=1.0)
+    width: float = Field(default=1.0, gt=0.0, le=1.0)
+    height: float = Field(default=1.0, gt=0.0, le=1.0)
+    source_type: Literal["reference", "take", "continuity_frame", "image"] = "reference"
+    source_id: str | None = None
+    label: str | None = None
 
 
 class ShotClipGenerateRequest(BaseModel):
