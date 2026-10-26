@@ -94,3 +94,20 @@ def runway_clip_duration_seconds(
     if requested <= 5 or cap <= 5:
         return 5
     return 10
+
+
+def flow_clip_duration_seconds(
+    duration_ms: int,
+    *,
+    model_family: str = "omni_flash",
+) -> int:
+    """
+    Map shot duration to Google Flow buckets (4, 6, 8, 10s for Omni Flash).
+    Uses ceiling on milliseconds and breaks ties UPWARD (-value) so dialogue
+    and audio are never truncated by an under-sized video clip.
+    """
+    requested_seconds = max(1, (duration_ms + 999) // 1000)
+    if (model_family or "").strip().lower() == "omni_flash":
+        return min((4, 6, 8, 10), key=lambda value: (abs(value - requested_seconds), -value))
+    return requested_seconds
+

@@ -481,6 +481,11 @@ export const useStudioStore = defineStore('studio', () => {
           if (!active && job.status === 'completed') void refreshShot(shotId)
         } else if (job.kind === 'cast_reference' && charId) {
           setProjectCastJob(pid, charId, job)
+          if (!active && job.status === 'completed') {
+            void api.characters(pid).then((chars) => {
+              if (currentProject.value?.id === pid) currentProject.value.characters = chars
+            }).catch(() => {})
+          }
         }
       }
     }

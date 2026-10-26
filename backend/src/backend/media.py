@@ -736,7 +736,7 @@ def generate_storyboard_chatgpt_dual(
 
 
 _COLOR_RETOUCH_PHRASE = re.compile(
-    r"^\s*(?:please\s+)?(?:retouch|repaint|recolor|revive|restore|enhance|boost)"
+    r"^\s*(?:please\s+)?(?:ai\s+)?(?:retouch|repaint|paint|recolor|revive|restore|enhance|boost)"
     r"(?:\s+(?:the\s+)?(?:color|colors|colour|colours|vibrancy|saturation|image|frame|this(?:\s+image|\s+frame)?))*\s*[.!]?\s*$",
     re.IGNORECASE,
 )

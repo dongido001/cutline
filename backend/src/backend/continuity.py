@@ -1241,6 +1241,12 @@ def _on_camera_canon_set(snapshot: dict[str, Any], shot: Shot | None = None) -> 
     return canons
 
 
+_STOP_FIRST_NAMES = {
+    "THE", "A", "AN", "MR", "MRS", "MS", "DR", "IN", "ON", "AT", "TO", "FOR",
+    "OF", "WITH", "BY", "AND", "OR", "NO", "ALL", "SOME", "EVERY", "THIS", "THAT",
+}
+
+
 def _detect_offscreen_phone_characters(
     snapshot: dict[str, Any],
     video_prompt: str,
@@ -1259,14 +1265,17 @@ def _detect_offscreen_phone_characters(
     if shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
         project = shot.scene.script_version.project
         if project is not None:
-            project_chars = list(project.characters or [])
+            project_chars = [
+                c for c in (project.characters or [])
+                if (getattr(c, "kind", None) or "character") == "character"
+            ]
     by_name: dict[str, Character] = {}
     for char in project_chars:
         key = canonical_character_name(char.name)
         if key:
             by_name[key] = char
             first = key.split()[0]
-            if first not in by_name:
+            if first and first.upper() not in _STOP_FIRST_NAMES and first not in by_name:
                 by_name[first] = char
 
     found: list[tuple[str, Character | None, str]] = []
@@ -1286,15 +1295,30 @@ def _detect_offscreen_phone_characters(
         is_unselected_speaker = bool(
             on_camera_canons
             and canon not in on_camera_canons
-            and canon.split()[0] not in on_camera_canons
+            and (not canon.split()[0] or canon.split()[0].upper() in _STOP_FIRST_NAMES or canon.split()[0] not in on_camera_canons)
         )
         if is_offscreen_cue or is_unselected_speaker:
-            live_char = by_name.get(canon) or (by_name.get(canon.split()[0]) if canon.split() else None)
+            first_candidate = canon.split()[0] if canon.split() else ""
+            valid_first = first_candidate if (first_candidate and first_candidate.upper() not in _STOP_FIRST_NAMES) else None
+            live_char = by_name.get(canon) or (by_name.get(valid_first) if valid_first else None)
             voice_desc = _resolve_character_voice(live_char) if live_char is not None else ""
             seen.add(canon)
             found.append((canon, live_char, voice_desc))
 
     search_text = f"{action}\n{video_prompt}\n{sound}"
+    # If the shot explicitly notes the caller's voice is inaudible / no off-screen speech, do not infer caller from action text.
+    if re.search(
+        r"\b(?:caller(?:['\x27]s)?\s+voice\s+is\s+not\s+audible|caller\s+(?:is\s+)?not\s+audible|no\s+off-screen\s+speech)\b",
+        search_text,
+        re.IGNORECASE,
+    ):
+        dialogue_speakers = {
+            canonical_character_name(_text(l.get("character") or l.get("speaker")))
+            for l in dialogue
+            if isinstance(l, dict)
+        }
+        return [item for item in found if item[0] in dialogue_speakers]
+
     # Strip quoted dialogue strings so names mentioned within dialogue (e.g. "Isabel, send a car...") are not treated as offscreen speakers
     clean_search = re.sub(r'["\u201c\u201d][^"\u201c\u201d]*["\u201c\u201d]|\'[^\']*\'', ' ', search_text)
     for char in project_chars:
@@ -1302,9 +1326,13 @@ def _detect_offscreen_phone_characters(
         if not canon or canon in seen:
             continue
         first = canon.split()[0]
-        if canon in on_camera_canons or first in on_camera_canons:
+        has_valid_first = bool(first and first.upper() not in _STOP_FIRST_NAMES and len(first) >= 3)
+        if canon in on_camera_canons or (has_valid_first and first in on_camera_canons):
             continue
-        c_pattern = rf"\b(?:{re.escape(canon)}|{re.escape(first)})\b"
+        parts = [re.escape(canon)]
+        if has_valid_first:
+            parts.append(re.escape(first))
+        c_pattern = rf"\b(?:{'|'.join(parts)})\b"
         cue_pattern = re.compile(
             rf"(?:"
             rf"{c_pattern}(?:'s)?\s+(?:filtered|phone|handset|earpiece|voice|line|report|speech|audio|call|speaks|says|replies|talking)\b|"
@@ -1336,7 +1364,10 @@ def _collect_voice_entries(
     if shot is not None and getattr(shot, "scene", None) and getattr(shot.scene, "script_version", None):
         project = shot.scene.script_version.project
         if project is not None:
-            project_chars = list(project.characters or [])
+            project_chars = [
+                c for c in (project.characters or [])
+                if (getattr(c, "kind", None) or "character") == "character"
+            ]
     by_id = {char.id: char for char in project_chars}
     by_name: dict[str, Character] = {}
     for char in project_chars:
@@ -1344,7 +1375,7 @@ def _collect_voice_entries(
         if key:
             by_name[key] = char
             first = key.split()[0]
-            if first not in by_name:
+            if first and first.upper() not in _STOP_FIRST_NAMES and first not in by_name:
                 by_name[first] = char
 
     offscreen_phone_chars = _detect_offscreen_phone_characters(

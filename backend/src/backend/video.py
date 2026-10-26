@@ -13,6 +13,7 @@ import httpx
 from .media import normalize_conversation_url
 from .runway_video import generate_runway_clip, runway_status
 from .settings import settings
+from .timing import flow_clip_duration_seconds
 
 
 TOKENS = {
@@ -274,11 +275,8 @@ def generate_flowkit_clip(
     )
     if active_model_family == "veo":
         _sync_flowkit_veo_model_key(active_preset.get("flow_model_key") or "veo_3_1_i2v_lite")
-    requested_duration_s = max(1, round(duration_ms / 1000))
-    if active_model_family == "omni_flash":
-        duration_s = min((4, 6, 8, 10), key=lambda value: (abs(value - requested_duration_s), value))
-    else:
-        duration_s = requested_duration_s
+    requested_duration_s = max(1, (duration_ms + 999) // 1000)
+    duration_s = flow_clip_duration_seconds(duration_ms, model_family=active_model_family)
     mime_type = mimetypes.guess_type(primary_path.name)[0] or "image/png"
     image_base64 = base64.b64encode(primary_path.read_bytes()).decode("ascii")
     initial_project_id = (flow_project_id or "").strip() or settings.flowkit_project_id
@@ -354,11 +352,7 @@ def generate_flowkit_clip(
             has_fallback = attempt_idx + 1 < len(attempt_extra_sets)
             if is_r2v or current_extra_ids:
                 r2v_family = "omni_flash" if is_r2v else active_model_family
-                r2v_dur = (
-                    min((4, 6, 8, 10), key=lambda value: (abs(value - requested_duration_s), value))
-                    if r2v_family == "omni_flash"
-                    else duration_s
-                )
+                r2v_dur = flow_clip_duration_seconds(duration_ms, model_family=r2v_family)
                 payload = {
                     "reference_media_ids": [media_id, *current_extra_ids],
                     "prompt": prompt,

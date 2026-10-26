@@ -64,7 +64,7 @@ def test_flowkit_omni_duration_maps_to_supported_bucket(monkeypatch, tmp_path):
         scene_id="scene-1",
     )
 
-    assert captured["duration_s"] == 4
+    assert captured["duration_s"] == 6
 
 
 

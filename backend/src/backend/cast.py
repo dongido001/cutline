@@ -678,28 +678,55 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
                 for item in by_name.values()
                 if getattr(item, "kind", None) == "prop" and (item.notes or "").strip()
             }
+            def _norm_prop_name(text: str) -> str:
+                unprefixed = re.sub(r"^(?:THE|A|AN)\s+", "", text.strip(), flags=re.IGNORECASE)
+                return canonical_character_name(unprefixed).strip(" :;,.-–—")
+
+            existing_prop_norm_names = {
+                _norm_prop_name(k) for k in by_name.keys()
+            }
             segments = [
                 seg.strip(" .,-–—")
                 for seg in re.split(r"[;\n]+|\.\s+(?=[A-Z@])|,\s+(?=[A-Z0-9@])", raw_props)
                 if seg.strip(" .,-–—")
             ]
-            for seg in segments[:6]:
+            for seg in segments[:12]:
                 if re.search(
                     r"\b(?:blank\s+or\s+illegible|no\s+generated\s+lettering|separate\s+from\s+the\s+tank)\b",
                     seg,
                     flags=re.IGNORECASE,
                 ):
                     continue
+                # Skip negative statements (e.g. "No recurring props in this space")
+                if re.match(
+                    r"^\s*(?:no\s+recurring|no\s+props?|no\s+specific\s+props?|none\b|nothing\b|there\s+are\s+no)\b",
+                    seg,
+                    flags=re.IGNORECASE,
+                ):
+                    continue
+                # Skip action/stage directions that are not prop definitions
+                if re.search(
+                    r"\b(?:stays?\s+(?:outside|inside|in|on|here)|move(?:s)?\s+only|specif(?:y|ies)\b|appears?\s+only|dresses\s+the\s+table|open/closed)\b",
+                    seg,
+                    flags=re.IGNORECASE,
+                ):
+                    continue
+
                 # "@BISCUIT_PACK — bright red sealed packet" or "BLUE FOLDER — closed blue folder..."
+                # Also handles colons: "THREE WHITE PLASTIC CHAIRS: three white molded plastic armchairs"
                 mention = re.match(
-                    r"^@?([A-Z][A-Za-z0-9_'\s]{1,30}?)\s*[—–-]\s*(.+)$",
+                    r"^@?([A-Za-z0-9_'\s]{2,40}?)\s*[:—–-]\s*(.+)$",
                     seg.strip(),
+                ) or re.match(
+                    r"^@([A-Za-z0-9_]+)\s+(?:is|are|has|consists\s+of)\s+(.+)$",
+                    seg.strip(),
+                    flags=re.IGNORECASE,
                 ) or re.match(
                     r"^@([A-Za-z0-9_]+)\s+(.+)$",
                     seg.strip(),
                 )
                 if mention:
-                    prop_key = canonical_character_name(mention.group(1).replace("_", " "))
+                    prop_key = canonical_character_name(mention.group(1).replace("_", " ")).strip(" :;,.-–—")
                     prop_notes = mention.group(2).strip()
                 else:
                     cleaned = seg.lstrip("@").strip()
@@ -709,14 +736,19 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
                         flags=re.IGNORECASE,
                     )[0].strip()
                     words = base_title.split()
-                    prop_title = " ".join(words[:4]) if len(words) > 4 else base_title
-                    prop_key = canonical_character_name(prop_title)
+                    # Only treat as prop if it's a clean noun phrase (at most 4 words) without action verbs
+                    if len(words) > 4 or re.search(r"\b(?:is|are|was|were|has|have|had|will|should|stays?|moves?|takes?|gives?)\b", base_title, flags=re.IGNORECASE):
+                        continue
+                    prop_key = canonical_character_name(base_title).strip(" :;,.-–—")
                     prop_notes = cleaned
+
+                norm_key = _norm_prop_name(prop_key)
                 norm_notes = re.sub(r"\W+", " ", prop_notes.lower()).strip()
                 if (
                     not prop_key
                     or len(prop_key) < 3
                     or prop_key in by_name
+                    or norm_key in existing_prop_norm_names
                     or (norm_notes and norm_notes in existing_prop_notes)
                 ):
                     continue
@@ -730,6 +762,7 @@ def sync_project_elements(project: Project, db: Session) -> list[Character]:
                 db.add(prop_elem)
                 db.flush()
                 by_name[prop_key] = prop_elem
+                existing_prop_norm_names.add(norm_key)
                 if norm_notes:
                     existing_prop_notes.add(norm_notes)
 

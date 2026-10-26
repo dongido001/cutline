@@ -835,18 +835,57 @@ def _generate_shot_image(
                 return
 
             if edit_meta:
-                from .media import expand_color_retouch_prompt
-                effective_edit_prompt = expand_color_retouch_prompt(prompt)
-                filename, mime_type, provider = generate_storyboard_image(
-                    effective_edit_prompt,
-                    (snapshot.get("scene") or {}).get("title") or shot.scene.title,
-                    snapshot.get("framing") or shot.framing,
-                    target_aspect,
-                    progress=report_progress,
-                    references=references,
-                    conversation_url=edit_conversation_url,
-                    is_followup_edit=True,
+                from .media import (
+                    expand_color_retouch_prompt,
+                    _COLOR_RETOUCH_PHRASE,
+                    COLOR_RETOUCH_STRICT_PROMPT,
+                    enhance_image_vibrancy,
                 )
+                effective_edit_prompt = expand_color_retouch_prompt(prompt)
+                is_color_retouch = (
+                    bool(_COLOR_RETOUCH_PHRASE.match(prompt.strip()))
+                    or effective_edit_prompt == COLOR_RETOUCH_STRICT_PROMPT
+                    or bool(edit_meta.get("edit_reference"))
+                )
+
+                filename = None
+                mime_type = None
+                provider = None
+
+                try:
+                    filename, mime_type, provider = generate_storyboard_image(
+                        effective_edit_prompt,
+                        (snapshot.get("scene") or {}).get("title") or shot.scene.title,
+                        snapshot.get("framing") or shot.framing,
+                        target_aspect,
+                        progress=report_progress,
+                        references=references,
+                        conversation_url=edit_conversation_url,
+                        is_followup_edit=True,
+                    )
+                except Exception as exc:
+                    if not is_color_retouch:
+                        raise
+                    logger.warning(
+                        "AI provider failed for color retouch (%s); falling back to local color enhancer: %s",
+                        prompt,
+                        exc,
+                    )
+
+                if filename is None and is_color_retouch:
+                    base_fn = str(edit_meta.get("edit_base_filename") or "").strip()
+                    base_file = (settings.media_dir / base_fn) if base_fn else None
+                    if not base_file or not base_file.is_file():
+                        if shot.image and shot.image.filename:
+                            base_file = settings.media_dir / shot.image.filename
+                    if not base_file or not base_file.is_file():
+                        raise RuntimeError(f"Base image not found for color retouch: {base_fn}")
+
+                    enhanced_bytes, mime_type = enhance_image_vibrancy(base_file.read_bytes(), strength=1.5)
+                    ext = ".png" if "png" in mime_type else ".jpg"
+                    filename = f"retouched-{uuid4()}{ext}"
+                    (settings.media_dir / filename).write_bytes(enhanced_bytes)
+                    provider = "color-boost"
             else:
                 filename, mime_type, provider = generate_storyboard_image(
                     prompt,

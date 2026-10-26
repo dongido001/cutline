@@ -5799,6 +5799,11 @@ input::placeholder { color: #68716c; }
 .produce-cast-card {
   cursor: pointer;
   transition: transform 0.15s ease, border-color 0.15s ease;
+  width: 132px;
+  min-width: 132px;
+  max-width: 140px;
+  display: flex;
+  flex-direction: column;
 }
 
 .produce-cast-card:hover {
@@ -5806,12 +5811,21 @@ input::placeholder { color: #68716c; }
   transform: translateY(-1px);
 }
 
+.produce-cast-card small {
+  min-height: 16px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .produce-cast-card-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: auto;
+  padding-top: 4px;
 }
 
 .script-toolbar-right {
@@ -6034,11 +6048,27 @@ input::placeholder { color: #68716c; }
   min-width: 0;
 }
 
+.produce-cast-meta strong {
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.25;
+  min-height: 30px;
+}
+
 .element-tag-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 2px 7px;
   border-radius: 999px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
