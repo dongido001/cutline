@@ -1135,6 +1135,46 @@ watch(
   },
   { immediate: true },
 )
+
+function scrollElementIntoBrowser(el: HTMLElement, behavior: ScrollBehavior = 'smooth') {
+  if (typeof el.scrollIntoView !== 'function') return
+  const browser = el.closest('.shot-browser')
+  if (!browser || typeof browser.getBoundingClientRect !== 'function' || typeof el.getBoundingClientRect !== 'function') {
+    el.scrollIntoView({ block: 'center', behavior })
+    return
+  }
+  const browserRect = browser.getBoundingClientRect()
+  const elRect = el.getBoundingClientRect()
+  // If the container has no computed layout (e.g. in test environments), scroll directly
+  if (browserRect.height === 0 && browserRect.width === 0) {
+    el.scrollIntoView({ block: 'center', behavior })
+    return
+  }
+  const header = browser.querySelector('.shot-browser-heading') as HTMLElement | null
+  const headerHeight = header?.offsetHeight || 80
+  const isVisible = elRect.top >= browserRect.top + headerHeight && elRect.bottom <= browserRect.bottom
+  if (!isVisible) {
+    el.scrollIntoView({ block: 'center', behavior })
+  }
+}
+
+function scrollShotIntoBrowserView(shotId?: string, behavior: ScrollBehavior = 'smooth') {
+  if (!shotId) return
+  void nextTick(() => {
+    const el = document.getElementById(`browser-shot-${shotId}`)
+    if (el) {
+      scrollElementIntoBrowser(el, behavior)
+    } else if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        const retryEl = document.getElementById(`browser-shot-${shotId}`)
+        if (retryEl) {
+          scrollElementIntoBrowser(retryEl, behavior)
+        }
+      })
+    }
+  })
+}
+
 watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage]) => {
   const hasShotParam = typeof shotId === 'string' && shotId.length > 0
   const requestedShot = hasShotParam ? shots.find((shot) => shot.id === shotId) : undefined
@@ -1150,6 +1190,7 @@ watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage
           void router.replace({ query: buildSyncedQuery({ scene: requestedSceneId }) })
         }
       }
+      scrollShotIntoBrowserView(requestedShot.id)
     }
     produceDetailOpen.value = true
     // Only replace route if shots have loaded and the project is initialized, and the requested shot is truly missing
@@ -1167,6 +1208,9 @@ watch(selectedShot, (shot, previous) => {
   if (shot.id !== previous?.id) {
     showPromptEditor.value = pendingPromptEditor.value
     pendingPromptEditor.value = false
+    if (produceDetailOpen.value) {
+      scrollShotIntoBrowserView(shot.id)
+    }
   }
   Object.assign(shotDraft, {
     framing: shot.framing,
@@ -1406,6 +1450,7 @@ function openProduceDetail(shotId: string, opts?: { editPrompts?: boolean }) {
   void nextTick(() => {
     showPromptEditor.value = pendingPromptEditor.value
     pendingPromptEditor.value = false
+    scrollShotIntoBrowserView(shotId)
   })
 }
 
@@ -1679,6 +1724,7 @@ function selectShot(id: string, stage: 'shots' | 'clips' = 'shots') {
   activeShotId.value = id
   store.focusShotId = id
   if (store.currentProject) void router.push(projectRoute(store.currentProject.id, stage, id))
+  if (produceDetailOpen.value) scrollShotIntoBrowserView(id)
 }
 
 function openTrimEditor() {
@@ -3466,6 +3512,7 @@ function formatRenderedAt(value: string) {
                 <button
                   v-for="shot in scene.shots"
                   :key="shot.id"
+                  :id="'browser-shot-' + shot.id"
                   class="shot-list-item"
                   :class="{
                     active: !shortsSelectionMode && selectedShot?.id === shot.id,

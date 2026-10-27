@@ -729,6 +729,31 @@ describe('StudioView', () => {
 
     wrapper.unmount()
   })
+
+  it('scrolls the active shot item in the shot browser into view when loading a shot route', async () => {
+    const scrollIntoViewMock = vi.fn()
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoViewMock
+
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-2')
+    await router.isReady()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+
+    const wrapper = mount(StudioView, {
+      global: { plugins: [pinia, router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+
+    const item = wrapper.find('#browser-shot-shot-2')
+    expect(item.exists()).toBe(true)
+    expect(scrollIntoViewMock).toHaveBeenCalledWith(
+      expect.objectContaining({ block: 'center' }),
+    )
+
+    wrapper.unmount()
+  })
 })
 
 
