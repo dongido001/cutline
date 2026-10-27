@@ -111,7 +111,7 @@
 .review-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(360px, 1fr) 360px; }
 .shot-plan-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(260px, 280px) minmax(0, 1fr); background: var(--workspace-bg); }
 .shot-browser { min-height: calc(100vh - 194px); overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
-.shot-browser-heading { padding: 12px 14px 10px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.shot-browser-heading { position: sticky; top: 0; z-index: 10; padding: 12px 14px 10px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .shot-browser-heading-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .shot-browser-heading-main { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
 .shot-browser-title-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
