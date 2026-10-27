@@ -492,3 +492,40 @@ def test_sync_project_cast_reads_each_episodes_own_cast_lines() -> None:
         assert shot2.character_ids == [by_name["MAYA"]]
     finally:
         session.close()
+
+
+def test_sync_project_cast_duplicate_shot_titles_across_different_scenes() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from backend.database import Base
+
+    script = (
+        "SHOW\n\nCharacter consistency\n\nBAMIDELE — 50-year-old man.\nAMAKA — 28-year-old woman.\n\n"
+        "SHOT 1 - The smile\nScene: SCENE A\nTime: 00:00-00:04\nFraming: Close-up\nCast: BAMIDELE\n\n"
+        "Action:\nBamidele rehearses a smile.\n\nSound: Hum.\nImage prompt: Bamidele smiling.\nVideo prompt: Bamidele smiles.\n\n"
+        "SHOT 2 - The smile\nScene: SCENE B\nTime: 00:04-00:08\nFraming: Close-up\nCast: AMAKA\n\n"
+        "Action:\nAmaka forces a smile.\n\nSound: Hum.\nImage prompt: Amaka smiling.\nVideo prompt: Amaka smiles.\n"
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    try:
+        project = Project(title="Series", status="shot_plan")
+        v = ScriptVersion(project=project, version_number=1, source_text=script, status="review")
+        scene1 = Scene(script_version=v, order_index=0, title="SCENE A")
+        scene2 = Scene(script_version=v, order_index=1, title="SCENE B")
+        shot1 = Shot(scene=scene1, order_index=0, title="The smile", action="Bamidele rehearses a smile.")
+        shot2 = Shot(scene=scene2, order_index=0, title="The smile", action="Amaka forces a smile.")
+        session.add(project)
+        session.commit()
+
+        characters = sync_project_cast(project, session, source_text=script, tag_shots=True)
+        session.commit()
+        by_name = {c.name: c.id for c in characters}
+
+        assert shot1.character_ids == [by_name["BAMIDELE"]]
+        assert shot2.character_ids == [by_name["AMAKA"]]
+    finally:
+        session.close()
+

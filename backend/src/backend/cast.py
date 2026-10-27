@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from io import BytesIO
 from typing import Any, Iterable
 
@@ -536,8 +537,8 @@ def _latest_version_scenes(project: Project, db: Session) -> list[Scene]:
         db.scalars(
             select(Scene)
             .where(Scene.script_version_id.in_(latest_version_ids))
-            .options(selectinload(Scene.shots))
-            .order_by(Scene.order_index)
+            .options(selectinload(Scene.shots), selectinload(Scene.script_version))
+            .order_by(Scene.script_version_id, Scene.order_index)
         )
     )
 
@@ -577,59 +578,110 @@ def sync_project_cast(
     unique_chars = lambda: list({char.id: char for char in by_name.values()}.values())
 
     # Each episode's shots must take their Cast: lines from that episode's own script.
-    explicit_cast_cache: dict[str, tuple[dict[int, list[str]], dict[str, list[str]]]] = {}
+    ExplicitCastMap = tuple[
+        dict[int, list[str]],  # by sequential shot index across version
+        dict[tuple[str, str], list[str]],  # by (scene_title, shot_title)
+        dict[tuple[int, int], list[str]],  # by (scene_index, shot_index)
+        dict[str, list[str]],  # by unique shot title (only if unique across script)
+    ]
+    explicit_cast_cache: dict[str, ExplicitCastMap] = {}
 
-    def explicit_cast_lookup(version: ScriptVersion) -> tuple[dict[int, list[str]], dict[str, list[str]]]:
+    def explicit_cast_lookup(version: ScriptVersion) -> ExplicitCastMap:
         if version.id in explicit_cast_cache:
             return explicit_cast_cache[version.id]
         by_idx: dict[int, list[str]] = {}
-        by_title: dict[str, list[str]] = {}
+        by_scene_and_title: dict[tuple[str, str], list[str]] = {}
+        by_scene_and_order: dict[tuple[int, int], list[str]] = {}
+        by_unique_title: dict[str, list[str]] = {}
+        title_occurrences: Counter[str] = Counter()
+
         text = version.source_text or source_text or ""
         if text:
             try:
                 parsed = parse_structured_screenplay(text)
                 if parsed and parsed.get("scenes"):
-                    all_parsed_shots = [sh for sc in parsed["scenes"] for sh in sc.get("shots", [])]
-                    for idx, ps in enumerate(all_parsed_shots):
-                        if ps.get("explicit_cast") is not None:
-                            by_idx[idx] = ps["explicit_cast"]
-                            if ps.get("title"):
-                                by_title[ps["title"].strip().upper()] = ps["explicit_cast"]
+                    global_idx = 0
+                    for sc_idx, sc in enumerate(parsed["scenes"]):
+                        sc_title = (sc.get("title") or "").strip().upper()
+                        for sh_idx, ps in enumerate(sc.get("shots", [])):
+                            sh_title = (ps.get("title") or "").strip().upper()
+                            if sh_title:
+                                title_occurrences[sh_title] += 1
+                            if ps.get("explicit_cast") is not None:
+                                by_idx[global_idx] = ps["explicit_cast"]
+                                by_scene_and_order[(sc_idx, sh_idx)] = ps["explicit_cast"]
+                                if sc_title and sh_title:
+                                    by_scene_and_title[(sc_title, sh_title)] = ps["explicit_cast"]
+                            global_idx += 1
+
+                    for sc in parsed["scenes"]:
+                        for ps in sc.get("shots", []):
+                            sh_title = (ps.get("title") or "").strip().upper()
+                            if (
+                                sh_title
+                                and title_occurrences[sh_title] == 1
+                                and ps.get("explicit_cast") is not None
+                            ):
+                                by_unique_title[sh_title] = ps["explicit_cast"]
             except Exception:
                 pass
-        explicit_cast_cache[version.id] = (by_idx, by_title)
-        return by_idx, by_title
+        result = (by_idx, by_scene_and_title, by_scene_and_order, by_unique_title)
+        explicit_cast_cache[version.id] = result
+        return result
 
     shot_idx_by_version: dict[str, int] = {}
     for scene in _latest_version_scenes(project, db):
         version = scene.script_version
-        explicit_cast_by_shot_idx, explicit_cast_by_shot_title = explicit_cast_lookup(version)
-        for shot in scene.shots:
+        if not version:
+            continue
+        (
+            by_idx,
+            by_scene_and_title,
+            by_scene_and_order,
+            by_unique_title,
+        ) = explicit_cast_lookup(version)
+
+        sc_title = (scene.title or "").strip().upper()
+        sc_idx = getattr(scene, "order_index", 0)
+
+        shots = sorted(scene.shots, key=lambda s: getattr(s, "order_index", 0))
+        for sh_idx, shot in enumerate(shots):
             shot_idx = shot_idx_by_version.get(version.id, 0)
             shot_idx_by_version[version.id] = shot_idx + 1
             dialogue_names, haystack = shot_mentioned_names(shot)
             for name in dialogue_names:
                 _ensure_character(db, project.id, by_name, name)
 
+            sh_title = (shot.title or "").strip().upper()
             explicit = None
             if getattr(shot, "explicit_cast", None) is not None:
                 explicit = shot.explicit_cast
-            elif shot.title and shot.title.strip().upper() in explicit_cast_by_shot_title:
-                explicit = explicit_cast_by_shot_title[shot.title.strip().upper()]
-            elif shot_idx in explicit_cast_by_shot_idx:
-                explicit = explicit_cast_by_shot_idx[shot_idx]
+            elif sh_title and (sc_title, sh_title) in by_scene_and_title:
+                explicit = by_scene_and_title[(sc_title, sh_title)]
+            elif (sc_idx, getattr(shot, "order_index", sh_idx)) in by_scene_and_order:
+                explicit = by_scene_and_order[(sc_idx, getattr(shot, "order_index", sh_idx))]
+            elif shot_idx in by_idx:
+                explicit = by_idx[shot_idx]
+            elif sh_title and sh_title in by_unique_title:
+                explicit = by_unique_title[sh_title]
 
             if explicit is not None:
                 for name in explicit:
                     _ensure_character(db, project.id, by_name, name)
                 if tag_shots:
-                    shot.character_ids = match_explicit_character_ids(
+                    new_ids = match_explicit_character_ids(
                         unique_chars(), explicit
                     )
+                    if shot.character_ids != new_ids:
+                        shot.character_ids = new_ids
+                        shot.continuity_snapshot = None
             elif tag_shots:
-                shot.character_ids = match_character_ids(
+                new_ids = match_character_ids(
                     unique_chars(), dialogue_names, haystack
                 )
+                if shot.character_ids != new_ids:
+                    shot.character_ids = new_ids
+                    shot.continuity_snapshot = None
 
     sync_project_elements(project, db)
     db.flush()
