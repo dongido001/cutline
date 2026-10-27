@@ -2012,6 +2012,12 @@ def _generate_shot_clip(
                         db.commit()
                 except Exception:
                     db.rollback()
+                try:
+                    base_url = settings.flowkit_base_url.rstrip("/")
+                    with httpx.Client(timeout=10.0) as client:
+                        client.post(f"{base_url}/reset-session")
+                except Exception:
+                    pass
             job = db.get(Job, job_id)
             if preserve_cancelled(job):
                 return

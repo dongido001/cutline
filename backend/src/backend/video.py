@@ -282,36 +282,47 @@ def generate_flowkit_clip(
     initial_project_id = (flow_project_id or "").strip() or settings.flowkit_project_id
 
     with httpx.Client(timeout=settings.flowkit_timeout_seconds) as client:
-        upload = client.post(
-            f"{base_url}/upload-image",
-            json={
-                "image_base64": image_base64,
-                "mime_type": mime_type,
-                "file_name": primary_path.name,
-                "project_id": initial_project_id,
-            },
-        )
-        if (
-            getattr(upload, "status_code", 200) >= 400
-            and flow_project_id
-            and not settings.flowkit_project_id
-        ):
-            initial_project_id = ""
-            upload = client.post(
+        def _upload_primary(force_fresh_session: bool = False) -> tuple[str, str]:
+            nonlocal initial_project_id
+            if force_fresh_session:
+                initial_project_id = ""
+                try:
+                    client.post(f"{base_url}/reset-session", timeout=10.0)
+                except Exception:
+                    pass
+            upload_resp = client.post(
                 f"{base_url}/upload-image",
                 json={
                     "image_base64": image_base64,
                     "mime_type": mime_type,
                     "file_name": primary_path.name,
-                    "project_id": "",
+                    "project_id": initial_project_id,
                 },
             )
-        upload.raise_for_status()
-        uploaded = upload.json()
-        media_id = uploaded.get("media_id")
-        project_id = uploaded.get("project_id") or initial_project_id
-        if not media_id:
-            raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded}")
+            if (
+                getattr(upload_resp, "status_code", 200) >= 400
+                and initial_project_id
+                and not settings.flowkit_project_id
+            ):
+                initial_project_id = ""
+                upload_resp = client.post(
+                    f"{base_url}/upload-image",
+                    json={
+                        "image_base64": image_base64,
+                        "mime_type": mime_type,
+                        "file_name": primary_path.name,
+                        "project_id": "",
+                    },
+                )
+            upload_resp.raise_for_status()
+            uploaded_data = upload_resp.json()
+            up_media_id = uploaded_data.get("media_id")
+            up_project_id = uploaded_data.get("project_id") or initial_project_id
+            if not up_media_id:
+                raise RuntimeError(f"FlowKit image upload returned no media_id: {uploaded_data}")
+            return str(up_media_id), str(up_project_id)
+
+        media_id, project_id = _upload_primary()
 
         extra_media_ids: list[str] = []
         for ref_path in extra_paths:
@@ -530,11 +541,24 @@ def generate_flowkit_clip(
                                 duration_ms,
                                 model_family=active_model_family,
                             )
+                            try:
+                                media_id, project_id = _upload_primary(force_fresh_session=True)
+                            except Exception:
+                                pass
                             discarded_for_fallback = True
                             break
                         if has_fallback and is_discarded:
+                            try:
+                                media_id, project_id = _upload_primary(force_fresh_session=True)
+                            except Exception:
+                                pass
                             discarded_for_fallback = True
                             break
+                        if is_discarded:
+                            try:
+                                client.post(f"{base_url}/reset-session", timeout=10.0)
+                            except Exception:
+                                pass
                         raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")
                     media_info = result.get("media") if isinstance(result.get("media"), dict) else {}
                     operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
