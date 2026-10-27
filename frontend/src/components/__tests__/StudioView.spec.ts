@@ -265,6 +265,38 @@ describe('StudioView', () => {
     wrapper.unmount()
   })
 
+  it('corrects a stale scene query when opening a shot link', async () => {
+    vi.spyOn(api, 'project').mockImplementation(async () => {
+      const project = JSON.parse(JSON.stringify(fixture)) as ProjectDetail
+      project.current_version!.scenes.push({
+        ...project.current_version!.scenes[0]!,
+        id: 'demo-2',
+        order_index: 1,
+        title: 'INT. OFFICE - DAY',
+        location: 'INT. OFFICE',
+        shots: [{
+          ...project.current_version!.scenes[0]!.shots[0]!,
+          id: 'shot-3',
+          order_index: 0,
+          title: 'Office wide',
+        }],
+      })
+      return project
+    })
+    const router = createRouter({ history: createMemoryHistory(), routes: routes() })
+    await router.push('/projects/project-1/shots/shot-1?scene=demo-2&episode=ep-1&aspect=16:9')
+    await router.isReady()
+
+    const wrapper = mount(StudioView, { global: { plugins: [createPinia(), router] } })
+    await flushPromises()
+
+    expect(router.currentRoute.value.params.shotId).toBe('shot-1')
+    expect(router.currentRoute.value.query.scene).toBe('demo-1')
+    expect(router.currentRoute.value.query.episode).toBe('ep-1')
+    expect(router.currentRoute.value.query.aspect).toBe('16:9')
+    wrapper.unmount()
+  })
+
   it('opens and closes the shot notes drawer from the header button', async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: routes() })
     await router.push('/projects/project-1/shots/shot-1')

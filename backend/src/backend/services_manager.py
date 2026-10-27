@@ -131,12 +131,13 @@ class ServiceDefinition:
             pid = _find_pid_by_port(self.port)
             if pid:
                 return [pid]
+        pids: List[int] = []
         owned = self._owned_pids()
         if owned:
-            return owned
+            pids.extend(owned)
         if self.pattern:
-            return _find_pids_by_pattern(self.pattern)
-        return []
+            pids.extend(_find_pids_by_pattern(self.pattern))
+        return list(dict.fromkeys(pids))
 
     def check_health(self) -> Dict[str, Any]:
         pids = self.get_pids()

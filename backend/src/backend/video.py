@@ -346,6 +346,12 @@ def generate_flowkit_clip(
             attempt_extra_sets.append(extra_media_ids[:1])
         if extra_media_ids:
             attempt_extra_sets.append([])
+        # Some Flow accounts accept an Omni Flash request, then discard the
+        # operation as soon as it is polled (failed: [5]). Keep one final
+        # opening-frame-only attempt available so that case can fall back to
+        # standard Veo instead of asking the user to regenerate repeatedly.
+        if active_model_family == "omni_flash" and not is_r2v:
+            attempt_extra_sets.append([])
 
         deadline = time.monotonic() + settings.flowkit_timeout_seconds
         for attempt_idx, current_extra_ids in enumerate(attempt_extra_sets):
@@ -511,11 +517,22 @@ def generate_flowkit_clip(
                             or "media not found" in err_lower
                             or "failed: [5]" in err_lower
                         )
-                        if has_fallback and is_discarded:
+                        if (
+                            is_discarded
+                            and active_model_family == "omni_flash"
+                            and not is_r2v
+                            and not current_extra_ids
+                            and has_fallback
+                        ):
+                            active_model_family = "veo"
+                            _sync_flowkit_veo_model_key("veo_3_1_i2v_lite")
+                            duration_s = flow_clip_duration_seconds(
+                                duration_ms,
+                                model_family=active_model_family,
+                            )
                             discarded_for_fallback = True
                             break
-                        if is_discarded and active_model_family == "omni_flash" and duration_s > 4:
-                            duration_s = 4
+                        if has_fallback and is_discarded:
                             discarded_for_fallback = True
                             break
                         raise RuntimeError(f"Google Flow video generation failed: {err_val or status_val}")

@@ -640,4 +640,97 @@ def test_flowkit_multi_reference_discard_falls_back_cleanly(monkeypatch, tmp_pat
     ]
 
 
+def test_flowkit_omni_discard_falls_back_to_standard_veo(monkeypatch, tmp_path):
+    from backend import video
+
+    submitted_models: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload=None, content=b"video-bytes"):
+            self._payload = payload or {}
+            self.content = content
+            self.headers = {"content-type": "video/mp4"}
+            self.status_code = 200
+
+        @property
+        def is_success(self):
+            return True
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self):
+            self.attempt = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, json=None):
+            if url.endswith("/upload-image"):
+                return FakeResponse({"media_id": "opening-frame", "project_id": "flow-project"})
+            if url.endswith("/generate-video"):
+                self.attempt += 1
+                submitted_models.append(json["model_family"])
+                return FakeResponse({
+                    "project_id": "flow-project",
+                    "operations": [{"name": f"operation-{self.attempt}"}],
+                })
+            if url.endswith("/check-status"):
+                if self.attempt == 1:
+                    return FakeResponse({
+                        "done": True,
+                        "results": [{
+                            "status": "MEDIA_GENERATION_STATUS_FAILED",
+                            "error": "Google Flow discarded operation or media expired (failed: [5])",
+                        }],
+                    })
+                return FakeResponse({
+                    "done": True,
+                    "results": [{
+                        "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                        "video_url": "https://example.test/video.mp4",
+                    }],
+                })
+            raise AssertionError(url)
+
+        def get(self, url):
+            assert url == "https://example.test/video.mp4"
+            return FakeResponse()
+
+    monkeypatch.setattr(video.httpx, "Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(video.settings, "data_dir", tmp_path)
+    video.settings.media_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(video.settings, "flowkit_base_url", "http://flowkit.test/api/flow")
+    monkeypatch.setattr(video.settings, "flowkit_project_id", "")
+    monkeypatch.setattr(video.settings, "flowkit_model_family", "omni_flash")
+    monkeypatch.setattr(video, "get_active_flowkit_preset", lambda: {
+        "model_family": "omni_flash",
+        "flow_model_key": "abra_i2v_*",
+    })
+    monkeypatch.setattr(video, "_sync_flowkit_veo_model_key", lambda _key: None)
+
+    frame_path = tmp_path / "frame.png"
+    frame_path.write_bytes(b"frame")
+
+    filename, mime, provider = video.generate_flowkit_clip(
+        image_path=frame_path,
+        prompt="The man looks up and gasps",
+        duration_ms=4000,
+        aspect_ratio="16:9",
+        scene_id="scene-courtyard",
+    )
+
+    assert submitted_models == ["omni_flash", "veo"]
+    assert mime == "video/mp4"
+    assert provider == "flowkit"
+    assert (video.settings.media_dir / filename).read_bytes() == b"video-bytes"
+
+
 

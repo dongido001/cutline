@@ -1140,7 +1140,17 @@ watch([() => route.params.shotId, allShots, activeStage], ([shotId, shots, stage
   const requestedShot = hasShotParam ? shots.find((shot) => shot.id === shotId) : undefined
   if (hasShotParam) {
     activeShotId.value = requestedShot?.id ?? (shots.length === 0 ? shotId : shots[0]?.id ?? null)
-    if (requestedShot) store.focusShotId = requestedShot.id
+    if (requestedShot) {
+      store.focusShotId = requestedShot.id
+      const requestedSceneIndex = scenes.value.findIndex((scene) => scene.shots.some((shot) => shot.id === requestedShot.id))
+      if (requestedSceneIndex >= 0) {
+        activeScene.value = requestedSceneIndex
+        const requestedSceneId = scenes.value[requestedSceneIndex]?.id
+        if (requestedSceneId && route.query.scene !== requestedSceneId) {
+          void router.replace({ query: buildSyncedQuery({ scene: requestedSceneId }) })
+        }
+      }
+    }
     produceDetailOpen.value = true
     // Only replace route if shots have loaded and the project is initialized, and the requested shot is truly missing
     if (shots.length > 0 && requestedShot?.id !== shotId && activeShotId.value && store.currentProject) {
@@ -1575,7 +1585,12 @@ function projectRoute(projectId: string, stage: ProductionStage, shotId?: string
   const query: Record<string, string> = {}
   const sameProject = store.currentProject?.id === projectId
   if (sameProject) {
-    if (typeof route.query.scene === 'string' && scenes.value.some((scene) => scene.id === route.query.scene)) {
+    const shotScene = shotId
+      ? scenes.value.find((scene) => scene.shots.some((shot) => shot.id === shotId))
+      : undefined
+    if (shotScene) {
+      query.scene = shotScene.id
+    } else if (typeof route.query.scene === 'string' && scenes.value.some((scene) => scene.id === route.query.scene)) {
       query.scene = route.query.scene
     }
     if (store.currentEpisodeId) query.episode = store.currentEpisodeId
